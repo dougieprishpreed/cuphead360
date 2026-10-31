@@ -1,3 +1,32 @@
+## Flower boss scene boot (2026-10-31)
+
+Added the generic `AbstractLevelProperties<TState,...>.CurrentState` getter
+(array or list backed) and explicit most-derived `PartialInit` dispatch after
+`Level.Awake`. This lets levels whose properties are created by `PartialInit`
+(Flower) initialize their state machine.
+
+Extracted and ran `scene_level_flower`:
+
+```
+python tools\extract_scene.py --game game\Cuphead_Data ^
+  --scene scene_level_flower --out work\extract_flower --add-level-resources
+
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_flower\scene.chs --level --headless
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_flower\scene.chs --levelplay --frames 30 --headless
+```
+
+Observed:
+
+```
+[INFO] [level] result=PASS
+[INFO] [levelplay] start=-410.0,-195.0 max_x=375.0 max_y=-87.2 min_y=-199.5 collisions=693 result=PASS
+```
+
+Tutorial and Frogs regressions remain PASS after the change. Boss attacks and
+phase logic are still not validated.
+
 ## Frogs boss scene boot (2026-10-31)
 
 Fixed the content pipeline to skip Unity `Dictionary`/`HashSet` fields that
