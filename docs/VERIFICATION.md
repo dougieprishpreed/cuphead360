@@ -166,6 +166,11 @@ This is not a validated visual slice.
   passed before the newest runtime changes. The most recent Xenia run reached
   frame 90 before the background harness ended, so full big-endian
   revalidation of the newest changes is still pending.
+- The original `--level` flow is blocked: `TutorialLevel.Awake` stops at
+  `Cuphead.Init -> Resources.Load` plus `Object.Instantiate`, and
+  `TutorialLevel.Start` stops at a null `LevelResources.levelAudio`
+  (`LevelAudio.Create`). A prefab/resource instantiation pipeline and
+  LevelResources binding are not implemented.
 - The original player motor moves and grounds on Windows
   (`motor moved ... PASS`). Its rendered mode (`--motorplay`) draws an
   animated Cuphead in the tutorial scene with camera follow after loading

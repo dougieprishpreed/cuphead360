@@ -106,6 +106,23 @@ visually validated playable slice is the native tutorial movement slice,
 which uses original sprites and the original velocity calculation but native
 jump/dash/collision scaffolding rather than the full original controller.
 
+## Real level-flow blockers (measured)
+
+`--level` invokes the original `TutorialLevel.Awake` and `TutorialLevel.Start`
+on the extracted scene. Current results:
+
+- `Level.Awake` stops at `Cuphead.Init -> Resources.Load<Cuphead>("Core/CupheadCore")`
+  followed by `UnityEngine.Object.Instantiate`. Prefab/resource instantiation
+  is not implemented.
+- `Level.Start` stops at `LevelAudio.Create -> Level.Current.LevelResources.levelAudio`
+  because the serialized `LevelResources` reference is null in the converted
+  scene (the asset and its prefab graph are not included).
+
+These are the next foundational blockers for real level flow: a prefab /
+Resources asset pipeline, `Object.Instantiate`, and proper `LevelResources`
+binding. They are larger than the scene-script bridge and are not yet
+implemented.
+
 ## Validation commands
 
 ```

@@ -774,6 +774,48 @@ static int RunStackTest(MetadataPackage& pkg, const AppConfig& config, bool driv
     return pass ? 0 : 1;
 }
 
+static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config) {
+    if (!config.scene_path) {
+        LogError("level", "no scene path");
+        return 1;
+    }
+    Scene scene;
+    if (!scene.Load(config.scene_path)) {
+        LogError("level", "scene load failed");
+        return 1;
+    }
+    Interpreter interp(pkg);
+    if (!interp.Init() || !interp.BindScene(scene, true)) {
+        LogError("level", "interpreter/bind failed");
+        return 1;
+    }
+    u32 level_type = pkg.FindType("TutorialLevel");
+    u32 level_ci = 0xFFFFFFFFu;
+    for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+        const SceneComponent& comp = scene.Component(ci);
+        if (comp.type == 4 && strcmp(comp.controller, "TutorialLevel") == 0) {
+            level_ci = ci;
+            break;
+        }
+    }
+    if (!level_type || level_ci == 0xFFFFFFFFu) {
+        LogError("level", "TutorialLevel component not found");
+        return 1;
+    }
+    Value level = interp.ManagedComponent(level_ci);
+    u32 awake = FindMethodInHierarchy(pkg, level_type, "Awake");
+    u32 start = FindMethodInHierarchy(pkg, level_type, "Start");
+    Value r;
+    bool awake_ok = awake && InvokeOnComponent(interp, awake, level, &r);
+    LogInfo("level", "TutorialLevel.Awake %s (last_error=%u)",
+            awake_ok ? "PASS" : "FAIL", interp.LastError());
+    bool start_ok = start && InvokeOnComponent(interp, start, level, &r);
+    LogInfo("level", "TutorialLevel.Start %s (last_error=%u)",
+            start_ok ? "PASS" : "FAIL", interp.LastError());
+    LogInfo("level", "result=%s", (awake_ok && start_ok) ? "PASS" : "FAIL");
+    return (awake_ok && start_ok) ? 0 : 1;
+}
+
 static int RunPlay(const AppConfig& config, MetadataPackage& pkg) {
     if (!config.scene_path) {
         LogError("play", "no scene path");
@@ -1110,6 +1152,7 @@ int AppMain(const AppConfig& config) {
                             strcmp(config.command, "stack") == 0 ||
                             strcmp(config.command, "motor") == 0 ||
                             strcmp(config.command, "motorplay") == 0 ||
+                            strcmp(config.command, "level") == 0 ||
                             strcmp(config.command, "play") == 0));
     const char* metadata_path = config.metadata_path;
 #if defined(_XBOX)
@@ -1165,6 +1208,13 @@ int AppMain(const AppConfig& config) {
             result = 1;
         } else {
             result = RunStackTest(metadata, config, true, true);
+        }
+    } else if (config.command && strcmp(config.command, "level") == 0) {
+        if (!metadata.IsLoaded() || !config.scene_path) {
+            LogError("level", "metadata and scene required");
+            result = 1;
+        } else {
+            result = RunLevelTest(metadata, config);
         }
     } else if (config.command && strcmp(config.command, "scene") == 0) {
         result = RunScene(config);
