@@ -127,7 +127,10 @@ Interpreter::Interpreter(MetadataPackage& metadata)
     : metadata_(metadata), trace_(false), last_error_(0),
       string_type_id_(0), object_type_id_(0), int32_type_id_(0),
       single_type_id_(0), bool_type_id_(0), void_type_id_(0),
-      array_type_id_(0), exception_type_id_(0), mathf_type_id_(0) {}
+      array_type_id_(0), exception_type_id_(0), mathf_type_id_(0),
+      gameobject_type_id_(0), transform_type_id_(0), component_type_id_(0),
+      monobehaviour_type_id_(0), sprite_renderer_type_id_(0), animator_type_id_(0),
+      scene_(0) {}
 
 Interpreter::~Interpreter() {
     Shutdown();
@@ -214,6 +217,12 @@ bool Interpreter::BuildRuntimeTypes() {
     array_type_id_ = metadata_.FindType("System.Array");
     exception_type_id_ = metadata_.FindType("System.Exception");
     mathf_type_id_ = metadata_.FindType("UnityEngine.Mathf");
+    gameobject_type_id_ = metadata_.FindType("UnityEngine.GameObject");
+    transform_type_id_ = metadata_.FindType("UnityEngine.Transform");
+    component_type_id_ = metadata_.FindType("UnityEngine.Component");
+    monobehaviour_type_id_ = metadata_.FindType("UnityEngine.MonoBehaviour");
+    sprite_renderer_type_id_ = metadata_.FindType("UnityEngine.SpriteRenderer");
+    animator_type_id_ = metadata_.FindType("UnityEngine.Animator");
     return true;
 }
 

@@ -8,6 +8,8 @@
 
 namespace ch360 {
 
+class Scene;
+
 struct TypeRuntime {
     u32 total_slots;
     u32 static_slots;
@@ -73,8 +75,23 @@ public:
     static f64 ToF64(const Value& v);
     static bool ToBool(const Value& v);
 
-    // Native method registration (implemented in native.cpp).
+    // Native method registration (implemented in native.cpp / unity_bind.cpp).
     bool InvokeNative(const MemberRefInfo& member, u32 arg_count, Value* args, Value* ret);
+
+    // Binds a loaded scene to managed UnityEngine.GameObject/Transform/
+    // Component objects. Native Unity methods use these mappings.
+    bool BindScene(Scene& scene);
+    Scene* BoundScene() const { return scene_; }
+    Value ManagedGameObject(u32 object_index) const;
+    Value ManagedTransform(u32 object_index) const;
+    Value ManagedComponent(u32 component_index) const;
+    u32 ManagedObjectIndexFor(const Value& v) const;
+    u32 ManagedComponentIndexFor(const Value& v) const;
+    void AddManagedBinding(Object* obj, u32 object_index, u32 component_index);
+    u32 GameObjectTypeId() const { return gameobject_type_id_; }
+    u32 TransformTypeId() const { return transform_type_id_; }
+    u32 ComponentTypeId() const { return component_type_id_; }
+    u32 MonoBehaviourTypeId() const { return monobehaviour_type_id_; }
 
     // Runtime field access used by native bindings and the engine.
     Value GetField(u32 field_id, const Value& instance, bool* ok = 0);
@@ -121,9 +138,30 @@ private:
     u32 array_type_id_;
     u32 exception_type_id_;
     u32 mathf_type_id_;
+    u32 gameobject_type_id_;
+    u32 transform_type_id_;
+    u32 component_type_id_;
+    u32 monobehaviour_type_id_;
+    u32 sprite_renderer_type_id_;
+    u32 animator_type_id_;
+
+    Scene* scene_;
+    Buffer<Value> managed_gameobjects_;
+    Buffer<Value> managed_transforms_;
+    Buffer<Value> managed_components_;
+
+    struct ManagedBinding {
+        Object* obj;
+        u32 object_index;
+        u32 component_index;
+    };
+    Buffer<ManagedBinding> bindings_;
 
     friend struct NativeContext;
 };
+
+bool InvokeUnityNative(Interpreter& interp, const MemberRefInfo& member,
+                       u32 arg_count, Value* args, Value* ret);
 
 } // namespace ch360
 

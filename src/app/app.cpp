@@ -177,6 +177,80 @@ static float InvokeEase3(Interpreter& interp, MetadataPackage& pkg, const char* 
     return ret.data.f32;
 }
 
+static int RunUnityTest(MetadataPackage& pkg, const AppConfig& config) {
+    if (!config.scene_path) {
+        LogError("unity", "no scene path");
+        return 1;
+    }
+    Scene scene;
+    if (!scene.Load(config.scene_path)) return 1;
+    Interpreter interp(pkg);
+    if (!interp.Init() || !interp.BindScene(scene)) {
+        LogError("unity", "interpreter/bind failed");
+        return 1;
+    }
+    // Pick an object with a non-identity local scale so the reset is visible.
+    u32 oi = 0;
+    for (u32 i = 0; i < scene.ObjectCount(); ++i) {
+        const SceneObject& o = scene.Object(i);
+        if (o.scale[0] != 1.0f || o.scale[1] != 1.0f) { oi = i; break; }
+    }
+    const SceneObject& before = scene.Object(oi);
+    LogInfo("unity", "object '%s' before pos=%.2f,%.2f scale=%.2f,%.2f",
+            before.name, before.position[0], before.position[1], before.scale[0], before.scale[1]);
+    u32 ext = pkg.FindType("TransformExtensions");
+    u32 method = pkg.FindMethod(ext, "ResetLocalTransforms");
+    if (!method) {
+        LogError("unity", "TransformExtensions.ResetLocalTransforms not found");
+        return 1;
+    }
+    Value args[1];
+    args[0] = interp.ManagedTransform(oi);
+    Value ret;
+    bool ok = interp.Invoke(method, args, 1, &ret);
+    const SceneObject& after = scene.Object(oi);
+    bool pass = ok && after.position[0] == 0.0f && after.position[1] == 0.0f &&
+                after.scale[0] == 1.0f && after.scale[1] == 1.0f;
+    LogInfo("unity", "ResetLocalTransforms after pos=%.2f,%.2f scale=%.2f,%.2f %s",
+            after.position[0], after.position[1], after.scale[0], after.scale[1],
+            pass ? "PASS" : "FAIL");
+
+    // Invoke an original MonoBehaviour lifecycle method on a bound script
+    // object. AnimationHelper.Update only touches its bool when autoUpdate is
+    // false, making it a safe first lifecycle check.
+    u32 helper_type = pkg.FindType("AnimationHelper");
+    u32 helper_update = pkg.FindMethod(helper_type, "Update");
+    bool lifecycle_ok = false;
+    if (helper_type && helper_update) {
+        for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+            const SceneComponent& comp = scene.Component(ci);
+            if (comp.type != 4 || strcmp(comp.controller, "AnimationHelper") != 0) continue;
+            Value obj = interp.ManagedComponent(ci);
+            if (obj.tag != VT_OBJECT) continue;
+            Value args[1]; args[0] = obj; Value r;
+            lifecycle_ok = interp.Invoke(helper_update, args, 1, &r);
+            break;
+        }
+    }
+    LogInfo("unity", "AnimationHelper.Update %s", lifecycle_ok ? "PASS" : "FAIL");
+    if (!lifecycle_ok) pass = false;
+
+    // AbstractMonoBehaviour.Awake on a PlayerDebug instance (base-only Awake
+    // sets useGUILayout; no scene references required).
+    u32 dbg_type = pkg.FindType("PlayerDebug");
+    u32 base_type = pkg.FindType("AbstractMonoBehaviour");
+    u32 awake = pkg.FindMethod(base_type, "Awake");
+    if (dbg_type && awake) {
+        Value obj = interp.NewObjectValue(dbg_type);
+        Value args[1]; args[0] = obj; Value r;
+        bool aok = interp.Invoke(awake, args, 1, &r);
+        LogInfo("unity", "AbstractMonoBehaviour.Awake %s", aok ? "PASS" : "FAIL");
+        if (!aok) pass = false;
+    }
+
+    return pass ? 0 : 1;
+}
+
 static void RunLogicTest(MetadataPackage& pkg) {
     Interpreter interp(pkg);
     if (!interp.Init()) {
@@ -399,7 +473,8 @@ int AppMain(const AppConfig& config) {
     MetadataPackage metadata;
     bool wants_metadata = config.metadata_path != 0 ||
         (config.command && (strcmp(config.command, "inspect") == 0 ||
-                            strcmp(config.command, "logic") == 0));
+                            strcmp(config.command, "logic") == 0 ||
+                            strcmp(config.command, "unity") == 0));
     const char* metadata_path = config.metadata_path;
 #if defined(_XBOX)
     if (!metadata_path && wants_metadata) metadata_path = "game:\\GameData\\metadata.chm";
@@ -419,6 +494,13 @@ int AppMain(const AppConfig& config) {
             result = 1;
         } else {
             InspectMetadata(metadata);
+        }
+    } else if (config.command && strcmp(config.command, "unity") == 0) {
+        if (!metadata.IsLoaded() || !config.scene_path) {
+            LogError("unity", "metadata and scene required");
+            result = 1;
+        } else {
+            result = RunUnityTest(metadata, config);
         }
     } else if (config.command && strcmp(config.command, "scene") == 0) {
         result = RunScene(config);

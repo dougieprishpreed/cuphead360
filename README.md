@@ -20,7 +20,10 @@ Foundation plus first executable vertical slices. The current build:
   XEX under Xenia;
 - extracts real scenes, sprites, and sprite animation tracks from the user's
   game data and renders them with the same shared software renderer on
-  Windows and Xbox 360.
+  Windows and Xbox 360;
+- binds scene GameObjects/Transforms/components to managed objects and
+  executes original `TransformExtensions`, `AnimationHelper.Update`, and
+  `AbstractMonoBehaviour.Awake` logic against them.
 
 It is **not** yet a playable Cuphead port. See
 [docs/PROGRESS.md](docs/PROGRESS.md) for exactly what compiles, executes, and

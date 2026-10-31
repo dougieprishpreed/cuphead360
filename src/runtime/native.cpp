@@ -606,6 +606,9 @@ bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value
             return kEntries[i].fn(*this, member, arg_count, args, ret);
         }
     }
+    if (strncmp(t.full_name, "UnityEngine.", 12) == 0) {
+        return InvokeUnityNative(*this, member, arg_count, args, ret);
+    }
     LogError("native", "unimplemented native method %s::%s (argc=%u)",
              t.full_name, member.name, arg_count);
     return false;

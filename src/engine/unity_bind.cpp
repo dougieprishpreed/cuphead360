@@ -1,0 +1,429 @@
+#include "runtime/interpreter.h"
+#include "engine/scene.h"
+#include "core/log.h"
+#include "core/mem.h"
+
+#include <math.h>
+#include <string.h>
+
+namespace ch360 {
+
+static bool RetVoid(Value* ret) { if (ret) *ret = Value::Void(); return true; }
+static bool RetBoolV(Value* ret, bool v) { if (ret) *ret = Value::Bool(v); return true; }
+static bool RetI32V(Value* ret, s32 v) { if (ret) *ret = Value::I4(v); return true; }
+static bool RetF32V(Value* ret, f32 v) { if (ret) *ret = Value::R4(v); return true; }
+static bool RetVec3V(Interpreter& in, Value* ret, f32 x, f32 y, f32 z) {
+    if (ret) *ret = in.NewVec3(x, y, z);
+    return true;
+}
+
+static u32 ManagedObjectIndex(const Interpreter& in, const Value& v) {
+    return in.ManagedObjectIndexFor(v);
+}
+
+static u32 ManagedComponentIndex(const Interpreter& in, const Value& v) {
+    return in.ManagedComponentIndexFor(v);
+}
+
+static Value ManagedGameObjectForComponent(Interpreter& in, const Value& c) {
+    u32 oi = ManagedObjectIndex(in, c);
+    return in.ManagedGameObject(oi);
+}
+
+static Value ManagedTransformForObject(Interpreter& in, const Value& go) {
+    u32 oi = ManagedObjectIndex(in, go);
+    return in.ManagedTransform(oi);
+}
+
+static u32 FindObjectIndexById(const Scene& scene, u32 id) {
+    for (u32 i = 0; i < scene.ObjectCount(); ++i) {
+        if (scene.Object(i).id == id) return i;
+    }
+    return 0xFFFFFFFFu;
+}
+
+Value Interpreter::ManagedGameObject(u32 object_index) const {
+    if (object_index >= managed_gameobjects_.Size()) return Value::Null();
+    return managed_gameobjects_[object_index];
+}
+Value Interpreter::ManagedTransform(u32 object_index) const {
+    if (object_index >= managed_transforms_.Size()) return Value::Null();
+    return managed_transforms_[object_index];
+}
+Value Interpreter::ManagedComponent(u32 component_index) const {
+    if (component_index >= managed_components_.Size()) return Value::Null();
+    return managed_components_[component_index];
+}
+
+void Interpreter::AddManagedBinding(Object* obj, u32 object_index, u32 component_index) {
+    if (!obj) return;
+    ManagedBinding b;
+    b.obj = obj;
+    b.object_index = object_index;
+    b.component_index = component_index;
+    bindings_.PushBack(b);
+}
+
+u32 Interpreter::ManagedObjectIndexFor(const Value& v) const {
+    if (v.tag != VT_OBJECT || !v.data.obj) return 0xFFFFFFFFu;
+    for (u32 i = 0; i < bindings_.Size(); ++i) {
+        if (bindings_[i].obj == v.data.obj) return bindings_[i].object_index;
+    }
+    return (u32)v.data.obj->Fields()[0].data.i32;
+}
+
+u32 Interpreter::ManagedComponentIndexFor(const Value& v) const {
+    if (v.tag != VT_OBJECT || !v.data.obj) return 0xFFFFFFFFu;
+    for (u32 i = 0; i < bindings_.Size(); ++i) {
+        if (bindings_[i].obj == v.data.obj) return bindings_[i].component_index;
+    }
+    return (u32)v.data.obj->Fields()[1].data.i32;
+}
+
+bool Interpreter::BindScene(Scene& scene) {
+    scene_ = &scene;
+    managed_gameobjects_.Reset();
+    managed_transforms_.Reset();
+    managed_components_.Reset();
+    bindings_.Reset();
+    if (!managed_gameobjects_.Resize(scene.ObjectCount())) return false;
+    if (!managed_transforms_.Resize(scene.ObjectCount())) return false;
+    if (!managed_components_.Resize(scene.ComponentCount())) return false;
+
+    for (u32 i = 0; i < scene.ObjectCount(); ++i) {
+        Object* go = AllocObjectWithSlots(gameobject_type_id_, 2);
+        Object* tr = AllocObjectWithSlots(transform_type_id_, 2);
+        if (!go || !tr) return false;
+        go->Fields()[0] = Value::I4((s32)i);
+        tr->Fields()[0] = Value::I4((s32)i);
+        go->Fields()[1] = Value::ObjectRef(tr);
+        tr->Fields()[1] = Value::ObjectRef(go);
+        managed_gameobjects_[i] = Value::ObjectRef(go);
+        managed_transforms_[i] = Value::ObjectRef(tr);
+        AddManagedBinding(go, i, 0xFFFFFFFFu);
+        AddManagedBinding(tr, i, 0xFFFFFFFFu);
+    }
+    for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
+        const SceneObject& o = scene.Object(oi);
+        for (u32 c = 0; c < o.component_count; ++c) {
+            u32 ci = o.component_start + c;
+            if (ci >= scene.ComponentCount()) break;
+            const SceneComponent& sc = scene.Component(ci);
+            if (sc.type == 4) {
+                u32 script_type = metadata_.FindType(sc.controller);
+                if (script_type) {
+                    Object* script = AllocObjectWithSlots(script_type, runtime_types_[script_type].total_slots);
+                    if (!script) return false;
+                    AddManagedBinding(script, oi, ci);
+                    managed_components_[ci] = Value::ObjectRef(script);
+                }
+                continue;
+            }
+            u32 type = component_type_id_;
+            if (sc.type == 1) type = sprite_renderer_type_id_;
+            else if (sc.type == 2) type = animator_type_id_;
+            else if (sc.type == 3) type = metadata_.FindType("UnityEngine.Camera");
+            Object* comp = AllocObjectWithSlots(type, 2);
+            if (!comp) return false;
+            comp->Fields()[0] = Value::I4((s32)oi);
+            comp->Fields()[1] = Value::I4((s32)ci);
+            AddManagedBinding(comp, oi, ci);
+            managed_components_[ci] = Value::ObjectRef(comp);
+        }
+    }
+    LogInfo("unity", "bound %u gameobjects, %u components", scene.ObjectCount(), scene.ComponentCount());
+    return true;
+}
+
+static bool Object_GetName(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    if (!in.BoundScene() || oi >= in.BoundScene()->ObjectCount()) return RetVoid(ret);
+    if (ret) *ret = in.NewStringUtf8(in.BoundScene()->Object(oi).name);
+    return true;
+}
+
+static bool GameObject_GetTransform(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (ret) *ret = ManagedTransformForObject(in, a[0]);
+    return true;
+}
+
+static bool Component_GetGameObject(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (ret) *ret = ManagedGameObjectForComponent(in, a[0]);
+    return true;
+}
+
+static bool Component_GetTransform(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (ret) *ret = ManagedTransformForObject(in, ManagedGameObjectForComponent(in, a[0]));
+    return true;
+}
+
+static bool GameObject_GetComponent(Interpreter& in, const MemberRefInfo& member, u32 argc, Value* a, Value* ret) {
+    (void)argc;
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    if (!scene || oi >= scene->ObjectCount()) return false;
+    const MethodSigInfo& ms = in.Metadata().MethodSig(member.sig_index);
+    u32 target = in.Metadata().Sig(ms.return_sig).type_id;
+    if (target == in.TransformTypeId()) {
+        if (ret) *ret = in.ManagedTransform(oi);
+        return true;
+    }
+    const SceneObject& o = scene->Object(oi);
+    for (u32 c = 0; c < o.component_count; ++c) {
+        u32 ci = o.component_start + c;
+        if (ci >= scene->ComponentCount()) break;
+        Value v = in.ManagedComponent(ci);
+        if (v.tag != VT_OBJECT || !v.data.obj) continue;
+        u32 vt = v.data.obj->type_id;
+        bool is_component_base = (target == in.ComponentTypeId() ||
+                                  target == in.MonoBehaviourTypeId());
+        if (in.IsAssignable(vt, target) || vt == target || is_component_base) {
+            if (ret) *ret = v;
+            return true;
+        }
+    }
+    if (ret) *ret = Value::Null();
+    return true;
+}
+
+static bool GameObject_SetActive(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    if (scene && oi < scene->ObjectCount()) {
+        // SceneObject flags are read-only through the public API; keep the
+        // active bit in the managed object's extra slot for now.
+        a[0].data.obj->flags = (a[0].data.obj->flags & ~1u) | (Interpreter::ToBool(a[1]) ? 1u : 0u);
+    }
+    return RetVoid(ret);
+}
+static bool GameObject_GetActiveSelf(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    return RetBoolV(ret, (a[0].data.obj->flags & 1u) != 0);
+}
+
+static bool Behaviour_SetEnabled(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 ci = ManagedComponentIndex(in, a[0]);
+    if (a[0].data.obj) {
+        (void)ci;
+        a[0].data.obj->flags = (a[0].data.obj->flags & ~1u) | (Interpreter::ToBool(a[1]) ? 1u : 0u);
+    }
+    return RetVoid(ret);
+}
+static bool Behaviour_GetEnabled(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    return RetBoolV(ret, (a[0].data.obj->flags & 1u) != 0);
+}
+
+static bool Transform_GetPosition(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    if (!scene || oi >= scene->ObjectCount()) return false;
+    const SceneObject& o = scene->Object(oi);
+    return RetVec3V(in, ret, o.world_x, o.world_y, 0.0f);
+}
+static bool Transform_SetPosition(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    if (!scene || oi >= scene->ObjectCount()) return false;
+    const Value& v = a[1];
+    if (v.tag != VT_VEC3 || !v.data.ptr) return false;
+    const Vec3* p = (const Vec3*)v.data.ptr;
+    SceneObject& o = const_cast<SceneObject&>(scene->Object(oi));
+    o.position[0] = p->x;
+    o.position[1] = p->y;
+    o.position[2] = p->z;
+    scene->ComputeWorldTransforms();
+    return RetVoid(ret);
+}
+static bool Transform_GetLocalPosition(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    if (!scene || oi >= scene->ObjectCount()) return false;
+    const SceneObject& o = scene->Object(oi);
+    return RetVec3V(in, ret, o.position[0], o.position[1], o.position[2]);
+}
+static bool Transform_SetLocalPosition(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    if (!scene || oi >= scene->ObjectCount()) return false;
+    if (a[1].tag != VT_VEC3 || !a[1].data.ptr) return false;
+    const Vec3* p = (const Vec3*)a[1].data.ptr;
+    SceneObject& o = const_cast<SceneObject&>(scene->Object(oi));
+    o.position[0] = p->x;
+    o.position[1] = p->y;
+    o.position[2] = p->z;
+    scene->ComputeWorldTransforms();
+    return RetVoid(ret);
+}
+static bool Transform_GetLocalScale(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    if (!scene || oi >= scene->ObjectCount()) return false;
+    const SceneObject& o = scene->Object(oi);
+    return RetVec3V(in, ret, o.scale[0], o.scale[1], o.scale[2]);
+}
+static bool Transform_SetLocalScale(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    if (!scene || oi >= scene->ObjectCount()) return false;
+    if (a[1].tag != VT_VEC3 || !a[1].data.ptr) return false;
+    const Vec3* p = (const Vec3*)a[1].data.ptr;
+    SceneObject& o = const_cast<SceneObject&>(scene->Object(oi));
+    o.scale[0] = p->x;
+    o.scale[1] = p->y;
+    o.scale[2] = p->z;
+    scene->ComputeWorldTransforms();
+    return RetVoid(ret);
+}
+static bool Transform_GetParent(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    if (!scene || oi >= scene->ObjectCount()) return false;
+    u32 parent = scene->Object(oi).parent;
+    u32 pi = FindObjectIndexById(*scene, parent);
+    if (ret) *ret = pi == 0xFFFFFFFFu ? Value::Null() : in.ManagedTransform(pi);
+    return true;
+}
+static bool Transform_SetParent(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    if (!scene || oi >= scene->ObjectCount()) return false;
+    u32 pi = 0xFFFFFFFFu;
+    if (a[1].tag == VT_OBJECT && a[1].data.obj) pi = ManagedObjectIndex(in, a[1]);
+    SceneObject& o = const_cast<SceneObject&>(scene->Object(oi));
+    o.parent = (pi == 0xFFFFFFFFu) ? 0 : scene->Object(pi).id;
+    scene->ComputeWorldTransforms();
+    return RetVoid(ret);
+}
+
+static bool MonoBehaviour_NoOp(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
+    return RetVoid(ret);
+}
+static bool MonoBehaviour_StartCoroutine(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
+    if (ret) *ret = Value::Null();
+    return true;
+}
+
+static bool Vector3_Ctor(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (ret) *ret = in.NewVec3(a[1].data.f32, a[2].data.f32, a[3].data.f32);
+    return true;
+}
+static bool Vector3_Zero(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    if (ret) *ret = in.NewVec3(0.0f, 0.0f, 0.0f); return true;
+}
+static bool Vector3_One(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    if (ret) *ret = in.NewVec3(1.0f, 1.0f, 1.0f); return true;
+}
+static bool Vector3_Up(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    if (ret) *ret = in.NewVec3(0.0f, 1.0f, 0.0f); return true;
+}
+static bool Vector3_Right(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    if (ret) *ret = in.NewVec3(1.0f, 0.0f, 0.0f); return true;
+}
+static bool Vector3_Add(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag != VT_VEC3 || a[1].tag != VT_VEC3) return false;
+    const Vec3* x = (const Vec3*)a[0].data.ptr;
+    const Vec3* y = (const Vec3*)a[1].data.ptr;
+    if (ret) *ret = in.NewVec3(x->x + y->x, x->y + y->y, x->z + y->z);
+    return true;
+}
+static bool Vector3_Sub(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag != VT_VEC3 || a[1].tag != VT_VEC3) return false;
+    const Vec3* x = (const Vec3*)a[0].data.ptr;
+    const Vec3* y = (const Vec3*)a[1].data.ptr;
+    if (ret) *ret = in.NewVec3(x->x - y->x, x->y - y->y, x->z - y->z);
+    return true;
+}
+static bool Vector3_Mul(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag != VT_VEC3 || !a[0].data.ptr) return false;
+    const Vec3* x = (const Vec3*)a[0].data.ptr;
+    f32 s = a[1].data.f32;
+    if (ret) *ret = in.NewVec3(x->x * s, x->y * s, x->z * s);
+    return true;
+}
+static bool Vector3_ImplicitV2(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag != VT_VEC3 || !a[0].data.ptr) return false;
+    const Vec3* x = (const Vec3*)a[0].data.ptr;
+    if (ret) *ret = in.NewVec2(x->x, x->y);
+    return true;
+}
+static bool Vector2_ImplicitV3(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag != VT_VEC2 || !a[0].data.ptr) return false;
+    const Vec2* x = (const Vec2*)a[0].data.ptr;
+    if (ret) *ret = in.NewVec3(x->x, x->y, 0.0f);
+    return true;
+}
+
+bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, Value* args, Value* ret) {
+    if (ret) *ret = Value::Void();
+    const TypeInfo& t = in.Metadata().Type(member.decl_id);
+    const char* type = t.full_name;
+    const char* n = member.name;
+
+    if (strcmp(type, "UnityEngine.Object") == 0 || strcmp(type, "UnityEngine.Component") == 0 ||
+        strcmp(type, "UnityEngine.Behaviour") == 0 || strcmp(type, "UnityEngine.GameObject") == 0 ||
+        strcmp(type, "UnityEngine.MonoBehaviour") == 0 || strcmp(type, "UnityEngine.SpriteRenderer") == 0 ||
+        strcmp(type, "UnityEngine.Renderer") == 0 || strcmp(type, "UnityEngine.Animator") == 0) {
+        if (strcmp(n, "get_gameObject") == 0) return Component_GetGameObject(in, member, argc, args, ret);
+        if (strcmp(n, "get_transform") == 0) {
+            if (strcmp(type, "UnityEngine.GameObject") == 0) return GameObject_GetTransform(in, member, argc, args, ret);
+            return Component_GetTransform(in, member, argc, args, ret);
+        }
+        if (strcmp(n, "GetComponent") == 0) return GameObject_GetComponent(in, member, argc, args, ret);
+        if (strcmp(n, "SetActive") == 0) return GameObject_SetActive(in, member, argc, args, ret);
+        if (strcmp(n, "get_activeSelf") == 0) return GameObject_GetActiveSelf(in, member, argc, args, ret);
+        if (strcmp(n, "get_name") == 0) return Object_GetName(in, member, argc, args, ret);
+        if (strcmp(n, "set_name") == 0) return RetVoid(ret);
+        if (strcmp(n, "set_enabled") == 0) return Behaviour_SetEnabled(in, member, argc, args, ret);
+        if (strcmp(n, "get_enabled") == 0) return Behaviour_GetEnabled(in, member, argc, args, ret);
+        if (strcmp(n, "set_useGUILayout") == 0 || strcmp(n, "get_useGUILayout") == 0) return RetVoid(ret);
+        if (strcmp(n, "get_tag") == 0 || strcmp(n, "set_tag") == 0) return RetVoid(ret);
+        if (strcmp(n, "StartCoroutine") == 0) return MonoBehaviour_StartCoroutine(in, member, argc, args, ret);
+        if (strcmp(n, "StopCoroutine") == 0 || strcmp(n, "StopAllCoroutines") == 0 ||
+            strcmp(n, "Invoke") == 0 || strcmp(n, ".ctor") == 0) {
+            return MonoBehaviour_NoOp(in, member, argc, args, ret);
+        }
+        if (strcmp(n, "op_Equality") == 0) return RetBoolV(ret, args[0].data.obj == args[1].data.obj);
+        if (strcmp(n, "op_Inequality") == 0) return RetBoolV(ret, args[0].data.obj != args[1].data.obj);
+        if (strcmp(n, "op_Implicit") == 0) return RetBoolV(ret, args[0].data.obj != 0);
+        if (strcmp(n, "Destroy") == 0 || strcmp(n, "DontDestroyOnLoad") == 0) return RetVoid(ret);
+        if (strcmp(n, "Play") == 0 || strcmp(n, "SetTrigger") == 0 || strcmp(n, "SetBool") == 0 ||
+            strcmp(n, "SetInteger") == 0 || strcmp(n, "SetFloat") == 0) {
+            return RetVoid(ret);
+        }
+    }
+    if (strcmp(type, "UnityEngine.Transform") == 0) {
+        if (strcmp(n, "get_position") == 0) return Transform_GetPosition(in, member, argc, args, ret);
+        if (strcmp(n, "set_position") == 0) return Transform_SetPosition(in, member, argc, args, ret);
+        if (strcmp(n, "get_localPosition") == 0) return Transform_GetLocalPosition(in, member, argc, args, ret);
+        if (strcmp(n, "set_localPosition") == 0) return Transform_SetLocalPosition(in, member, argc, args, ret);
+        if (strcmp(n, "get_localScale") == 0) return Transform_GetLocalScale(in, member, argc, args, ret);
+        if (strcmp(n, "set_localScale") == 0) return Transform_SetLocalScale(in, member, argc, args, ret);
+        if (strcmp(n, "get_parent") == 0) return Transform_GetParent(in, member, argc, args, ret);
+        if (strcmp(n, "set_parent") == 0 || strcmp(n, "SetParent") == 0) return Transform_SetParent(in, member, argc, args, ret);
+        if (strcmp(n, "get_localEulerAngles") == 0 || strcmp(n, "get_eulerAngles") == 0) {
+            return RetVec3V(in, ret, 0.0f, 0.0f, 0.0f);
+        }
+        if (strcmp(n, "set_localEulerAngles") == 0 || strcmp(n, "set_eulerAngles") == 0) {
+            return RetVoid(ret);
+        }
+        if (strcmp(n, "get_gameObject") == 0) return Component_GetGameObject(in, member, argc, args, ret);
+        if (strcmp(n, "get_name") == 0) return Object_GetName(in, member, argc, args, ret);
+    }
+    if (strcmp(type, "UnityEngine.Vector3") == 0) {
+        if (strcmp(n, ".ctor") == 0) return Vector3_Ctor(in, member, argc, args, ret);
+        if (strcmp(n, "get_zero") == 0) return Vector3_Zero(in, member, argc, args, ret);
+        if (strcmp(n, "get_one") == 0) return Vector3_One(in, member, argc, args, ret);
+        if (strcmp(n, "get_up") == 0) return Vector3_Up(in, member, argc, args, ret);
+        if (strcmp(n, "get_right") == 0) return Vector3_Right(in, member, argc, args, ret);
+        if (strcmp(n, "op_Addition") == 0) return Vector3_Add(in, member, argc, args, ret);
+        if (strcmp(n, "op_Subtraction") == 0) return Vector3_Sub(in, member, argc, args, ret);
+        if (strcmp(n, "op_Multiply") == 0) return Vector3_Mul(in, member, argc, args, ret);
+        if (strcmp(n, "op_Implicit") == 0) return Vector3_ImplicitV2(in, member, argc, args, ret);
+    }
+    if (strcmp(type, "UnityEngine.Vector2") == 0) {
+        if (strcmp(n, "op_Implicit") == 0) return Vector2_ImplicitV3(in, member, argc, args, ret);
+    }
+    LogError("unity", "unimplemented Unity method %s::%s (argc=%u)", type, n, argc);
+    return false;
+}
+
+} // namespace ch360

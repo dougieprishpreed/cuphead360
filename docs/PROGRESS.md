@@ -64,6 +64,19 @@ XDK built / Xenia tested / Hardware tested**
 - [x] All the above PASS on Windows **and** on the Xbox 360 XEX in Xenia
   (big-endian), with logs captured.
 
+### Managed Unity bridge
+
+- [x] Bind scene GameObject/Transform/SpriteRenderer/Animator/Camera and
+  scene MonoBehaviour components to managed interpreter objects.
+- [x] Implement native `GameObject`, `Component`, `Transform`, `Behaviour`,
+  `MonoBehaviour` basics, `Vector2`/`Vector3`, `GetComponent<T>`.
+- [x] Execute original `TransformExtensions.ResetLocalTransforms` IL against a
+  bound scene: position/scale changed in the real scene graph.
+- [x] Execute original `AnimationHelper.Update` and
+  `AbstractMonoBehaviour.Awake` lifecycle methods.
+- [x] All of the above PASS on Windows and on the Xbox 360 XEX in Xenia.
+- [ ] Parse MonoBehaviour serialized fields (currently zeroed).
+
 ### Content pipeline and renderer
 
 - [x] Scene extractor for Unity 2017 serialized scenes:
@@ -96,8 +109,10 @@ XDK built / Xenia tested / Hardware tested**
 
 - Managed Unity object model (`GameObject`, `Transform`, `Component`,
   `MonoBehaviour`) and scene-instance binding.
-- MonoBehaviour serialized-field recovery and script instantiation.
-- Unity message lifecycle/coroutines driven by game scripts.
+- MonoBehaviour serialized-field recovery/initialization (objects bind but
+  fields are zeroed).
+- Unity message lifecycle/coroutines driven by game scripts (basic
+  `Awake`/`Update` calls work; no scheduler).
 - Input (Rewired-facing API / XInput), physics/collision, audio.
 - Full player controller, boss logic, menus, saves, DLC progression.
 - All 79 levels and DLC playable content.

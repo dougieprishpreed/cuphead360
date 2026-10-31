@@ -31,6 +31,8 @@ int main(int argc, char** argv) {
             cfg.command = "inspect";
         } else if (ArgEquals(a, "--logic")) {
             cfg.command = "logic";
+        } else if (ArgEquals(a, "--unity")) {
+            cfg.command = "unity";
         } else if (ArgEquals(a, "--scene") && i + 1 < argc) {
             cfg.command = "scene";
             cfg.scene_path = argv[++i];
@@ -54,6 +56,7 @@ int main(int argc, char** argv) {
             printf("  --inspect\n");
             printf("  --logic\n");
             printf("  --scene PATH\n");
+            printf("  --unity\n");
             printf("  --screenshot PATH\n");
             printf("  --anim-time SECONDS\n");
             printf("  --selftest\n");

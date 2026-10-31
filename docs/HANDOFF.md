@@ -57,6 +57,15 @@ Xbox 360 logic mode: set `cfg.command = "logic"` in
 `build\xbox360\GameData\metadata.chm`, rebuild and run. Last verified log:
 all Ease/PlayerInventory/VelocityManager tests PASS under Xenia.
 
+Xbox 360 Unity-bridge mode: set `cfg.command = "unity"` and provide both
+`metadata.chm` and `scene.chs`. Last verified log: 185 GameObjects / 276
+components bound; `TransformExtensions.ResetLocalTransforms`,
+`AnimationHelper.Update`, and `AbstractMonoBehaviour.Awake` all PASS under
+Xenia big-endian.
+
+The currently committed XEX source boots `scene` mode (animated tutorial
+viewer, 120 frames, `game:\frame.bmp`).
+
 ## Current code map
 
 - `src/core/` — endian, files, logging, memory, buffers.

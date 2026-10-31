@@ -275,6 +275,10 @@ def write_scene_binary(scene: dict, out_dir: str, path: str) -> int:
                 ctype = 2
                 flags |= 1 if c.get("enabled", True) else 0
                 controller_off = s(c.get("controller", ""))
+            elif c["type"] == "MonoBehaviour":
+                ctype = 4
+                flags = 1
+                controller_off = s(c.get("script", ""))
             elif c["type"] == "Camera":
                 ctype = 3
                 flags |= 1 if c.get("enabled", True) else 0
@@ -693,6 +697,24 @@ def main():
                 "enabled": bool(an.m_Enabled),
                 "controller": ctrl_name,
             })
+        elif o.type.name == "MonoBehaviour":
+            try:
+                head = o.parse_monobehaviour_head()
+                go_pptr = head.m_GameObject
+                go_id = go_pptr.m_PathID if go_pptr else 0
+                if go_id not in gos:
+                    continue
+                sc = head.m_Script.deref_parse_as_object()
+                ns = str(sc.m_Namespace or "")
+                cn = str(sc.m_ClassName or "")
+                full = (ns + "." + cn) if ns else cn
+                if full:
+                    gos[go_id]["components"].append({
+                        "type": "MonoBehaviour",
+                        "script": full,
+                    })
+            except Exception as e:
+                print("MonoBehaviour parse skipped", o.path_id, e)
         elif o.type.name == "Camera":
             cam = o.read()
             go_id = cam.m_GameObject.m_PathID if cam.m_GameObject else 0
