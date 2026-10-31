@@ -260,7 +260,7 @@ u32 Interpreter::ManagedComponentIndexFor(const Value& v) const {
     return (u32)v.data.obj->Fields()[1].data.i32;
 }
 
-bool Interpreter::BindScene(Scene& scene) {
+bool Interpreter::BindScene(Scene& scene, bool run_script_ctors) {
     scene_ = &scene;
     managed_gameobjects_.Reset();
     managed_transforms_.Reset();
@@ -325,6 +325,7 @@ bool Interpreter::BindScene(Scene& scene) {
     // Run each script's default constructor before applying serialized
     // fields. Unity constructs MonoBehaviours first, so inline field
     // initializers (arrays, lists, dictionaries) exist before deserialization.
+    if (run_script_ctors) {
     for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
         const SceneObject& o = scene.Object(oi);
         for (u32 c = 0; c < o.component_count; ++c) {
@@ -332,6 +333,14 @@ bool Interpreter::BindScene(Scene& scene) {
             if (ci >= scene.ComponentCount()) break;
             const SceneComponent& sc = scene.Component(ci);
             if (sc.type != 4) continue;
+            // UI/text constructors depend on Unity's UI base classes and are
+            // not needed for gameplay; skipping them avoids log floods and
+            // repeated unsupported-constructor failures.
+            if (strncmp(sc.controller, "TMPro.", 6) == 0 ||
+                strncmp(sc.controller, "UnityEngine.UI.", 15) == 0 ||
+                strncmp(sc.controller, "UnityEngine.EventSystems.", 24) == 0) {
+                continue;
+            }
             u32 script_type = metadata_.FindType(sc.controller);
             if (!script_type) continue;
             u32 ctor = metadata_.FindMethod(script_type, ".ctor");
@@ -340,9 +349,10 @@ bool Interpreter::BindScene(Scene& scene) {
             if (self.tag != VT_OBJECT || !self.data.obj) continue;
             Value r;
             if (!Invoke(ctor, &self, 1, &r)) {
-                LogWarn("unity", "script constructor failed: %s", sc.controller);
+                LogDebug("unity", "script constructor failed: %s", sc.controller);
             }
         }
+    }
     }
     // Apply script field values only after every component has a managed
     // object; serialized PPtrs can target components that appear later in

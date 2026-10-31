@@ -82,7 +82,7 @@ public:
 
     // Binds a loaded scene to managed UnityEngine.GameObject/Transform/
     // Component objects. Native Unity methods use these mappings.
-    bool BindScene(Scene& scene);
+    bool BindScene(Scene& scene, bool run_script_ctors = false);
     Scene* BoundScene() const { return scene_; }
     Value ManagedGameObject(u32 object_index) const;
     Value ManagedTransform(u32 object_index) const;

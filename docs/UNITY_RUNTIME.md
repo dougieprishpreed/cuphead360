@@ -82,8 +82,39 @@ The dialogue database is currently an explicit scaffold: `Resources.Load`
 returns an empty `DialogueEditorMasterObjectWrapper` so save/player
 initialization can proceed. The real asset exists at
 `resources.assets` MonoBehaviour 1175 (87,612 bytes) and still needs its
-nested graph extracted. The next gameplay step is running the original motor
-and input loop.
+nested graph extracted.
+
+## Original player motor
+
+`--motor` drives the original `LevelPlayerMotor.FixedUpdate` with a
+synthesized right/jump input through the Rewired action bridge.
+
+Observed on Windows:
+
+```
+[INFO] [stack] motor moved start=0.00,-180.00 max_x=816.67 end=816.67,-211.26 min_y=-213.29 PASS
+[INFO] [stack] result=PASS
+```
+
+Supporting work:
+
+- `BindScene` now runs each script's default constructor before applying
+  serialized fields, so inline field initializers (arrays, lists,
+  dictionaries) exist. UI/TMPro constructors are skipped because they depend
+  on unsupported Unity UI base classes.
+- `Physics2D.BoxCast`, `Raycast`, `BoxCastNonAlloc` and `RaycastNonAlloc`
+  use scene collider AABBs. The tutorial extraction emits the runtime Level
+  bounds colliders (ground, ceiling and two walls) so the player can stand
+  on the level.
+- Rewired `GetAxis`/`GetButton`/`GetButtonDown`/`GetButtonUp`, `Time`,
+  `Color`, `Animator.StringToHash`, and value-type (Vector2/Vector3/Rect/
+  Color) constructors are implemented.
+
+`--motorplay` adds software rendering and camera follow. Its logic also
+passes, but the prefab-scene visual integration is not validated: the
+default camera shows oversized static player art rather than the tutorial
+level, and camera-follow frames are black. The native `--play` tutorial
+slice remains the only visually validated playable slice.
 
 ## Verified
 

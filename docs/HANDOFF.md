@@ -104,12 +104,29 @@ python tools\extract_scene.py --game game\Cuphead_Data ^
 ```
 
 Current observed state: `get_motor`, player `Awake`, all 11 prefab component
-`Awake` methods, `LevelInit` and `LevelStart` pass. The dialogue database is
-an explicit empty scaffold; the next gameplay step is driving the original
-motor and input loop.
+`Awake` methods, `LevelInit` and `LevelStart` pass. The original motor also
+runs with synthesized input:
 
-The `[NonSerialized]` field-flag fix and prefab PPtr offsetting were required
-for this; see `docs/UNITY_RUNTIME.md`.
+```
+[INFO] [stack] motor moved start=0.00,-180.00 max_x=816.67 end=816.67,-211.26 min_y=-213.29 PASS
+```
+
+Prepare and run it with:
+
+```
+python tools\extract_scene.py --game game\Cuphead_Data ^
+  --scene scene_level_tutorial --out work\extract_prefab --add-player-prefab
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_prefab\scene.chs --motor --log build\logs\motor.log
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_prefab\scene.chs --motorplay --headless ^
+  --screenshot work\extract_prefab\motorplay --log build\logs\motorplay.log
+```
+
+`--motorplay` logic passes but its camera-follow frames were black; the
+native `--play` tutorial slice is still the only visually validated playable
+slice. The dialogue database is an explicit empty scaffold; the real
+`resources.assets` MonoBehaviour 1175 still needs extraction.
 
 Command:
 

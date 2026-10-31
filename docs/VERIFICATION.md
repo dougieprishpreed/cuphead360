@@ -136,6 +136,27 @@ original `LevelPlayerController.LevelInit`/`LevelStart`. The dialogue database
 is an explicit empty scaffold for now; the real asset still needs extraction.
 The next gameplay step is running the original motor/input loop.
 
+## Original player motor
+
+```
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_prefab\scene.chs --motor --headless ^
+  --log build\logs\motor.log
+```
+
+Observed:
+
+```
+[INFO] [stack] motor moved start=0.00,-180.00 max_x=816.67 end=816.67,-211.26 min_y=-213.29 PASS
+[INFO] [stack] result=PASS
+```
+
+The motor moves and stays on the tutorial level with synthesized input.
+`--motorplay` adds rendering/camera follow; its logic passes, but the
+captured camera-follow frames were black because the prefab scene's drawable
+content is the oversized static player art rather than the tutorial level.
+This is not a validated visual slice.
+
 ## Status
 
 This verifies the runtime/metadata/scene/script foundation and the beginning

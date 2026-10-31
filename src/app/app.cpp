@@ -455,7 +455,7 @@ static int RunStackTest(MetadataPackage& pkg, const AppConfig& config, bool driv
         return 1;
     }
     Interpreter interp(pkg);
-    if (!interp.Init() || !interp.BindScene(scene)) {
+    if (!interp.Init() || !interp.BindScene(scene, true)) {
         LogError("stack", "interpreter/bind failed");
         return 1;
     }
