@@ -1002,6 +1002,22 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     bool awake_ok = awake && InvokeOnComponent(interp, awake, level, &r);
     LogInfo("level", "TutorialLevel.Awake %s (last_error=%u)",
             awake_ok ? "PASS" : "FAIL", interp.LastError());
+    if (awake_ok) {
+        u32 props_f = pkg.FindField(level_type, "properties");
+        if (props_f) {
+            Value props = interp.GetField(props_f, level);
+            if (props.tag == VT_NULL) {
+                u32 partial = FindMethodInHierarchy(pkg, level_type, "PartialInit");
+                if (partial) {
+                    if (InvokeOnComponent(interp, partial, level, &r)) {
+                        LogInfo("level", "level PartialInit invoked");
+                    } else {
+                        LogWarn("level", "level PartialInit failed");
+                    }
+                }
+            }
+        }
+    }
     bool start_ok = start && InvokeOnComponent(interp, start, level, &r);
     LogInfo("level", "TutorialLevel.Start %s (last_error=%u)",
             start_ok ? "PASS" : "FAIL", interp.LastError());

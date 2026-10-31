@@ -1802,6 +1802,28 @@ bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value
             }
             return RetVoid(ret);
         }
+        if (strncmp(tn, "AbstractLevelProperties`3", 24) == 0 &&
+            strcmp(member.name, "get_CurrentState") == 0) {
+            u32 def = mt.generic_type_id ? mt.generic_type_id : member.decl_id;
+            u32 states_f = metadata_.FindField(def, "states");
+            u32 index_f = metadata_.FindField(def, "stateIndex");
+            Value states = states_f ? GetField(states_f, args[0]) : Value::Null();
+            s32 index = index_f ? ToI32(GetField(index_f, args[0])) : 0;
+            Value item = Value::Null();
+            u32 count = 0;
+            if (states.tag == VT_ARRAY && states.data.array) {
+                count = states.data.array->length;
+                if (index >= 0 && (u32)index < count) {
+                    item = states.data.array->Elements()[index];
+                }
+            } else if ((states.tag == VT_OBJECT || states.tag == VT_STRUCT) && states.data.obj) {
+                ListObject* list = (ListObject*)states.data.obj;
+                count = list->count;
+                if (index >= 0 && (u32)index < count) item = list->items[index];
+            }
+            if (ret) *ret = item;
+            return true;
+        }
         if ((strncmp(tn, "AbstractLevelProperties`3", 24) == 0 ||
              strncmp(tn, "AbstractLevelState`2", 20) == 0) &&
             (strncmp(member.name, "add_", 4) == 0 || strncmp(member.name, "remove_", 7) == 0)) {
