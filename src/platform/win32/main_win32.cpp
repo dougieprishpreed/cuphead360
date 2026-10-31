@@ -1,0 +1,49 @@
+#include "app/app.h"
+#include "core/log.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+static bool ArgEquals(const char* a, const char* b) {
+    return a && b && strcmp(a, b) == 0;
+}
+
+int main(int argc, char** argv) {
+    ch360::AppConfig cfg;
+    for (int i = 1; i < argc; ++i) {
+        const char* a = argv[i];
+        if (ArgEquals(a, "--headless")) {
+            cfg.headless = true;
+        } else if (ArgEquals(a, "--windowed")) {
+            cfg.headless = false;
+        } else if (ArgEquals(a, "--mute")) {
+            cfg.mute = true;
+        } else if (ArgEquals(a, "--frames") && i + 1 < argc) {
+            cfg.frames = (u32)strtoul(argv[++i], 0, 10);
+        } else if (ArgEquals(a, "--seed") && i + 1 < argc) {
+            cfg.seed = (u32)strtoul(argv[++i], 0, 10);
+        } else if (ArgEquals(a, "--log") && i + 1 < argc) {
+            cfg.log_path = argv[++i];
+        } else if (ArgEquals(a, "--command") && i + 1 < argc) {
+            cfg.command = argv[++i];
+        } else if (ArgEquals(a, "--selftest")) {
+            cfg.command = "selftest";
+        } else if (ArgEquals(a, "--speed") && i + 1 < argc) {
+            cfg.speed = (f32)atof(argv[++i]);
+        } else if (ArgEquals(a, "--help")) {
+            printf("Cuphead360 development build\n");
+            printf("  --headless | --windowed\n");
+            printf("  --frames N\n");
+            printf("  --seed N\n");
+            printf("  --log PATH\n");
+            printf("  --selftest\n");
+            printf("  --speed N\n");
+            return 0;
+        } else {
+            printf("unknown argument: %s\n", a);
+            return 2;
+        }
+    }
+    return ch360::AppMain(cfg);
+}

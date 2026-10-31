@@ -1,0 +1,49 @@
+# The user's original game installation. Never commit or upload it.
+/game/
+
+# Local reverse-engineering output (decompiled sources, analysis dumps).
+/work/
+/out/
+/local/
+
+# Build products and logs.
+/build/
+/bin/
+/obj/
+*.xex
+*.xdb
+*.pdb
+*.obj
+*.ilk
+*.exp
+*.lib
+*.log
+*.dmp
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+
+# Extracted/converted game data. Generated locally from the user's copy.
+/GameData/
+/assets_extracted/
+/packs/
+/screenshots/
+/recordings/
+
+# Test output.
+/tests/output/
+/.pytest_cache/
+__pycache__/
+*.pyc
+
+# Editor/OS noise.
+.vs/
+.vscode/
+Thumbs.db
+desktop.ini
+
+# Local test artifacts.
+*_selftest.bin
+cuphead360_win32.log
