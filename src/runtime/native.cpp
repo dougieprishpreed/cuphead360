@@ -1920,6 +1920,8 @@ bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value
         }
         if (strcmp(n, "get_Count") == 0) return RetI32(ret, 0);
         if (strcmp(n, "Contains") == 0) return RetBool(ret, false);
+        if (strcmp(n, "CallAnyTrue") == 0) return RetBool(ret, false);
+        if (strncmp(n, "Call", 4) == 0) return RetVoid(ret);
     }
     for (u32 i = 0; i < CH360_ARRAY_COUNT(kEntries); ++i) {
         if (strcmp(kEntries[i].type, t.full_name) == 0 &&

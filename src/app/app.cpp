@@ -909,6 +909,7 @@ static u32 InvokeCollisionOnObject(Interpreter& interp, MetadataPackage& pkg, Sc
     if (oi >= scene.ObjectCount()) return 0;
     const SceneObject& o = scene.Object(oi);
     u32 invoked = 0;
+    static u32 s_collision_logs = 0;
     for (u32 c = 0; c < o.component_count; ++c) {
         u32 ci = o.component_start + c;
         if (ci >= scene.ComponentCount()) break;
@@ -918,6 +919,13 @@ static u32 InvokeCollisionOnObject(Interpreter& interp, MetadataPackage& pkg, Sc
         if (self.tag != VT_OBJECT || !self.data.obj) continue;
         u32 m = FindMethodInHierarchy(pkg, self.data.obj->type_id, "OnTriggerEnter2D");
         if (!m) continue;
+        if (s_collision_logs < 24) {
+            u32 other_oi = OwnerObjectForComponent(scene, other_ci);
+            const char* other_name = (other_oi < scene.ObjectCount())
+                ? scene.Object(other_oi).name : "?";
+            LogInfo("collision", "%s [%s] <- %s", o.name, sc.controller, other_name);
+            ++s_collision_logs;
+        }
         Value args[2];
         args[0] = self;
         args[1] = interp.ManagedComponent(other_ci);
@@ -1182,6 +1190,7 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     // stacks are excluded because those are still scaffolded.
     Buffer<u32> extra_update_cis;
     Buffer<u32> extra_update_mids;
+    Buffer<u32> extra_fixed_mids;
     Buffer<u8> extra_update_seen;
     extra_update_seen.Resize(scene.ComponentCount());
     for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
@@ -1201,9 +1210,11 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         Value v = interp.ManagedComponent(ci);
         if (v.tag != VT_OBJECT || !v.data.obj) continue;
         u32 um = FindMethodInHierarchy(pkg, v.data.obj->type_id, "Update");
-        if (!um) continue;
+        u32 fm = FindMethodInHierarchy(pkg, v.data.obj->type_id, "FixedUpdate");
+        if (!um && !fm) continue;
         extra_update_cis.PushBack(ci);
         extra_update_mids.PushBack(um);
+        extra_fixed_mids.PushBack(fm);
         extra_update_seen[ci] = 1;
     }
     Buffer<u8> extra_update_failed;
@@ -1402,7 +1413,18 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
                         extra_update_cis[k]);
             }
             Value eargs[1]; eargs[0] = ev; Value er;
-            if (!interp.Invoke(extra_update_mids[k], eargs, 1, &er)) {
+            if (extra_fixed_mids[k]) {
+                if (!interp.Invoke(extra_fixed_mids[k], eargs, 1, &er)) {
+                    extra_update_failed[k] = 1;
+                    if (extra_failures < 8) {
+                        LogWarn("levelplay", "FixedUpdate %s failed",
+                                scene.Component(extra_update_cis[k]).controller);
+                    }
+                    ++extra_failures;
+                    continue;
+                }
+            }
+            if (extra_update_mids[k] && !interp.Invoke(extra_update_mids[k], eargs, 1, &er)) {
                 extra_update_failed[k] = 1;
                 if (extra_failures < 8) {
                     LogWarn("levelplay", "Update %s failed",
@@ -1438,9 +1460,11 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
                 }
             }
             u32 um = FindMethodInHierarchy(pkg, ev.data.obj->type_id, "Update");
-            if (!um) { extra_update_seen[ci] = 1; continue; }
+            u32 fm = FindMethodInHierarchy(pkg, ev.data.obj->type_id, "FixedUpdate");
+            if (!um && !fm) { extra_update_seen[ci] = 1; continue; }
             extra_update_cis.PushBack(ci);
             extra_update_mids.PushBack(um);
+            extra_fixed_mids.PushBack(fm);
             extra_update_seen[ci] = 1;
         }
         extra_update_failed.Resize(extra_update_cis.Size());
@@ -1538,6 +1562,15 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         if (!config.headless) PlatformSleepMs(16);
     }
     bool pass = loop_ok && (max_x - start_x > 50.0f);
+    u32 projectile_components = 0;
+    for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+        const SceneComponent& sc = scene.Component(ci);
+        if (sc.type == 4 && sc.controller && strstr(sc.controller, "Projectile")) {
+            ++projectile_components;
+        }
+    }
+    LogInfo("levelplay", "instances objects=%u projectiles=%u",
+            scene.ObjectCount(), projectile_components);
     LogInfo("levelplay", "start=%.1f,%.1f max_x=%.1f max_y=%.1f min_y=%.1f collisions=%u result=%s",
             start_x, start_y, max_x, max_y, min_y, collision_events, pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
