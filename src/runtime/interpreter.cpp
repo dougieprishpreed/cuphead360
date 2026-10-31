@@ -338,6 +338,7 @@ Object* Interpreter::AllocObjectWithSlots(u32 type_id, u32 slots) {
     if (!o) return 0;
     memset(o, 0, bytes);
     o->type_id = type_id;
+    o->slots = slots;
     for (u32 i = 0; i < slots; ++i) o->Fields()[i] = Value::Null();
     objects_.PushBack(o);
     return o;
@@ -588,9 +589,9 @@ Value Interpreter::CopyValue(const Value& v) {
     }
     if (v.tag != VT_STRUCT || !v.data.obj) return v;
     Object* src = v.data.obj;
-    Object* dst = AllocObject(src->type_id);
+    u32 slots = src->slots;
+    Object* dst = AllocObjectWithSlots(src->type_id, slots);
     if (!dst) return Value::Null();
-    u32 slots = runtime_types_[src->type_id].total_slots;
     for (u32 i = 0; i < slots; ++i) StoreValue(&dst->Fields()[i], src->Fields()[i]);
     return Value::StructRef(dst);
 }
@@ -629,9 +630,18 @@ Value Interpreter::GetField(u32 field_id, const Value& instance, bool* ok) {
     if (instance.tag == VT_OBJECT || instance.tag == VT_STRUCT) o = instance.data.obj;
     if (!o) return Value::Null();
     u32 slot = FieldSlot(field_id);
-    if (slot >= runtime_types_[o->type_id].total_slots) return Value::Null();
+    if (slot >= o->slots) return Value::Null();
     if (ok) *ok = true;
-    return o->Fields()[slot];
+    Value v = o->Fields()[slot];
+    if (v.tag == VT_NULL) {
+        const SigInfo& fs = metadata_.Sig(f.type_sig);
+        if (fs.kind == SIG_VALUETYPE && fs.type_id) {
+            const TypeInfo& ft = metadata_.Type(fs.type_id);
+            if (strcmp(ft.full_name, "UnityEngine.Vector2") == 0) return NewVec2(0.0f, 0.0f);
+            if (strcmp(ft.full_name, "UnityEngine.Vector3") == 0) return NewVec3(0.0f, 0.0f, 0.0f);
+        }
+    }
+    return v;
 }
 
 static Value DerefValue(const Value& v) {
@@ -687,7 +697,7 @@ void Interpreter::SetField(u32 field_id, const Value& instance, const Value& val
     Object* o = (instance.tag == VT_OBJECT || instance.tag == VT_STRUCT) ? instance.data.obj : 0;
     if (!o) return;
     u32 slot = FieldSlot(field_id);
-    if (slot < runtime_types_[o->type_id].total_slots) StoreValue(&o->Fields()[slot], value);
+    if (slot < o->slots) StoreValue(&o->Fields()[slot], value);
 }
 
 bool Interpreter::EnsureTypeInitialized(u32 type_id) {
@@ -1184,10 +1194,10 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                         goto done;
                     }
                     if (op == 0xA5) {
-                        if (o && runtime_types_[o->type_id].total_slots > 0) PUSH(CopyValue(o->Fields()[0]));
+                        if (o && o->slots > 0) PUSH(CopyValue(o->Fields()[0]));
                         else PUSH(Value::Null());
                     } else {
-                        if (o && runtime_types_[o->type_id].total_slots > 0) PUSH(Value::ByRef(&o->Fields()[0]));
+                        if (o && o->slots > 0) PUSH(Value::ByRef(&o->Fields()[0]));
                         else PUSH(Value::Null());
                     }
                 } else {
@@ -1229,12 +1239,11 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                 Object* o = (obj.tag == VT_OBJECT || obj.tag == VT_STRUCT) ? obj.data.obj : 0;
                 if (!o) { ok = Fail("ldflda on null", method_id); goto done; }
                 u32 slot = FieldSlot(fid);
-                if (slot >= runtime_types_[o->type_id].total_slots) {
+                if (slot >= o->slots) {
                     const FieldInfo& ff = metadata_.Field(fid);
                     const TypeInfo& ot = metadata_.Type(o->type_id);
                     LogError("interp", "bad field slot field=%s id=%u slot=%u type=%s total=%u",
-                             ff.name, fid, slot, ot.full_name,
-                             runtime_types_[o->type_id].total_slots);
+                             ff.name, fid, slot, ot.full_name, o->slots);
                     ok = Fail("bad field slot", method_id);
                     goto done;
                 }
@@ -1292,9 +1301,14 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                 u32 token = ReadU32LE(code + pc); pc += 4;
                 u32 target = metadata_.ResolveTypeToken(token);
                 Value v; POP(v);
-                Object* o = AllocObject(target);
+                u32 box_slots = runtime_types_[target].total_slots;
+                if (target && target <= metadata_.TypeCount()) {
+                    const TypeInfo& bt = metadata_.Type(target);
+                    if (bt.is_value_type && box_slots == 0) box_slots = 1;
+                }
+                Object* o = AllocObjectWithSlots(target, box_slots);
                 if (!o) { ok = Fail("box allocation failed", method_id); goto done; }
-                if (runtime_types_[target].total_slots > 0) StoreValue(&o->Fields()[0], v);
+                if (box_slots > 0) StoreValue(&o->Fields()[0], v);
                 PUSH(Value::ObjectRef(o));
                 break;
             }

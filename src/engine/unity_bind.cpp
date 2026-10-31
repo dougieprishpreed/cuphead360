@@ -146,6 +146,82 @@ static u32 FindObjectIndexById(const Scene& scene, u32 id) {
     return 0xFFFFFFFFu;
 }
 
+static bool IsNestedSerializableType(const TypeInfo& t) {
+    if (t.external || t.is_enum || !t.full_name) return false;
+    if (strncmp(t.full_name, "UnityEngine.", 12) == 0) return false;
+    if (strncmp(t.full_name, "System.", 7) == 0) return false;
+    return true;
+}
+
+static bool TypeContainsField(Interpreter& in, u32 type_id, u32 field_id, u32 depth) {
+    if (!type_id || depth > 12) return false;
+    u32 cur = type_id;
+    u32 guard = 0;
+    while (cur && guard++ < 64) {
+        const TypeInfo& t = in.Metadata().Type(cur);
+        for (u32 i = 0; i < t.field_count; ++i) {
+            u32 fid = t.field_start + i;
+            if (fid == field_id) return true;
+            const FieldInfo& f = in.Metadata().Field(fid);
+            if (f.flags & (FIELD_FLAG_STATIC | FIELD_FLAG_LITERAL)) continue;
+            const SigInfo& fs = in.Metadata().Sig(f.type_sig);
+            if ((fs.kind == SIG_CLASS || fs.kind == SIG_VALUETYPE) && fs.type_id) {
+                const TypeInfo& ft = in.Metadata().Type(fs.type_id);
+                if (IsNestedSerializableType(ft) &&
+                    TypeContainsField(in, fs.type_id, field_id, depth + 1)) {
+                    return true;
+                }
+            }
+        }
+        cur = t.base_id;
+    }
+    return false;
+}
+
+// Finds the object that owns field_id, creating intermediate nested objects
+// along the serialized path.
+static bool FindFieldOwner(Interpreter& in, const Value& obj, u32 field_id,
+                           Value* owner, u32 depth) {
+    if (depth > 12 || (obj.tag != VT_OBJECT && obj.tag != VT_STRUCT) || !obj.data.obj) {
+        return false;
+    }
+    Object* o = obj.data.obj;
+    u32 cur = o->type_id;
+    u32 guard = 0;
+    while (cur && guard++ < 64) {
+        const TypeInfo& t = in.Metadata().Type(cur);
+        for (u32 i = 0; i < t.field_count; ++i) {
+            if (t.field_start + i == field_id) { *owner = obj; return true; }
+        }
+        cur = t.base_id;
+    }
+    cur = o->type_id;
+    guard = 0;
+    while (cur && guard++ < 64) {
+        const TypeInfo& t = in.Metadata().Type(cur);
+        for (u32 i = 0; i < t.field_count; ++i) {
+            u32 fid = t.field_start + i;
+            const FieldInfo& f = in.Metadata().Field(fid);
+            if (f.flags & (FIELD_FLAG_STATIC | FIELD_FLAG_LITERAL)) continue;
+            const SigInfo& fs = in.Metadata().Sig(f.type_sig);
+            if ((fs.kind == SIG_CLASS || fs.kind == SIG_VALUETYPE) && fs.type_id) {
+                const TypeInfo& ft = in.Metadata().Type(fs.type_id);
+                if (!IsNestedSerializableType(ft)) continue;
+                if (!TypeContainsField(in, fs.type_id, field_id, depth + 1)) continue;
+                Value child = in.GetField(fid, obj);
+                if (child.tag == VT_NULL) {
+                    child = ft.is_value_type ? in.NewStructValue(fs.type_id)
+                                             : in.NewObjectValue(fs.type_id);
+                    in.SetField(fid, obj, child);
+                }
+                if (FindFieldOwner(in, child, field_id, owner, depth + 1)) return true;
+            }
+        }
+        cur = t.base_id;
+    }
+    return false;
+}
+
 Value Interpreter::ManagedGameObject(u32 object_index) const {
     if (object_index >= managed_gameobjects_.Size()) return Value::Null();
     return managed_gameobjects_[object_index];
@@ -246,6 +322,28 @@ bool Interpreter::BindScene(Scene& scene) {
             managed_components_[ci] = Value::ObjectRef(comp);
         }
     }
+    // Run each script's default constructor before applying serialized
+    // fields. Unity constructs MonoBehaviours first, so inline field
+    // initializers (arrays, lists, dictionaries) exist before deserialization.
+    for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
+        const SceneObject& o = scene.Object(oi);
+        for (u32 c = 0; c < o.component_count; ++c) {
+            u32 ci = o.component_start + c;
+            if (ci >= scene.ComponentCount()) break;
+            const SceneComponent& sc = scene.Component(ci);
+            if (sc.type != 4) continue;
+            u32 script_type = metadata_.FindType(sc.controller);
+            if (!script_type) continue;
+            u32 ctor = metadata_.FindMethod(script_type, ".ctor");
+            if (!ctor) continue;
+            Value self = managed_components_[ci];
+            if (self.tag != VT_OBJECT || !self.data.obj) continue;
+            Value r;
+            if (!Invoke(ctor, &self, 1, &r)) {
+                LogWarn("unity", "script constructor failed: %s", sc.controller);
+            }
+        }
+    }
     // Apply script field values only after every component has a managed
     // object; serialized PPtrs can target components that appear later in
     // the scene's component table.
@@ -309,14 +407,21 @@ bool Interpreter::BindScene(Scene& scene) {
                     arr.data.array->Elements()[sv.index] = CopyValue(val);
                 }
             } else {
-                Value parent = GetField(sv.parent_field, Value::ObjectRef(script));
-                if (parent.tag == VT_NULL || !parent.data.obj) {
+                Value script_obj = Value::ObjectRef(script);
+                Value owner = script_obj;
+                Value parent = Value::Null();
+                if (FindFieldOwner(*this, script_obj, sv.parent_field, &owner, 0)) {
+                    parent = GetField(sv.parent_field, owner);
+                } else {
+                    parent = GetField(sv.parent_field, script_obj);
+                }
+                if (parent.tag == VT_NULL || parent.tag == VT_VOID) {
                     const FieldInfo& pf = metadata_.Field(sv.parent_field);
                     const SigInfo& ps = metadata_.Sig(pf.type_sig);
                     if (ps.type_id) {
                         const TypeInfo& pt = metadata_.Type(ps.type_id);
                         parent = pt.is_value_type ? NewStructValue(ps.type_id) : NewObjectValue(ps.type_id);
-                        SetField(sv.parent_field, Value::ObjectRef(script), parent);
+                        SetField(sv.parent_field, owner, parent);
                     }
                 }
                 if (parent.tag == VT_OBJECT || parent.tag == VT_STRUCT) {
@@ -846,6 +951,325 @@ static bool MonoBehaviour_NoOp(Interpreter&, const MemberRefInfo&, u32, Value*, 
     return RetVoid(ret);
 }
 
+struct PhysicsAabb {
+    f32 min_x, min_y, max_x, max_y;
+};
+
+static bool ColliderAabb(const Scene& scene, u32 oi, const SceneComponent& c, PhysicsAabb* out) {
+    const SceneObject& o = scene.Object(oi);
+    f32 sx = o.world_scale_x, sy = o.world_scale_y;
+    f32 hw = 0.0f, hh = 0.0f, off_x = 0.0f, off_y = 0.0f;
+    if (c.type == 5) {
+        hw = c.color[0] * 0.5f * fabsf(sx);
+        hh = c.color[1] * 0.5f * fabsf(sy);
+        off_x = c.color[2] * sx;
+        off_y = c.color[3] * sy;
+    } else if (c.type == 6) {
+        f32 s = fabsf(sx) > fabsf(sy) ? fabsf(sx) : fabsf(sy);
+        hw = hh = c.color[0] * 0.5f * s;
+        off_x = c.color[2] * sx;
+        off_y = c.color[3] * sy;
+    } else {
+        return false;
+    }
+    f32 ca = cosf(o.world_rotation), sa = sinf(o.world_rotation);
+    f32 cx = o.world_x + off_x * ca - off_y * sa;
+    f32 cy = o.world_y + off_x * sa + off_y * ca;
+    out->min_x = cx - hw; out->max_x = cx + hw;
+    out->min_y = cy - hh; out->max_y = cy + hh;
+    return true;
+}
+
+static bool SweepBoxVsAabb(f32 ox, f32 oy, f32 hw, f32 hh,
+                           f32 dx, f32 dy, f32 dist, const PhysicsAabb& b,
+                           f32* out_t, f32* out_nx, f32* out_ny) {
+    f32 minx = b.min_x - hw, maxx = b.max_x + hw;
+    f32 miny = b.min_y - hh, maxy = b.max_y + hh;
+    f32 tmin = 0.0f, tmax = dist;
+    f32 nx = 0.0f, ny = 0.0f;
+    if (fabsf(dx) < 0.000001f) {
+        if (ox < minx || ox > maxx) return false;
+    } else {
+        f32 t1 = (minx - ox) / dx, t2 = (maxx - ox) / dx;
+        f32 n1 = -1.0f, n2 = 1.0f;
+        if (t1 > t2) { f32 tt = t1; t1 = t2; t2 = tt; f32 tn = n1; n1 = n2; n2 = tn; }
+        if (t1 > tmin) { tmin = t1; nx = n1; ny = 0.0f; }
+        if (t2 < tmax) tmax = t2;
+        if (tmin > tmax) return false;
+    }
+    if (fabsf(dy) < 0.000001f) {
+        if (oy < miny || oy > maxy) return false;
+    } else {
+        f32 t1 = (miny - oy) / dy, t2 = (maxy - oy) / dy;
+        f32 n1 = -1.0f, n2 = 1.0f;
+        if (t1 > t2) { f32 tt = t1; t1 = t2; t2 = tt; f32 tn = n1; n1 = n2; n2 = tn; }
+        if (t1 > tmin) { tmin = t1; nx = 0.0f; ny = n1; }
+        if (t2 < tmax) tmax = t2;
+        if (tmin > tmax) return false;
+    }
+    if (tmin < 0.0f || tmin > dist) return false;
+    *out_t = tmin; *out_nx = nx; *out_ny = ny;
+    return true;
+}
+
+static bool Physics2D_Cast(Interpreter& in, u32 argc, Value* a, bool box, Value* ret) {
+    u32 hit_type = in.Metadata().FindType("UnityEngine.RaycastHit2D");
+    Object* hit = in.AllocObjectWithSlots(hit_type ? hit_type : in.ComponentTypeId(), 8);
+    if (!hit) return false;
+    hit->Fields()[0] = Value::Null();
+    hit->Fields()[1] = in.NewVec2(0.0f, 0.0f);
+    hit->Fields()[2] = in.NewVec2(0.0f, 0.0f);
+    hit->Fields()[3] = Value::R4(0.0f);
+    hit->Fields()[4] = Value::R4(0.0f);
+    hit->Fields()[5] = Value::Null();
+    hit->Fields()[6] = Value::Null();
+
+    Scene* scene = in.BoundScene();
+    f32 ox = 0, oy = 0, hw = 0, hh = 0, dist = 0, dx = 0, dy = 0;
+    if (box) {
+        if (argc < 6 || a[0].tag != VT_VEC2 || a[1].tag != VT_VEC2 || a[3].tag != VT_VEC2) {
+            if (ret) *ret = Value::StructRef(hit);
+            return true;
+        }
+        const Vec2* o = (const Vec2*)a[0].data.ptr;
+        const Vec2* s = (const Vec2*)a[1].data.ptr;
+        const Vec2* d = (const Vec2*)a[3].data.ptr;
+        ox = o->x; oy = o->y; hw = s->x * 0.5f; hh = s->y * 0.5f;
+        dx = d->x; dy = d->y; dist = a[4].data.f32;
+    } else {
+        if (argc < 4 || a[0].tag != VT_VEC2 || a[1].tag != VT_VEC2) {
+            if (ret) *ret = Value::StructRef(hit);
+            return true;
+        }
+        const Vec2* o = (const Vec2*)a[0].data.ptr;
+        const Vec2* d = (const Vec2*)a[1].data.ptr;
+        ox = o->x; oy = o->y; dx = d->x; dy = d->y; dist = a[2].data.f32;
+    }
+    f32 len = sqrtf(dx * dx + dy * dy);
+    if (len > 0.000001f) { dx /= len; dy /= len; }
+    if (dist <= 0.0f || (fabsf(dx) < 0.000001f && fabsf(dy) < 0.000001f)) {
+        if (ret) *ret = Value::StructRef(hit);
+        return true;
+    }
+
+    f32 best_t = dist, best_nx = 0, best_ny = 0;
+    u32 best_ci = 0xFFFFFFFFu, best_oi = 0xFFFFFFFFu;
+    if (scene) {
+        for (u32 oi = 0; oi < scene->ObjectCount(); ++oi) {
+            const SceneObject& o = scene->Object(oi);
+            if (o.id >= 1000000u) continue; // player prefab self-colliders
+            for (u32 c = 0; c < o.component_count; ++c) {
+                u32 ci = o.component_start + c;
+                if (ci >= scene->ComponentCount()) break;
+                const SceneComponent& sc = scene->Component(ci);
+                if (sc.type != 5 && sc.type != 6) continue;
+                PhysicsAabb b;
+                if (!ColliderAabb(*scene, oi, sc, &b)) continue;
+                f32 t = 0, nx = 0, ny = 0;
+                if (SweepBoxVsAabb(ox, oy, hw, hh, dx, dy, dist, b, &t, &nx, &ny) && t <= best_t) {
+                    best_t = t; best_nx = nx; best_ny = ny; best_ci = ci; best_oi = oi;
+                }
+            }
+        }
+    }
+    if (best_ci != 0xFFFFFFFFu) {
+        hit->Fields()[0] = in.ManagedComponent(best_ci);
+        hit->Fields()[1] = in.NewVec2(ox + dx * best_t, oy + dy * best_t);
+        hit->Fields()[2] = in.NewVec2(best_nx, best_ny);
+        hit->Fields()[3] = Value::R4(best_t);
+        hit->Fields()[4] = Value::R4(best_t / dist);
+        hit->Fields()[5] = in.ManagedTransform(best_oi);
+        const SceneObject& o = scene->Object(best_oi);
+        for (u32 c = 0; c < o.component_count; ++c) {
+            u32 ci = o.component_start + c;
+            if (ci >= scene->ComponentCount()) break;
+            if (scene->Component(ci).type == 7) {
+                hit->Fields()[6] = in.ManagedComponent(ci);
+                break;
+            }
+        }
+    }
+    if (ret) *ret = Value::StructRef(hit);
+    return true;
+}
+
+static bool Physics2D_BoxCast(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    return Physics2D_Cast(in, argc, a, true, ret);
+}
+static bool Physics2D_Raycast(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    return Physics2D_Cast(in, argc, a, false, ret);
+}
+
+struct PhysicsHit {
+    f32 t;
+    u32 ci;
+    u32 oi;
+    f32 nx;
+    f32 ny;
+};
+
+static u32 Physics2D_CollectHits(Interpreter& in, f32 ox, f32 oy, f32 hw, f32 hh,
+                                 f32 dx, f32 dy, f32 dist, PhysicsHit* out, u32 max) {
+    Scene* scene = in.BoundScene();
+    if (!scene || max == 0) return 0;
+    f32 len = sqrtf(dx * dx + dy * dy);
+    if (len > 0.000001f) { dx /= len; dy /= len; }
+    u32 count = 0;
+    for (u32 oi = 0; oi < scene->ObjectCount(); ++oi) {
+        const SceneObject& o = scene->Object(oi);
+        if (o.id >= 1000000u) continue;
+        for (u32 c = 0; c < o.component_count; ++c) {
+            u32 ci = o.component_start + c;
+            if (ci >= scene->ComponentCount()) break;
+            const SceneComponent& sc = scene->Component(ci);
+            if (sc.type != 5 && sc.type != 6) continue;
+            PhysicsAabb b;
+            if (!ColliderAabb(*scene, oi, sc, &b)) continue;
+            f32 t = 0, nx = 0, ny = 0;
+            if (!SweepBoxVsAabb(ox, oy, hw, hh, dx, dy, dist, b, &t, &nx, &ny)) continue;
+            if (count < max) {
+                PhysicsHit& h = out[count++];
+                h.t = t; h.ci = ci; h.oi = oi; h.nx = nx; h.ny = ny;
+            }
+        }
+    }
+    for (u32 i = 1; i < count; ++i) {
+        PhysicsHit key = out[i];
+        s32 j = (s32)i - 1;
+        while (j >= 0 && out[j].t > key.t) { out[j + 1] = out[j]; --j; }
+        out[j + 1] = key;
+    }
+    return count;
+}
+
+static void Physics2D_FillHit(Interpreter& in, Object* hit, const PhysicsHit& h,
+                              f32 ox, f32 oy, f32 dx, f32 dy, f32 dist) {
+    Scene* scene = in.BoundScene();
+    hit->Fields()[0] = in.ManagedComponent(h.ci);
+    hit->Fields()[1] = in.NewVec2(ox + dx * h.t, oy + dy * h.t);
+    hit->Fields()[2] = in.NewVec2(h.nx, h.ny);
+    hit->Fields()[3] = Value::R4(h.t);
+    hit->Fields()[4] = Value::R4(dist > 0.000001f ? h.t / dist : 0.0f);
+    hit->Fields()[5] = in.ManagedTransform(h.oi);
+    hit->Fields()[6] = Value::Null();
+    if (scene) {
+        const SceneObject& o = scene->Object(h.oi);
+        for (u32 c = 0; c < o.component_count; ++c) {
+            u32 ci = o.component_start + c;
+            if (ci >= scene->ComponentCount()) break;
+            if (scene->Component(ci).type == 7) {
+                hit->Fields()[6] = in.ManagedComponent(ci);
+                break;
+            }
+        }
+    }
+}
+
+static bool Physics2D_NonAlloc(Interpreter& in, u32 argc, Value* a, bool box, Value* ret) {
+    u32 hit_type = in.Metadata().FindType("UnityEngine.RaycastHit2D");
+    f32 ox = 0, oy = 0, hw = 0, hh = 0, dx = 0, dy = 0, dist = 0;
+    Value results = Value::Null();
+    if (box) {
+        if (argc < 7 || a[0].tag != VT_VEC2 || a[1].tag != VT_VEC2 || a[3].tag != VT_VEC2) {
+            return RetI32V(ret, 0);
+        }
+        const Vec2* o = (const Vec2*)a[0].data.ptr;
+        const Vec2* s = (const Vec2*)a[1].data.ptr;
+        const Vec2* d = (const Vec2*)a[3].data.ptr;
+        ox = o->x; oy = o->y; hw = s->x * 0.5f; hh = s->y * 0.5f;
+        dx = d->x; dy = d->y;
+        results = a[4];       // BoxCastNonAlloc(..., results, distance, mask)
+        dist = a[5].data.f32;
+    } else {
+        if (argc < 5 || a[0].tag != VT_VEC2 || a[1].tag != VT_VEC2) {
+            return RetI32V(ret, 0);
+        }
+        const Vec2* o = (const Vec2*)a[0].data.ptr;
+        const Vec2* d = (const Vec2*)a[1].data.ptr;
+        ox = o->x; oy = o->y; dx = d->x; dy = d->y;
+        results = a[2];       // RaycastNonAlloc(origin, direction, results, distance, mask)
+        dist = a[3].data.f32;
+    }
+    if (results.tag != VT_ARRAY || !results.data.array || !hit_type) {
+        return RetI32V(ret, 0);
+    }
+    ArrayObject* arr = results.data.array;
+    PhysicsHit hits[64];
+    u32 max = arr->length < 64 ? arr->length : 64;
+    f32 len = sqrtf(dx * dx + dy * dy);
+    if (len > 0.000001f) { dx /= len; dy /= len; }
+    u32 count = Physics2D_CollectHits(in, ox, oy, hw, hh, dx, dy, dist, hits, max);
+    static u32 s_phys_logs = 0;
+    if (s_phys_logs < 8) {
+        LogInfo("phys", "cast box=%d origin=%.1f,%.1f half=%.1f,%.1f dir=%.1f,%.1f dist=%.1f len=%u hits=%u",
+                box ? 1 : 0, ox, oy, hw, hh, dx, dy, dist, arr->length, count);
+        for (u32 i = 0; i < count && i < 4; ++i) {
+            LogInfo("phys", "  hit t=%.1f point=%.1f,%.1f collider=%u object=%u",
+                    hits[i].t, ox + dx * hits[i].t, oy + dy * hits[i].t,
+                    hits[i].ci, hits[i].oi);
+        }
+        ++s_phys_logs;
+    }
+    for (u32 i = 0; i < count; ++i) {
+        Object* hit = in.AllocObjectWithSlots(hit_type, 8);
+        if (!hit) { count = i; break; }
+        Physics2D_FillHit(in, hit, hits[i], ox, oy, dx, dy, dist);
+        arr->Elements()[i] = Value::StructRef(hit);
+    }
+    return RetI32V(ret, (s32)count);
+}
+
+static bool Physics2D_BoxCastNonAlloc(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    return Physics2D_NonAlloc(in, argc, a, true, ret);
+}
+static bool Physics2D_RaycastNonAlloc(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    return Physics2D_NonAlloc(in, argc, a, false, ret);
+}
+
+static Object* HitObject(const Value& v) {
+    Value x = v;
+    if (x.tag == VT_BYREF && x.data.ref) x = *x.data.ref;
+    return (x.tag == VT_STRUCT || x.tag == VT_OBJECT) ? x.data.obj : 0;
+}
+static bool Hit_GetCollider(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* h = HitObject(a[0]);
+    if (ret) *ret = h ? h->Fields()[0] : Value::Null();
+    return true;
+}
+static bool Hit_GetPoint(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* h = HitObject(a[0]);
+    if (ret) *ret = h ? h->Fields()[1] : Value::Null();
+    return true;
+}
+static bool Hit_GetNormal(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* h = HitObject(a[0]);
+    if (ret) *ret = h ? h->Fields()[2] : Value::Null();
+    return true;
+}
+static bool Hit_GetDistance(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* h = HitObject(a[0]);
+    return RetF32Field(ret, h ? h->Fields()[3].data.f32 : 0.0f);
+}
+static bool Hit_GetFraction(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* h = HitObject(a[0]);
+    return RetF32Field(ret, h ? h->Fields()[4].data.f32 : 0.0f);
+}
+static bool Hit_GetTransform(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* h = HitObject(a[0]);
+    if (ret) *ret = h ? h->Fields()[5] : Value::Null();
+    return true;
+}
+static bool Hit_GetRigidbody(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* h = HitObject(a[0]);
+    if (ret) *ret = h ? h->Fields()[6] : Value::Null();
+    return true;
+}
+static bool Hit_IsTrue(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* h = HitObject(a[0]);
+    bool hit = h && h->Fields()[0].tag == VT_OBJECT && h->Fields()[0].data.obj != 0;
+    return RetBoolV(ret, hit);
+}
+
 static u32 g_rng_state = 0x2545F491u;
 static u32 NextRandom() {
     g_rng_state = g_rng_state * 1664525u + 1013904223u;
@@ -871,8 +1295,60 @@ static bool Random_InitState(Interpreter& in, const MemberRefInfo&, u32, Value* 
     return RetVoid(ret);
 }
 
-static bool Renderer_GetMaterial(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
-    u32 ci = ManagedComponentIndex(in, a[0]);
+static Object* ColorObject(const Value& v) {
+    Value x = v;
+    if (x.tag == VT_BYREF && x.data.ref) x = *x.data.ref;
+    if ((x.tag == VT_STRUCT || x.tag == VT_OBJECT) && x.data.obj) return x.data.obj;
+    return 0;
+}
+static bool Color_Make(Interpreter& in, Value* ret, f32 r, f32 g, f32 b, f32 a) {
+    u32 ct = in.Metadata().FindType("UnityEngine.Color");
+    Object* o = in.AllocObjectWithSlots(ct, 4);
+    if (!o) return false;
+    o->Fields()[0] = Value::R4(r);
+    o->Fields()[1] = Value::R4(g);
+    o->Fields()[2] = Value::R4(b);
+    o->Fields()[3] = Value::R4(a);
+    if (ret) *ret = Value::StructRef(o);
+    return true;
+}
+static bool Color_Red(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) { return Color_Make(in, ret, 1, 0, 0, 1); }
+static bool Color_Green(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) { return Color_Make(in, ret, 0, 1, 0, 1); }
+static bool Color_Blue(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) { return Color_Make(in, ret, 0, 0, 1, 1); }
+static bool Color_White(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) { return Color_Make(in, ret, 1, 1, 1, 1); }
+static bool Color_Black(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) { return Color_Make(in, ret, 0, 0, 0, 1); }
+static bool Color_Yellow(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) { return Color_Make(in, ret, 1, 1, 0, 1); }
+static bool Color_Clear(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) { return Color_Make(in, ret, 0, 0, 0, 0); }
+static bool Color_Ctor(Interpreter& in, const MemberRefInfo& member, u32 argc, Value* a, Value* ret) {
+    Object* o = ColorObject(a[0]);
+    if (!o && a[0].tag == VT_BYREF && a[0].data.ref) {
+        Value s = in.NewStructValue(member.decl_id);
+        *a[0].data.ref = s;
+        o = ColorObject(s);
+    }
+    if (!o) o = in.AllocObjectWithSlots(member.decl_id, 4);
+    if (o) {
+        if (argc >= 2) o->Fields()[0] = Value::R4(a[1].data.f32);
+        if (argc >= 3) o->Fields()[1] = Value::R4(a[2].data.f32);
+        if (argc >= 4) o->Fields()[2] = Value::R4(a[3].data.f32);
+        if (argc >= 5) o->Fields()[3] = Value::R4(a[4].data.f32);
+    }
+    if (ret) *ret = o ? Value::StructRef(o) : Value::Null();
+    return true;
+}
+static bool Animator_StringToHash(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    u32 h = 2166136261u;
+    if (argc >= 1 && a[0].tag == VT_STRING && a[0].data.str) {
+        const u16* s = a[0].data.str->Chars();
+        for (u32 i = 0; i < a[0].data.str->length; ++i) {
+            h ^= (u8)(s[i] & 0xFF);
+            h *= 16777619u;
+        }
+    }
+    return RetI32V(ret, (s32)h);
+}
+
+static bool Renderer_GetMaterial(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {    u32 ci = ManagedComponentIndex(in, a[0]);
     Value comp = in.ManagedComponent(ci);
     if (comp.tag == VT_OBJECT && comp.data.obj) {
         Object* c = comp.data.obj;
@@ -890,6 +1366,32 @@ static bool Renderer_GetMaterial(Interpreter& in, const MemberRefInfo&, u32, Val
     }
     if (ret) *ret = Value::Null();
     return true;
+}
+
+static f32 g_fixed_dt = 1.0f / 60.0f;
+static f32 g_delta = 1.0f / 60.0f;
+static f32 g_time = 0.0f;
+static f32 g_time_scale = 1.0f;
+static u32 g_frame_count = 0;
+
+static bool Time_GetFixedDelta(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
+    return RetF32Field(ret, g_fixed_dt);
+}
+static bool Time_GetDelta(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
+    return RetF32Field(ret, g_delta);
+}
+static bool Time_GetTime(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
+    return RetF32Field(ret, g_time);
+}
+static bool Time_GetTimeScale(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
+    return RetF32Field(ret, g_time_scale);
+}
+static bool Time_SetTimeScale(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    g_time_scale = a[0].data.f32;
+    return RetVoid(ret);
+}
+static bool Time_GetFrameCount(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
+    return RetI32V(ret, (s32)g_frame_count);
 }
 
 static bool StringEqualsAscii(const Value& v, const char* text) {
@@ -1003,6 +1505,10 @@ static bool MonoBehaviour_StartCoroutine(Interpreter&, const MemberRefInfo&, u32
 }
 
 static bool Vector3_Ctor(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag == VT_BYREF && a[0].data.ref) {
+        *a[0].data.ref = in.NewVec3(a[1].data.f32, a[2].data.f32, a[3].data.f32);
+        return RetVoid(ret);
+    }
     if (ret) *ret = in.NewVec3(a[1].data.f32, a[2].data.f32, a[3].data.f32);
     return true;
 }
@@ -1040,10 +1546,17 @@ static bool Vector3_Mul(Interpreter& in, const MemberRefInfo&, u32, Value* a, Va
     return true;
 }
 static bool Vector3_ImplicitV2(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
-    if (a[0].tag != VT_VEC3 || !a[0].data.ptr) return false;
-    const Vec3* x = (const Vec3*)a[0].data.ptr;
-    if (ret) *ret = in.NewVec2(x->x, x->y);
-    return true;
+    if (a[0].tag == VT_VEC3 && a[0].data.ptr) {
+        const Vec3* x = (const Vec3*)a[0].data.ptr;
+        if (ret) *ret = in.NewVec2(x->x, x->y);
+        return true;
+    }
+    if (a[0].tag == VT_VEC2 && a[0].data.ptr) {
+        const Vec2* x = (const Vec2*)a[0].data.ptr;
+        if (ret) *ret = in.NewVec3(x->x, x->y, 0.0f);
+        return true;
+    }
+    return false;
 }
 static bool Vector2_ImplicitV3(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     if (a[0].tag != VT_VEC2 || !a[0].data.ptr) return false;
@@ -1164,10 +1677,60 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
     if (strcmp(type, "UnityEngine.Resources") == 0) {
         if (strcmp(n, "Load") == 0) return Resources_Load(in, member, argc, args, ret);
     }
+    if (strcmp(type, "UnityEngine.Physics2D") == 0) {
+        if (strcmp(n, "BoxCast") == 0) return Physics2D_BoxCast(in, member, argc, args, ret);
+        if (strcmp(n, "Raycast") == 0) return Physics2D_Raycast(in, member, argc, args, ret);
+        if (strcmp(n, "BoxCastNonAlloc") == 0) return Physics2D_BoxCastNonAlloc(in, member, argc, args, ret);
+        if (strcmp(n, "RaycastNonAlloc") == 0) return Physics2D_RaycastNonAlloc(in, member, argc, args, ret);
+    }
+    if (strcmp(type, "UnityEngine.RaycastHit2D") == 0) {
+        if (strcmp(n, "get_collider") == 0) return Hit_GetCollider(in, member, argc, args, ret);
+        if (strcmp(n, "get_point") == 0) return Hit_GetPoint(in, member, argc, args, ret);
+        if (strcmp(n, "get_normal") == 0) return Hit_GetNormal(in, member, argc, args, ret);
+        if (strcmp(n, "get_distance") == 0) return Hit_GetDistance(in, member, argc, args, ret);
+        if (strcmp(n, "get_fraction") == 0) return Hit_GetFraction(in, member, argc, args, ret);
+        if (strcmp(n, "get_transform") == 0) return Hit_GetTransform(in, member, argc, args, ret);
+        if (strcmp(n, "get_rigidbody") == 0) return Hit_GetRigidbody(in, member, argc, args, ret);
+        if (strcmp(n, "op_Implicit") == 0 || strcmp(n, "op_True") == 0) return Hit_IsTrue(in, member, argc, args, ret);
+        if (strcmp(n, "op_False") == 0) {
+            bool hit = Hit_IsTrue(in, member, argc, args, ret) && ret && ret->data.i32 != 0;
+            return RetBoolV(ret, !hit);
+        }
+    }
+    if (strcmp(type, "UnityEngine.Time") == 0) {
+        if (strcmp(n, "get_fixedDeltaTime") == 0) return Time_GetFixedDelta(in, member, argc, args, ret);
+        if (strcmp(n, "get_deltaTime") == 0 || strcmp(n, "get_unscaledDeltaTime") == 0) return Time_GetDelta(in, member, argc, args, ret);
+        if (strcmp(n, "get_time") == 0 || strcmp(n, "get_unscaledTime") == 0 || strcmp(n, "get_fixedTime") == 0) return Time_GetTime(in, member, argc, args, ret);
+        if (strcmp(n, "get_timeScale") == 0) return Time_GetTimeScale(in, member, argc, args, ret);
+        if (strcmp(n, "set_timeScale") == 0) return Time_SetTimeScale(in, member, argc, args, ret);
+        if (strcmp(n, "get_frameCount") == 0) return Time_GetFrameCount(in, member, argc, args, ret);
+    }
     if (strcmp(type, "UnityEngine.Random") == 0) {
         if (strcmp(n, "Range") == 0) return Random_Range(in, member, argc, args, ret);
         if (strcmp(n, "get_value") == 0) return Random_Value(in, member, argc, args, ret);
         if (strcmp(n, "InitState") == 0) return Random_InitState(in, member, argc, args, ret);
+    }
+    if (strcmp(type, "UnityEngine.Color") == 0) {
+        if (strcmp(n, ".ctor") == 0) return Color_Ctor(in, member, argc, args, ret);
+        if (strcmp(n, "get_red") == 0) return Color_Red(in, member, argc, args, ret);
+        if (strcmp(n, "get_green") == 0) return Color_Green(in, member, argc, args, ret);
+        if (strcmp(n, "get_blue") == 0) return Color_Blue(in, member, argc, args, ret);
+        if (strcmp(n, "get_white") == 0) return Color_White(in, member, argc, args, ret);
+        if (strcmp(n, "get_black") == 0) return Color_Black(in, member, argc, args, ret);
+        if (strcmp(n, "get_yellow") == 0) return Color_Yellow(in, member, argc, args, ret);
+        if (strcmp(n, "get_clear") == 0) return Color_Clear(in, member, argc, args, ret);
+    }
+    if (strcmp(type, "UnityEngine.Debug") == 0) {
+        if (strcmp(n, "DrawLine") == 0 || strcmp(n, "DrawRay") == 0 ||
+            strcmp(n, "Log") == 0 || strcmp(n, "LogWarning") == 0 ||
+            strcmp(n, "LogError") == 0 || strcmp(n, "Assert") == 0) {
+            return RetVoid(ret);
+        }
+    }
+    if (strcmp(type, "UnityEngine.Animator") == 0) {
+        if (strcmp(n, "StringToHash") == 0) return Animator_StringToHash(in, member, argc, args, ret);
+        if (strcmp(n, "set_speed") == 0) return Animator_SetSpeed(in, member, argc, args, ret);
+        if (strcmp(n, "get_speed") == 0) return Animator_GetSpeed(in, member, argc, args, ret);
     }
     if (strcmp(type, "UnityEngine.Rect") == 0) {
         if (strcmp(n, "get_x") == 0) return Rect_GetX(in, member, argc, args, ret);

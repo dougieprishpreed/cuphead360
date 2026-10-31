@@ -276,6 +276,34 @@ static bool String_EndsWith(Interpreter&, const MemberRefInfo&, u32, Value* a, V
 static bool String_IndexOf(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
     return RetI32(ret, StringFind(a[0], a[1]));
 }
+static bool Char_IsUpper(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    s32 c = Interpreter::ToI32(a[0]);
+    return RetBool(ret, c >= 'A' && c <= 'Z');
+}
+static bool Char_IsLower(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    s32 c = Interpreter::ToI32(a[0]);
+    return RetBool(ret, c >= 'a' && c <= 'z');
+}
+static bool Char_IsDigit(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    s32 c = Interpreter::ToI32(a[0]);
+    return RetBool(ret, c >= '0' && c <= '9');
+}
+static bool Char_IsLetter(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    s32 c = Interpreter::ToI32(a[0]);
+    return RetBool(ret, (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
+}
+static bool Char_IsWhiteSpace(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    s32 c = Interpreter::ToI32(a[0]);
+    return RetBool(ret, c == ' ' || c == '\t' || c == '\r' || c == '\n');
+}
+static bool Char_ToLower(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    s32 c = Interpreter::ToI32(a[0]);
+    return RetI32(ret, (c >= 'A' && c <= 'Z') ? c + 32 : c);
+}
+static bool Char_ToUpper(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    s32 c = Interpreter::ToI32(a[0]);
+    return RetI32(ret, (c >= 'a' && c <= 'z') ? c - 32 : c);
+}
 
 // ---------------------------------------------------------------------------
 // UnityEngine.Vector2 / Vector3 (value types)
@@ -293,6 +321,10 @@ static Vec3* AsVec3(const Value& v) {
 }
 
 static bool Vec2_Ctor(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag == VT_BYREF && a[0].data.ref) {
+        *a[0].data.ref = in.NewVec2(a[1].data.f32, a[2].data.f32);
+        return RetVoid(ret);
+    }
     if (ret) *ret = in.NewVec2(a[1].data.f32, a[2].data.f32);
     return true;
 }
@@ -313,6 +345,37 @@ static bool Vec2_Zero(Interpreter& in, const MemberRefInfo&, u32, Value*, Value*
 }
 static bool Vec2_One(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
     if (ret) *ret = in.NewVec2(1.0f, 1.0f); return true;
+}
+static bool Vec2_Left(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    if (ret) *ret = in.NewVec2(-1.0f, 0.0f); return true;
+}
+static bool Vec2_Right(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    if (ret) *ret = in.NewVec2(1.0f, 0.0f); return true;
+}
+static bool Vec2_Up(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    if (ret) *ret = in.NewVec2(0.0f, 1.0f); return true;
+}
+static bool Vec2_Down(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    if (ret) *ret = in.NewVec2(0.0f, -1.0f); return true;
+}
+static bool Vec2_Normalized(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Vec2* v = AsVec2(a[0]);
+    if (!v) { if (ret) *ret = in.NewVec2(0.0f, 0.0f); return true; }
+    f32 m = sqrtf(v->x * v->x + v->y * v->y);
+    if (m < 0.000001f) { if (ret) *ret = in.NewVec2(0.0f, 0.0f); return true; }
+    if (ret) *ret = in.NewVec2(v->x / m, v->y / m);
+    return true;
+}
+static bool Vec2_Distance(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Vec2* x = AsVec2(a[0]); Vec2* y = AsVec2(a[1]);
+    if (!x || !y) return false;
+    f32 dx = x->x - y->x, dy = x->y - y->y;
+    return RetF32(ret, sqrtf(dx * dx + dy * dy));
+}
+static bool Vec2_Dot(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Vec2* x = AsVec2(a[0]); Vec2* y = AsVec2(a[1]);
+    if (!x || !y) return false;
+    return RetF32(ret, x->x * y->x + x->y * y->y);
 }
 static bool Vec2_Add(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     Vec2* x = AsVec2(a[0]); Vec2* y = AsVec2(a[1]);
@@ -362,10 +425,17 @@ static bool Vec2_Lerp(Interpreter& in, const MemberRefInfo&, u32, Value* a, Valu
     return true;
 }
 static bool Vec2_ImplicitV3(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
-    Vec2* x = AsVec2(a[0]);
-    if (!x) return false;
-    if (ret) *ret = in.NewVec3(x->x, x->y, 0.0f);
-    return true;
+    if (a[0].tag == VT_VEC2 && a[0].data.ptr) {
+        const Vec2* x = (const Vec2*)a[0].data.ptr;
+        if (ret) *ret = in.NewVec3(x->x, x->y, 0.0f);
+        return true;
+    }
+    if (a[0].tag == VT_VEC3 && a[0].data.ptr) {
+        const Vec3* x = (const Vec3*)a[0].data.ptr;
+        if (ret) *ret = in.NewVec2(x->x, x->y);
+        return true;
+    }
+    return false;
 }
 static bool Vec3_GetX(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
     Vec3* v = AsVec3(a[0]); return v ? RetF32(ret, v->x) : false;
@@ -999,10 +1069,12 @@ static bool Exception_Ctor(Interpreter& in, const MemberRefInfo& member, u32, Va
 static f32 g_rewired_axis_x = 0.0f;
 static f32 g_rewired_axis_y = 0.0f;
 static u32 g_rewired_buttons = 0;
+static u32 g_rewired_buttons_prev = 0;
 
 void SetRewiredInputState(f32 axis_x, f32 axis_y, u32 buttons) {
     g_rewired_axis_x = axis_x;
     g_rewired_axis_y = axis_y;
+    g_rewired_buttons_prev = g_rewired_buttons;
     g_rewired_buttons = buttons;
 }
 
@@ -1011,11 +1083,30 @@ static bool Rewired_GetAxis(Interpreter&, const MemberRefInfo&, u32 argc, Value*
     s32 axis = Interpreter::ToI32(a[1]);
     return RetF32(ret, axis == 0 ? g_rewired_axis_x : g_rewired_axis_y);
 }
+static bool Rewired_ButtonBit(Value* a, u32* bit) {
+    s32 button = Interpreter::ToI32(a[1]);
+    if (button < 0 || button >= 32) return false;
+    *bit = 1u << button;
+    return true;
+}
 static bool Rewired_GetButton(Interpreter&, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
     if (argc < 2) return RetBool(ret, false);
-    s32 button = Interpreter::ToI32(a[1]);
-    return RetBool(ret, button >= 0 && button < 32 &&
-                        ((g_rewired_buttons >> button) & 1u) != 0);
+    u32 bit = 0;
+    return RetBool(ret, Rewired_ButtonBit(a, &bit) && (g_rewired_buttons & bit) != 0);
+}
+static bool Rewired_GetButtonDown(Interpreter&, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    if (argc < 2) return RetBool(ret, false);
+    u32 bit = 0;
+    return RetBool(ret, Rewired_ButtonBit(a, &bit) &&
+                        (g_rewired_buttons & bit) != 0 &&
+                        (g_rewired_buttons_prev & bit) == 0);
+}
+static bool Rewired_GetButtonUp(Interpreter&, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    if (argc < 2) return RetBool(ret, false);
+    u32 bit = 0;
+    return RetBool(ret, Rewired_ButtonBit(a, &bit) &&
+                        (g_rewired_buttons & bit) == 0 &&
+                        (g_rewired_buttons_prev & bit) != 0);
 }
 
 static const NativeEntry kEntries[] = {
@@ -1026,6 +1117,13 @@ static const NativeEntry kEntries[] = {
     { "UnityEngine.Vector2", "set_y", Vec2_SetY },
     { "UnityEngine.Vector2", "get_zero", Vec2_Zero },
     { "UnityEngine.Vector2", "get_one", Vec2_One },
+    { "UnityEngine.Vector2", "get_left", Vec2_Left },
+    { "UnityEngine.Vector2", "get_right", Vec2_Right },
+    { "UnityEngine.Vector2", "get_up", Vec2_Up },
+    { "UnityEngine.Vector2", "get_down", Vec2_Down },
+    { "UnityEngine.Vector2", "get_normalized", Vec2_Normalized },
+    { "UnityEngine.Vector2", "Distance", Vec2_Distance },
+    { "UnityEngine.Vector2", "Dot", Vec2_Dot },
     { "UnityEngine.Vector2", "op_Addition", Vec2_Add },
     { "UnityEngine.Vector2", "op_Subtraction", Vec2_Sub },
     { "UnityEngine.Vector2", "op_Multiply", Vec2_Mul },
@@ -1080,6 +1178,13 @@ static const NativeEntry kEntries[] = {
     { "System.String", "StartsWith", String_StartsWith },
     { "System.String", "EndsWith", String_EndsWith },
     { "System.String", "IndexOf", String_IndexOf },
+    { "System.Char", "IsUpper", Char_IsUpper },
+    { "System.Char", "IsLower", Char_IsLower },
+    { "System.Char", "IsDigit", Char_IsDigit },
+    { "System.Char", "IsLetter", Char_IsLetter },
+    { "System.Char", "IsWhiteSpace", Char_IsWhiteSpace },
+    { "System.Char", "ToLower", Char_ToLower },
+    { "System.Char", "ToUpper", Char_ToUpper },
     { "System.Array", "GetEnumerator", Array_GetEnumerator },
     { "System.Delegate", "Combine", Delegate_Combine },
     { "System.Delegate", "Remove", Delegate_Remove },
@@ -1116,10 +1221,16 @@ static const NativeEntry kEntries[] = {
     { "System.IO.StringReader", "Dispose", Native_Void },
     { "Rewired.Player", "GetAxis", Rewired_GetAxis },
     { "Rewired.Player", "GetButton", Rewired_GetButton },
+    { "Rewired.Player", "GetButtonDown", Rewired_GetButtonDown },
+    { "Rewired.Player", "GetButtonUp", Rewired_GetButtonUp },
 };
 
 bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value* args, Value* ret) {
     if (ret) *ret = Value::Void();
+    if (arg_count >= 1 && args[0].tag == VT_DELEGATE && args[0].data.del &&
+        strcmp(member.name, "Invoke") == 0) {
+        return InvokeDelegate(args[0].data.del, arg_count, args, ret);
+    }
     const TypeInfo& t = metadata_.Type(member.decl_id);
     if (arg_count >= 1 && (args[0].tag == VT_OBJECT || args[0].tag == VT_STRUCT) &&
         args[0].data.obj) {
@@ -1168,6 +1279,19 @@ bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value
         if (strcmp(n, "get_Count") == 0) return Dict_GetCount(*this, member, arg_count, args, ret);
         if (strcmp(n, "Clear") == 0) return Dict_Clear(*this, member, arg_count, args, ret);
         if (strcmp(n, "Remove") == 0) return Dict_Remove(*this, member, arg_count, args, ret);
+    }
+    if (strstr(t.full_name, "GCFreePredicateList")) {
+        const char* n = member.name;
+        if (strcmp(n, ".ctor") == 0) {
+            Object* o = AllocObjectWithSlots(member.decl_id, 8);
+            if (ret) *ret = o ? Value::ObjectRef(o) : Value::Null();
+            return o != 0;
+        }
+        if (strcmp(n, "Add") == 0 || strcmp(n, "Clear") == 0 || strcmp(n, "Remove") == 0) {
+            return RetVoid(ret);
+        }
+        if (strcmp(n, "get_Count") == 0) return RetI32(ret, 0);
+        if (strcmp(n, "Contains") == 0) return RetBool(ret, false);
     }
     for (u32 i = 0; i < CH360_ARRAY_COUNT(kEntries); ++i) {
         if (strcmp(kEntries[i].type, t.full_name) == 0 &&

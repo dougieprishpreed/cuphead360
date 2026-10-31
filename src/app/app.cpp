@@ -444,7 +444,7 @@ static bool InvokeOnComponent(Interpreter& interp, u32 method, Value obj, Value*
 // Exercises the original platforming player stack against the extracted
 // prefab: static Level state, generic GetComponent<T>, Awake, LevelInit and
 // LevelStart. Failures are reported by the interpreter with the exact method.
-static int RunStackTest(MetadataPackage& pkg, const AppConfig& config) {
+static int RunStackTest(MetadataPackage& pkg, const AppConfig& config, bool drive_motor) {
     if (!config.scene_path) {
         LogError("stack", "no scene path");
         return 1;
@@ -584,6 +584,46 @@ static int RunStackTest(MetadataPackage& pkg, const AppConfig& config) {
     bool start_ok = level_start && InvokeOnComponent(interp, level_start, controller, &r);
     LogInfo("stack", "player LevelStart %s", start_ok ? "PASS" : "FAIL");
     pass = pass && start_ok;
+
+    if (drive_motor) {
+        u32 motor_type = pkg.FindType("LevelPlayerMotor");
+        u32 fixed_update = pkg.FindMethod(motor_type, "FixedUpdate");
+        u32 player_oi = interp.ManagedObjectIndexFor(controller);
+        if (!fixed_update || motor.tag != VT_OBJECT || player_oi >= scene.ObjectCount()) {
+            LogError("stack", "motor test prerequisites missing (method=%u motor=%d oi=%u)",
+                     fixed_update, motor.tag, player_oi);
+            pass = false;
+        } else {
+            f32 start_x = scene.Object(player_oi).world_x;
+            f32 start_y = scene.Object(player_oi).world_y;
+            f32 max_x = start_x, min_y = start_y, max_y = start_y;
+            u32 frames = config.frames > 1 ? config.frames : 180;
+            for (u32 i = 0; i < frames; ++i) {
+                u32 buttons = 0;
+                if (i >= 20 && i < 50) buttons |= 1u << 2; // Jump
+                SetRewiredInputState(1.0f, 0.0f, buttons);
+                Value args[1]; args[0] = motor; Value mr;
+                if (!interp.Invoke(fixed_update, args, 1, &mr)) break;
+                f32 px = scene.Object(player_oi).world_x;
+                f32 py = scene.Object(player_oi).world_y;
+                if (px > max_x) max_x = px;
+                if (py < min_y) min_y = py;
+                if (py > max_y) max_y = py;
+                if (i % 30 == 0) {
+                    LogInfo("stack", "motor frame=%u pos=%.2f,%.2f",
+                            i, px, py);
+                }
+            }
+            f32 end_x = scene.Object(player_oi).world_x;
+            f32 end_y = scene.Object(player_oi).world_y;
+            bool moved = max_x > start_x + 100.0f;
+            bool grounded = min_y > start_y - 200.0f;
+            LogInfo("stack", "motor moved start=%.2f,%.2f max_x=%.2f end=%.2f,%.2f min_y=%.2f %s",
+                    start_x, start_y, max_x, end_x, end_y, min_y,
+                    (moved && grounded) ? "PASS" : "FAIL");
+            pass = pass && moved && grounded;
+        }
+    }
 
     LogInfo("stack", "result=%s", pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
@@ -923,6 +963,7 @@ int AppMain(const AppConfig& config) {
                             strcmp(config.command, "logic") == 0 ||
                             strcmp(config.command, "unity") == 0 ||
                             strcmp(config.command, "stack") == 0 ||
+                            strcmp(config.command, "motor") == 0 ||
                             strcmp(config.command, "play") == 0));
     const char* metadata_path = config.metadata_path;
 #if defined(_XBOX)
@@ -963,7 +1004,14 @@ int AppMain(const AppConfig& config) {
             LogError("stack", "metadata and scene required");
             result = 1;
         } else {
-            result = RunStackTest(metadata, config);
+            result = RunStackTest(metadata, config, false);
+        }
+    } else if (config.command && strcmp(config.command, "motor") == 0) {
+        if (!metadata.IsLoaded() || !config.scene_path) {
+            LogError("stack", "metadata and scene required");
+            result = 1;
+        } else {
+            result = RunStackTest(metadata, config, true);
         }
     } else if (config.command && strcmp(config.command, "scene") == 0) {
         result = RunScene(config);

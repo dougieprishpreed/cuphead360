@@ -38,6 +38,10 @@ int main(int argc, char** argv) {
         } else if (ArgEquals(a, "--stack")) {
             cfg.command = "stack";
             explicit_mode = true;
+        } else if (ArgEquals(a, "--motor")) {
+            cfg.command = "motor";
+            explicit_mode = true;
+            cfg.frames = 180;
         } else if (ArgEquals(a, "--play")) {
             cfg.command = "play";
             explicit_mode = true;
@@ -68,6 +72,7 @@ int main(int argc, char** argv) {
             printf("  --scene PATH\n");
             printf("  --unity\n");
             printf("  --stack\n");
+            printf("  --motor\n");
             printf("  --play\n");
             printf("  --manual\n");
             printf("  --screenshot PATH\n");

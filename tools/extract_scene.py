@@ -603,6 +603,28 @@ def parse_sig_value(builder, sig, raw, pos, values, field_id, parent, index):
     return None
 
 
+def parse_field_value(builder, f, raw, pos, values, parent):
+    """Parses one serialized field, recursing into nested [Serializable] classes."""
+    sig = f.sig
+    t = builder.types[sig.type_id] if sig.type_id and sig.type_id < len(builder.types) else None
+    is_enum_type = bool(t is not None and (t.is_enum or (t.field_count and any(builder.fields[fid].name == "value__" for fid in range(t.field_start, t.field_start + t.field_count)))))
+    if sig.kind in (SIG_CLASS, SIG_VALUETYPE) and t is not None and not t.external:
+        if (not is_enum_type and
+            not _is_unity_object_type(builder, t) and
+            t.full_name not in ("UnityEngine.Vector2", "UnityEngine.Vector3", "UnityEngine.Vector4",
+                               "UnityEngine.Quaternion", "UnityEngine.Color", "UnityEngine.Rect",
+                               "UnityEngine.LayerMask", "System.String")):
+            nested = serialized_fields(builder, t.full_name)
+            if nested is None:
+                return None
+            for nf in nested:
+                pos = parse_field_value(builder, nf, raw, pos, values, f.id)
+                if pos is None:
+                    return None
+            return pos
+    return parse_sig_value(builder, sig, raw, pos, values, f.id, parent, 0)
+
+
 def parse_script_values(builder, full_name: str, raw: bytes):
     fields = serialized_fields(builder, full_name)
     if fields is None:
@@ -610,29 +632,7 @@ def parse_script_values(builder, full_name: str, raw: bytes):
     pos = mb_header_offset(raw)
     values = []
     for f in fields:
-        sig = f.sig
-        t = builder.types[sig.type_id] if sig.type_id and sig.type_id < len(builder.types) else None
-        # Nested [Serializable] classes are stored inline with no header.
-        is_enum_type = bool(t is not None and (t.is_enum or (t.field_count and any(builder.fields[fid].name == "value__" for fid in range(t.field_start, t.field_start + t.field_count)))))
-        if sig.kind in (SIG_CLASS, SIG_VALUETYPE) and t is not None and not t.external:
-            if (not is_enum_type and
-                not _is_unity_object_type(builder, t) and
-                t.full_name not in ("UnityEngine.Vector2", "UnityEngine.Vector3", "UnityEngine.Vector4",
-                                   "UnityEngine.Quaternion", "UnityEngine.Color", "UnityEngine.Rect",
-                                   "UnityEngine.LayerMask", "System.String")):
-                nested = serialized_fields(builder, t.full_name)
-                if nested is None:
-                    break
-                ok = True
-                for nf in nested:
-                    pos = parse_sig_value(builder, nf.sig, raw, pos, values, nf.id, f.id, 0)
-                    if pos is None:
-                        ok = False
-                        break
-                if not ok:
-                    break
-                continue
-        pos = parse_sig_value(builder, sig, raw, pos, values, f.id, 0, 0)
+        pos = parse_field_value(builder, f, raw, pos, values, 0)
         if pos is None:
             break
     return values
@@ -807,6 +807,55 @@ def append_prefab(env, out, atlas_cache, field_builder, root_go_id=5401):
         if p in byid: byid[p]["transform"]["children"].append(o["id"])
     out["gameobjects"].extend(objects)
     return objects
+
+def append_level_bounds(out):
+    """Adds the runtime Level bounds colliders (ground/ceiling/walls) to the scene.
+
+    Level.SetupCollider creates 10000x400 colliders at the bounds edges and
+    rotates the side walls by +/-90 degrees. Emit the equivalent axis-aligned
+    boxes (walls swapped to 400x10000) so the physics layer sees the same area.
+    """
+    vals = {}
+    for g in out["gameobjects"]:
+        for c in g["components"]:
+            if c.get("type") != "MonoBehaviour":
+                continue
+            for v in c.get("values", []):
+                if v.get("parent") == 7163 and v.get("field_id") in (7215, 7216, 7217, 7218, 7219, 7220, 7221, 7222):
+                    vals[v["field_id"]] = v.get("value")
+    if 7215 not in vals or 7216 not in vals or 7217 not in vals or 7218 not in vals:
+        return
+    left = int(vals.get(7215, 0)); right = int(vals.get(7216, 0))
+    top = int(vals.get(7217, 0)); bottom = int(vals.get(7218, 0))
+    cx = (right - left) / 2.0
+    cy = (top - bottom) / 2.0
+    specs = [
+        (900001, "Level_Wall_Left", (-left - 200.0, cy), (400.0, 10000.0), bool(vals.get(7221, 1))),
+        (900002, "Level_Wall_Right", (right + 200.0, cy), (400.0, 10000.0), bool(vals.get(7222, 1))),
+        (900003, "Level_Ceiling", (cx, top + 200.0), (10000.0, 400.0), bool(vals.get(7219, 1))),
+        (900004, "Level_Ground", (cx, -bottom - 200.0), (10000.0, 400.0), bool(vals.get(7220, 1))),
+    ]
+    for oid, name, pos, size, enabled in specs:
+        out["gameobjects"].append({
+            "id": oid,
+            "name": name,
+            "active": True,
+            "transform": {
+                "position": [float(pos[0]), float(pos[1]), 0.0],
+                "rotation": [0.0, 0.0, 0.0, 1.0],
+                "scale": [1.0, 1.0, 1.0],
+                "parent": 0,
+                "children": [],
+            },
+            "components": [{
+                "type": "BoxCollider2D",
+                "source_id": 950000 + (oid - 900000),
+                "enabled": enabled,
+                "size": [float(size[0]), float(size[1])],
+                "offset": [0.0, 0.0],
+            }],
+        })
+
 
 def extract_animations(env, out, atlas_cache, out_dir):
     gos_by_id = {g["id"]: g for g in out["gameobjects"]}
@@ -1113,6 +1162,37 @@ def main():
                     gos[go_id]["components"].append(comp)
             except Exception as e:
                 print("MonoBehaviour parse skipped", o.path_id, e)
+        elif o.type.name in ("BoxCollider2D", "CircleCollider2D", "Rigidbody2D"):
+            try:
+                col = o.read()
+                go_pptr = col.m_GameObject
+                go_id = go_pptr.m_PathID if go_pptr else 0
+                if go_id not in gos:
+                    continue
+                if o.type.name == "Rigidbody2D":
+                    c = {
+                        "type": "Rigidbody2D", "source_id": o.path_id,
+                        "enabled": bool(col.m_Simulated),
+                        "mass": float(getattr(col, "m_Mass", 1.0)),
+                        "drag": float(getattr(col, "m_LinearDrag", 0.0)),
+                        "angularDrag": float(getattr(col, "m_AngularDrag", 0.05)),
+                        "gravityScale": float(getattr(col, "m_GravityScale", 1.0)),
+                        "bodyType": int(getattr(col, "m_BodyType", 0)),
+                        "simulated": bool(col.m_Simulated),
+                        "isKinematic": bool(getattr(col, "m_IsKinematic", False)),
+                        "freezeRotation": bool(getattr(col, "m_FixedAngle", False)),
+                    }
+                else:
+                    c = {
+                        "type": o.type.name, "source_id": o.path_id,
+                        "enabled": bool(col.m_Enabled),
+                        "size": [float(col.m_Size.x), float(col.m_Size.y)] if hasattr(col, "m_Size") else [0, 0],
+                        "radius": float(getattr(col, "m_Radius", 0.0)),
+                        "offset": [float(col.m_Offset.x), float(col.m_Offset.y)] if hasattr(col, "m_Offset") else [0, 0],
+                    }
+                gos[go_id]["components"].append(c)
+            except Exception as e:
+                print("collider parse skipped", o.path_id, e)
         elif o.type.name == "Camera":
             cam = o.read()
             go_id = cam.m_GameObject.m_PathID if cam.m_GameObject else 0
@@ -1149,6 +1229,7 @@ def main():
 
     if args.add_player_prefab:
         append_prefab(env, out, atlas_cache, field_builder)
+    append_level_bounds(out)
     if args.add_player:
         bundle = os.path.join(bundle_dir, "atlas_player")
         if os.path.exists(bundle):

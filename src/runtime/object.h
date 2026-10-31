@@ -16,6 +16,8 @@ struct Vec4 { f32 x, y, z, w; };
 struct Object {
     u32 type_id;
     u32 flags;
+    u32 slots;      // actual allocated Value slots
+    u32 reserved;
     Value* Fields() { return (Value*)(this + 1); }
     const Value* Fields() const { return (const Value*)(this + 1); }
 };
