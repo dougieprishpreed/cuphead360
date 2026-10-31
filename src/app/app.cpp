@@ -635,6 +635,36 @@ static int RunStackTest(MetadataPackage& pkg, const AppConfig& config, bool driv
             }
             f32 start_x = scene.Object(player_oi).world_x;
             f32 start_y = scene.Object(player_oi).world_y;
+            u32 cuphead_sr_ci = 0xFFFFFFFFu;
+            Buffer<u32> idle_frames, run_frames, jump_frames, dash_frames;
+            if (render_play) {
+                for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
+                    if (scene.Object(oi).id != 1006348) continue;
+                    const SceneObject& co = scene.Object(oi);
+                    for (u32 c = 0; c < co.component_count; ++c) {
+                        u32 ci = co.component_start + c;
+                        if (ci < scene.ComponentCount() && scene.Component(ci).type == 1) {
+                            cuphead_sr_ci = ci;
+                            break;
+                        }
+                    }
+                    break;
+                }
+                for (u32 si = 0; si < scene.SpriteCount(); ++si) {
+                    const SceneSprite& sp = scene.Sprite(si + 1);
+                    if (strncmp(sp.name, "cuphead_idle_", 13) == 0) idle_frames.PushBack(si + 1);
+                    else if (strncmp(sp.name, "cuphead_run_", 12) == 0) run_frames.PushBack(si + 1);
+                    else if (strncmp(sp.name, "cuphead_jump_", 13) == 0) jump_frames.PushBack(si + 1);
+                    else if (strncmp(sp.name, "cuphead_dash_", 13) == 0) dash_frames.PushBack(si + 1);
+                }
+                LogInfo("stack", "animation frames idle=%u run=%u jump=%u dash=%u",
+                        idle_frames.Size(), run_frames.Size(), jump_frames.Size(), dash_frames.Size());
+            }
+            u32 grounded_field = pkg.FindField(pkg.FindType("LevelPlayerMotor"),
+                                                "<Grounded>k__BackingField");
+            f32 prev_anim_x = start_x;
+            f32 anim_time = 0.0f;
+            u32 anim_state = 0xFFFFFFFFu;
             f32 max_x = start_x, min_y = start_y, max_y = start_y;
             u32 frames = config.frames > 1 ? config.frames : 180;
             u32 saved = 0;
@@ -665,6 +695,31 @@ static int RunStackTest(MetadataPackage& pkg, const AppConfig& config, bool driv
                 if (px > max_x) max_x = px;
                 if (py < min_y) min_y = py;
                 if (py > max_y) max_y = py;
+                if (render_play && cuphead_sr_ci != 0xFFFFFFFFu) {
+                    bool grounded = true;
+                    Value gv = grounded_field ? interp.GetField(grounded_field, motor) : Value::Null();
+                    if (gv.tag == VT_BOOL) grounded = gv.data.i32 != 0;
+                    f32 adx = px - prev_anim_x;
+                    bool dashing = fabsf(adx) > 12.0f;
+                    u32 state = dashing ? 3u : (!grounded ? 2u : (fabsf(adx) > 0.4f ? 1u : 0u));
+                    Buffer<u32>* set = &idle_frames;
+                    if (state == 1) set = &run_frames;
+                    else if (state == 2) set = &jump_frames;
+                    else if (state == 3) set = &dash_frames;
+                    if (set->Size() > 0) {
+                        if (state != anim_state) {
+                            anim_time = 0.0f;
+                            anim_state = state;
+                        }
+                        anim_time += config.fixed_dt;
+                        u32 idx = ((u32)(anim_time * 15.0f)) % set->Size();
+                        SceneComponent& spr = scene.MutableComponent(cuphead_sr_ci);
+                        spr.sprite_id = (*set)[idx];
+                        if (adx < -0.01f) spr.flags |= 2u;
+                        else if (adx > 0.01f) spr.flags &= ~2u;
+                    }
+                    prev_anim_x = px;
+                }
                 if (i % 30 == 0) {
                     LogInfo("stack", "motor frame=%u pos=%.2f,%.2f",
                             i, px, py);
