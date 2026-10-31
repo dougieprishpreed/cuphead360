@@ -859,6 +859,7 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         return 1;
     }
     Value motor = Value::Null();
+    u32 motor_ci = 0xFFFFFFFFu;
     const SceneObject& po = scene.Object(player_oi);
     for (u32 c = 0; c < po.component_count; ++c) {
         u32 ci = po.component_start + c;
@@ -866,6 +867,7 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         if (scene.Component(ci).type == 4 &&
             strcmp(scene.Component(ci).controller, "LevelPlayerMotor") == 0) {
             motor = interp.ManagedComponent(ci);
+            motor_ci = ci;
             break;
         }
     }
@@ -936,6 +938,88 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     u32 grounded_field = pkg.FindField(motor_type, "<Grounded>k__BackingField");
     u32 player_update = FindMethodInHierarchy(pkg, pkg.FindType("LevelPlayerController"), "Update");
     u32 level_update = FindMethodInHierarchy(pkg, level_type, "Update");
+
+    // Tick the rest of the serialized gameplay scripts (targets, doors,
+    // coins, effects) with their original Update methods. UI/audio/editor
+    // stacks are excluded because those are still scaffolded.
+    Buffer<u32> extra_update_cis;
+    Buffer<u32> extra_update_mids;
+    for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+        const SceneComponent& sc = scene.Component(ci);
+        if (sc.type != 4) continue;
+        if (ci == player_ci || ci == motor_ci || ci == level_ci) continue;
+        const char* ctrl = sc.controller;
+        if (strncmp(ctrl, "UnityEngine.UI.", 15) == 0 ||
+            strncmp(ctrl, "TMPro.", 6) == 0 ||
+            strncmp(ctrl, "Rewired.", 8) == 0 ||
+            strncmp(ctrl, "LevelHUD", 8) == 0 ||
+            strncmp(ctrl, "LevelGUI", 8) == 0 ||
+            strncmp(ctrl, "Options", 7) == 0 ||
+            strncmp(ctrl, "Localization", 12) == 0 ||
+            strncmp(ctrl, "UIText", 6) == 0 ||
+            strncmp(ctrl, "Audio", 5) == 0 ||
+            strncmp(ctrl, "Music", 5) == 0 ||
+            strncmp(ctrl, "SpriteAtlas", 11) == 0 ||
+            strncmp(ctrl, "TextureLoader", 13) == 0 ||
+            strncmp(ctrl, "AssetBundle", 11) == 0 ||
+            strncmp(ctrl, "CupheadGlyph", 12) == 0 ||
+            strncmp(ctrl, "Blur", 4) == 0 ||
+            strncmp(ctrl, "Chromatic", 9) == 0 ||
+            strncmp(ctrl, "AdjustTMP", 9) == 0 ||
+            strncmp(ctrl, "CameraAnimationController", 25) == 0) {
+            continue;
+        }
+        Value v = interp.ManagedComponent(ci);
+        if (v.tag != VT_OBJECT || !v.data.obj) continue;
+        u32 um = FindMethodInHierarchy(pkg, v.data.obj->type_id, "Update");
+        if (!um) continue;
+        extra_update_cis.PushBack(ci);
+        extra_update_mids.PushBack(um);
+    }
+    Buffer<u8> extra_update_failed;
+    extra_update_failed.Resize(extra_update_cis.Size());
+    LogInfo("levelplay", "additional update scripts=%u", extra_update_cis.Size());
+
+    // Unity calls Start once on every active script before the first Update.
+    // Several scene scripts cache camera/effect components there.
+    u32 start_failures = 0;
+    for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+        const SceneComponent& sc = scene.Component(ci);
+        if (sc.type != 4) continue;
+        if (ci == player_ci || ci == motor_ci || ci == level_ci) continue;
+        const char* ctrl = sc.controller;
+        if (strncmp(ctrl, "UnityEngine.UI.", 15) == 0 ||
+            strncmp(ctrl, "TMPro.", 6) == 0 ||
+            strncmp(ctrl, "Rewired.", 8) == 0 ||
+            strncmp(ctrl, "LevelHUD", 8) == 0 ||
+            strncmp(ctrl, "LevelGUI", 8) == 0 ||
+            strncmp(ctrl, "Options", 7) == 0 ||
+            strncmp(ctrl, "Localization", 12) == 0 ||
+            strncmp(ctrl, "UIText", 6) == 0 ||
+            strncmp(ctrl, "Audio", 5) == 0 ||
+            strncmp(ctrl, "Music", 5) == 0 ||
+            strncmp(ctrl, "AdjustTMP", 9) == 0 ||
+            strncmp(ctrl, "SpriteAtlas", 11) == 0 ||
+            strncmp(ctrl, "TextureLoader", 13) == 0 ||
+            strncmp(ctrl, "AssetBundle", 11) == 0 ||
+            strncmp(ctrl, "CupheadGlyph", 12) == 0 ||
+            strncmp(ctrl, "Blur", 4) == 0 ||
+            strncmp(ctrl, "Chromatic", 9) == 0) {
+            continue;
+        }
+        Value v = interp.ManagedComponent(ci);
+        if (v.tag != VT_OBJECT || !v.data.obj) continue;
+        u32 sm = FindMethodInHierarchy(pkg, v.data.obj->type_id, "Start");
+        if (!sm) continue;
+        Value sargs[1]; sargs[0] = v; Value sr;
+        if (!interp.Invoke(sm, sargs, 1, &sr)) {
+            if (start_failures < 8) {
+                LogWarn("levelplay", "Start %s failed", ctrl);
+            }
+            ++start_failures;
+        }
+    }
+
     f32 start_x = scene.Object(player_oi).world_x;
     f32 start_y = scene.Object(player_oi).world_y;
     f32 prev_x = start_x;
@@ -981,6 +1065,26 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
             if (!interp.Invoke(level_update, largs, 1, &lr) && !logged_level_update_fail) {
                 LogWarn("levelplay", "Level Update failed");
                 logged_level_update_fail = true;
+            }
+        }
+        u32 extra_failures = 0;
+        for (u32 k = 0; k < extra_update_cis.Size(); ++k) {
+            if (extra_update_failed[k]) continue;
+            Value ev = interp.ManagedComponent(extra_update_cis[k]);
+            if (ev.tag != VT_OBJECT || !ev.data.obj) continue;
+            if (i == 0) {
+                LogInfo("levelplay", "update %s ci=%u",
+                        scene.Component(extra_update_cis[k]).controller,
+                        extra_update_cis[k]);
+            }
+            Value eargs[1]; eargs[0] = ev; Value er;
+            if (!interp.Invoke(extra_update_mids[k], eargs, 1, &er)) {
+                extra_update_failed[k] = 1;
+                if (extra_failures < 8) {
+                    LogWarn("levelplay", "Update %s failed",
+                            scene.Component(extra_update_cis[k]).controller);
+                }
+                ++extra_failures;
             }
         }
         f32 px = scene.Object(player_oi).world_x;

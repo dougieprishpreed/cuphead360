@@ -755,6 +755,36 @@ static bool Dict_GetCount(Interpreter&, const MemberRefInfo&, u32, Value* a, Val
     return RetI32(ret, d ? (s32)d->count : 0);
 }
 
+static bool Dict_GetKeys(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    DictionaryObject* d = AsDict(a[0]);
+    u32 key_type = d ? d->key_type : 0;
+    Value arr = in.NewArrayValue(key_type, d ? d->count : 0);
+    if (arr.tag == VT_ARRAY && arr.data.array && d) {
+        u32 j = 0;
+        for (u32 i = 0; i < d->capacity && j < d->count; ++i) {
+            if (!d->entries[i].used) continue;
+            arr.data.array->Elements()[j++] = in.CopyValue(d->entries[i].key);
+        }
+    }
+    if (ret) *ret = arr;
+    return true;
+}
+
+static bool Dict_GetValues(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    DictionaryObject* d = AsDict(a[0]);
+    u32 value_type = d ? d->value_type : 0;
+    Value arr = in.NewArrayValue(value_type, d ? d->count : 0);
+    if (arr.tag == VT_ARRAY && arr.data.array && d) {
+        u32 j = 0;
+        for (u32 i = 0; i < d->capacity && j < d->count; ++i) {
+            if (!d->entries[i].used) continue;
+            arr.data.array->Elements()[j++] = in.CopyValue(d->entries[i].value);
+        }
+    }
+    if (ret) *ret = arr;
+    return true;
+}
+
 static bool Dict_Clear(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
     DictionaryObject* d = AsDict(a[0]);
     if (d) {
@@ -1578,6 +1608,8 @@ bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value
         if (strcmp(n, "ContainsKey") == 0) return Dict_ContainsKey(*this, member, arg_count, args, ret);
         if (strcmp(n, "ContainsValue") == 0) return Dict_ContainsValue(*this, member, arg_count, args, ret);
         if (strcmp(n, "get_Count") == 0) return Dict_GetCount(*this, member, arg_count, args, ret);
+        if (strcmp(n, "get_Keys") == 0) return Dict_GetKeys(*this, member, arg_count, args, ret);
+        if (strcmp(n, "get_Values") == 0) return Dict_GetValues(*this, member, arg_count, args, ret);
         if (strcmp(n, "Clear") == 0) return Dict_Clear(*this, member, arg_count, args, ret);
         if (strcmp(n, "Remove") == 0) return Dict_Remove(*this, member, arg_count, args, ret);
     }
