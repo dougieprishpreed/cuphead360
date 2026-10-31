@@ -1,4 +1,5 @@
 #include "runtime/interpreter.h"
+#include "core/endian.h"
 #include "core/log.h"
 #include "core/mem.h"
 
@@ -239,6 +240,41 @@ static bool String_Trim(Interpreter& in, const MemberRefInfo&, u32, Value* a, Va
     while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r' || s[e - 1] == '\n')) --e;
     if (ret) *ret = in.NewStringUtf16(s + b, e - b);
     return true;
+}
+static s32 StringFind(const Value& hay, const Value& needle) {
+    u32 n = StringLength(hay), m = StringLength(needle);
+    const u16* s = StringChars(hay);
+    const u16* t = StringChars(needle);
+    if (m == 0) return 0;
+    if (m > n) return -1;
+    for (u32 i = 0; i + m <= n; ++i) {
+        u32 j = 0;
+        while (j < m && s[i + j] == t[j]) ++j;
+        if (j == m) return (s32)i;
+    }
+    return -1;
+}
+static bool String_Contains(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    return RetBool(ret, StringFind(a[0], a[1]) >= 0);
+}
+static bool String_StartsWith(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 n = StringLength(a[0]), m = StringLength(a[1]);
+    if (m > n) return RetBool(ret, false);
+    const u16* s = StringChars(a[0]);
+    const u16* t = StringChars(a[1]);
+    for (u32 i = 0; i < m; ++i) if (s[i] != t[i]) return RetBool(ret, false);
+    return RetBool(ret, true);
+}
+static bool String_EndsWith(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 n = StringLength(a[0]), m = StringLength(a[1]);
+    if (m > n) return RetBool(ret, false);
+    const u16* s = StringChars(a[0]);
+    const u16* t = StringChars(a[1]);
+    for (u32 i = 0; i < m; ++i) if (s[n - m + i] != t[i]) return RetBool(ret, false);
+    return RetBool(ret, true);
+}
+static bool String_IndexOf(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    return RetI32(ret, StringFind(a[0], a[1]));
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +553,311 @@ static bool IsListName(const char* name) {
     return name && strncmp(name, "System.Collections.Generic.List`1", 33) == 0;
 }
 
+// ---------------------------------------------------------------------------
+// System.Collections.Generic.Dictionary<K,V>
+// ---------------------------------------------------------------------------
+
+static DictionaryObject* AsDict(const Value& v) {
+    if (v.tag != VT_OBJECT || !v.data.obj) return 0;
+    return (DictionaryObject*)v.data.obj;
+}
+
+static bool Dict_Ensure(DictionaryObject* d, u32 capacity) {
+    if (capacity <= d->capacity) return true;
+    u32 cap = d->capacity ? d->capacity : 8;
+    while (cap < capacity) cap *= 2;
+    DictEntry* fresh = (DictEntry*)MemAlloc(cap * sizeof(DictEntry));
+    if (!fresh) return false;
+    memset(fresh, 0, cap * sizeof(DictEntry));
+    for (u32 i = 0; i < d->capacity; ++i) {
+        if (!d->entries[i].used) continue;
+        u32 j = 0;
+        while (j < cap && fresh[j].used) ++j;
+        if (j < cap) fresh[j] = d->entries[i];
+    }
+    MemFree(d->entries);
+    d->entries = fresh;
+    d->capacity = cap;
+    return true;
+}
+
+static s32 Dict_Find(DictionaryObject* d, const Value& key) {
+    if (!d) return -1;
+    for (u32 i = 0; i < d->capacity; ++i) {
+        if (d->entries[i].used && ValueEqual(d->entries[i].key, key)) return (s32)i;
+    }
+    return -1;
+}
+
+static bool Dict_Ctor(Interpreter& in, const MemberRefInfo& member, u32 argc, Value* a, Value* ret) {
+    (void)argc; (void)a;
+    DictionaryObject* d = (DictionaryObject*)in.TrackAllocation(MemAlloc(sizeof(DictionaryObject)));
+    if (!d) return false;
+    memset(d, 0, sizeof(DictionaryObject));
+    d->type_id = member.decl_id;
+    const TypeInfo& t = in.Metadata().Type(member.decl_id);
+    if (t.generic_arg_count >= 1) d->key_type = in.Metadata().GenericArg(t.generic_arg_start);
+    if (t.generic_arg_count >= 2) d->value_type = in.Metadata().GenericArg(t.generic_arg_start + 1);
+    if (ret) *ret = Value::ObjectRef((Object*)d);
+    return true;
+}
+
+static bool Dict_SetItem(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    DictionaryObject* d = AsDict(a[0]);
+    if (!d || !Dict_Ensure(d, d->count + 1)) return false;
+    s32 at = Dict_Find(d, a[1]);
+    if (at < 0) {
+        for (u32 i = 0; i < d->capacity; ++i) {
+            if (!d->entries[i].used) { at = (s32)i; break; }
+        }
+        if (at < 0) return false;
+        d->entries[at].key = in.CopyValue(a[1]);
+        d->entries[at].used = 1;
+        ++d->count;
+    }
+    d->entries[at].value = in.CopyValue(a[2]);
+    if (ret) *ret = Value::Void();
+    return true;
+}
+
+static bool Dict_GetItem(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    DictionaryObject* d = AsDict(a[0]);
+    s32 at = Dict_Find(d, a[1]);
+    if (at < 0) return false;
+    if (ret) *ret = d->entries[at].value;
+    return true;
+}
+
+static bool Dict_TryGetValue(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    DictionaryObject* d = AsDict(a[0]);
+    s32 at = Dict_Find(d, a[1]);
+    bool found = at >= 0;
+    if (a[2].tag == VT_BYREF && a[2].data.ref) {
+        *a[2].data.ref = found ? d->entries[at].value : Value::Null();
+    }
+    return RetBool(ret, found);
+}
+
+static bool Dict_ContainsKey(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    return RetBool(ret, Dict_Find(AsDict(a[0]), a[1]) >= 0);
+}
+
+static bool Dict_ContainsValue(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    DictionaryObject* d = AsDict(a[0]);
+    if (!d) return RetBool(ret, false);
+    for (u32 i = 0; i < d->capacity; ++i) {
+        if (d->entries[i].used && ValueEqual(d->entries[i].value, a[1])) return RetBool(ret, true);
+    }
+    return RetBool(ret, false);
+}
+
+static bool Dict_GetCount(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    DictionaryObject* d = AsDict(a[0]);
+    return RetI32(ret, d ? (s32)d->count : 0);
+}
+
+static bool Dict_Clear(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    DictionaryObject* d = AsDict(a[0]);
+    if (d) {
+        for (u32 i = 0; i < d->capacity; ++i) d->entries[i].used = 0;
+        d->count = 0;
+    }
+    if (ret) *ret = Value::Void();
+    return true;
+}
+
+static bool Dict_Remove(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    DictionaryObject* d = AsDict(a[0]);
+    s32 at = Dict_Find(d, a[1]);
+    if (at >= 0) {
+        d->entries[at].used = 0;
+        d->entries[at].key = Value::Null();
+        d->entries[at].value = Value::Null();
+        --d->count;
+        return RetBool(ret, true);
+    }
+    return RetBool(ret, false);
+}
+
+static bool IsDictName(const char* name) {
+    return name && strncmp(name, "System.Collections.Generic.Dictionary`2", 39) == 0;
+}
+
+// ---------------------------------------------------------------------------
+// System.Delegate / System.Type
+// ---------------------------------------------------------------------------
+
+static DelegateObject* AsDelegate(const Value& v) {
+    return (v.tag == VT_DELEGATE) ? v.data.del : 0;
+}
+
+static bool Delegate_Combine(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    DelegateObject* left = AsDelegate(a[0]);
+    DelegateObject* right = AsDelegate(a[1]);
+    if (!left && !right) { if (ret) *ret = Value::Null(); return true; }
+    if (!left) { if (ret) *ret = a[1]; return true; }
+    if (!right) { if (ret) *ret = a[0]; return true; }
+    Value out = in.NewDelegate(left->type_id, left->method_id, left->target,
+                               (left->flags & 1u) != 0);
+    if (out.tag != VT_DELEGATE || !out.data.del) return false;
+    DelegateObject* tail = out.data.del;
+    for (DelegateObject* n = left->next; n; n = n->next) {
+        Value one = in.NewDelegate(n->type_id, n->method_id, n->target, (n->flags & 1u) != 0);
+        if (one.tag != VT_DELEGATE || !one.data.del) return false;
+        tail->next = one.data.del;
+        tail = tail->next;
+    }
+    for (DelegateObject* n = right; n; n = n->next) {
+        Value one = in.NewDelegate(n->type_id, n->method_id, n->target, (n->flags & 1u) != 0);
+        if (one.tag != VT_DELEGATE || !one.data.del) return false;
+        tail->next = one.data.del;
+        tail = tail->next;
+    }
+    if (ret) *ret = out;
+    return true;
+}
+
+static bool DelegateMatches(const DelegateObject* a, const DelegateObject* b) {
+    if (!a || !b) return false;
+    if (a->method_id != b->method_id) return false;
+    if ((a->flags & 1u) != (b->flags & 1u)) return false;
+    if (a->target.tag == VT_NULL || b->target.tag == VT_NULL) {
+        return a->target.tag == b->target.tag;
+    }
+    return a->target.data.obj == b->target.data.obj;
+}
+
+static bool Delegate_Remove(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    DelegateObject* src = AsDelegate(a[0]);
+    DelegateObject* remove = AsDelegate(a[1]);
+    if (!src) { if (ret) *ret = Value::Null(); return true; }
+    if (!remove) { if (ret) *ret = a[0]; return true; }
+    Value head = Value::Null();
+    DelegateObject* tail = 0;
+    for (DelegateObject* n = src; n; n = n->next) {
+        bool matched = false;
+        for (DelegateObject* r = remove; r && !matched; r = r->next) {
+            matched = DelegateMatches(n, r);
+        }
+        if (matched) continue;
+        Value one = in.NewDelegate(n->type_id, n->method_id, n->target, (n->flags & 1u) != 0);
+        if (one.tag != VT_DELEGATE || !one.data.del) return false;
+        if (head.tag == VT_NULL) { head = one; tail = one.data.del; }
+        else { tail->next = one.data.del; tail = tail->next; }
+    }
+    if (ret) *ret = head;
+    return true;
+}
+
+static bool Type_GetTypeFromHandle(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 token = 0;
+    if (a[0].tag == VT_I4) token = (u32)a[0].data.i32;
+    else if ((a[0].tag == VT_STRUCT || a[0].tag == VT_OBJECT) && a[0].data.obj) {
+        token = (u32)a[0].data.obj->Fields()[0].data.i32;
+    }
+    u32 tid = token ? in.Metadata().ResolveTypeToken(token) : 0;
+    return RetI32(ret, (s32)tid);
+}
+
+static bool Type_GetName(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 tid = (u32)Interpreter::ToI32(a[0]);
+    const char* name = (tid && tid <= in.Metadata().TypeCount())
+        ? in.Metadata().Type(tid).full_name : "";
+    if (ret) *ret = in.NewStringAscii(name ? name : "");
+    return true;
+}
+
+static bool Type_GetIsEnum(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 tid = (u32)Interpreter::ToI32(a[0]);
+    bool is_enum = tid && tid <= in.Metadata().TypeCount() && in.Metadata().Type(tid).is_enum;
+    return RetBool(ret, is_enum);
+}
+
+static bool Type_GetIsValueType(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 tid = (u32)Interpreter::ToI32(a[0]);
+    bool is_value = tid && tid <= in.Metadata().TypeCount() && in.Metadata().Type(tid).is_value_type;
+    return RetBool(ret, is_value);
+}
+
+static bool Interlocked_CompareExchange(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag != VT_BYREF || !a[0].data.ref) return false;
+    Value current = *a[0].data.ref;
+    bool equal;
+    if (current.tag == VT_OBJECT || current.tag == VT_NULL ||
+        a[2].tag == VT_OBJECT || a[2].tag == VT_NULL) {
+        equal = current.data.obj == a[2].data.obj;
+    } else if (current.tag == VT_R4 || current.tag == VT_R8 ||
+               a[2].tag == VT_R4 || a[2].tag == VT_R8) {
+        equal = Interpreter::ToF64(current) == Interpreter::ToF64(a[2]);
+    } else {
+        equal = Interpreter::ToI64(current) == Interpreter::ToI64(a[2]);
+    }
+    if (equal) *a[0].data.ref = a[1];
+    if (ret) *ret = current;
+    return true;
+}
+
+static u32 PrimitiveElementSize(Interpreter& in, u32 type_id) {
+    if (!type_id) return 0;
+    const TypeInfo& t = in.Metadata().Type(type_id);
+    const char* n = t.full_name;
+    if (!n) return t.size;
+    if (strcmp(n, "System.Boolean") == 0 || strcmp(n, "System.Byte") == 0 ||
+        strcmp(n, "System.SByte") == 0) return 1;
+    if (strcmp(n, "System.Char") == 0 || strcmp(n, "System.Int16") == 0 ||
+        strcmp(n, "System.UInt16") == 0) return 2;
+    if (strcmp(n, "System.Int32") == 0 || strcmp(n, "System.UInt32") == 0 ||
+        strcmp(n, "System.Single") == 0) return 4;
+    if (strcmp(n, "System.Int64") == 0 || strcmp(n, "System.UInt64") == 0 ||
+        strcmp(n, "System.Double") == 0) return 8;
+    if (t.is_enum && t.base_id) return PrimitiveElementSize(in, t.base_id);
+    return t.size ? t.size : 4;
+}
+
+static bool RuntimeHelpers_InitializeArray(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag != VT_ARRAY || !a[0].data.array) return false;
+    ArrayObject* arr = a[0].data.array;
+    u32 token = 0;
+    if (a[1].tag == VT_I4) token = (u32)a[1].data.i32;
+    else if ((a[1].tag == VT_STRUCT || a[1].tag == VT_OBJECT) && a[1].data.obj) {
+        token = (u32)a[1].data.obj->Fields()[0].data.i32;
+    }
+    u32 field_id = token ? in.Metadata().ResolveFieldToken(token) : 0;
+    u32 size = 0;
+    const u8* data = field_id ? in.Metadata().FieldRvaData(field_id, &size) : 0;
+    if (!data || !arr->element_type) return false;
+    u32 elem_size = PrimitiveElementSize(in, arr->element_type);
+    if (!elem_size) return false;
+    u32 count = arr->length;
+    if (count * elem_size > size) count = size / elem_size;
+    const TypeInfo& et = in.Metadata().Type(arr->element_type);
+    for (u32 i = 0; i < count; ++i) {
+        const u8* p = data + i * elem_size;
+        if (strcmp(et.full_name, "System.Single") == 0) {
+            u32 bits = ReadU32LE(p);
+            f32 f;
+            memcpy(&f, &bits, 4);
+            arr->Elements()[i] = Value::R4(f);
+        } else if (strcmp(et.full_name, "System.Double") == 0) {
+            u64 bits = ReadU64LE(p);
+            f64 f;
+            memcpy(&f, &bits, 8);
+            arr->Elements()[i] = Value::R8(f);
+        } else if (strcmp(et.full_name, "System.Boolean") == 0) {
+            arr->Elements()[i] = Value::Bool(p[0] != 0);
+        } else if (elem_size == 1) {
+            arr->Elements()[i] = Value::I4(p[0]);
+        } else if (elem_size == 2) {
+            arr->Elements()[i] = Value::I4((s32)ReadU16LE(p));
+        } else if (elem_size == 8) {
+            arr->Elements()[i] = Value::I8((s64)ReadU64LE(p));
+        } else {
+            arr->Elements()[i] = Value::I4((s32)ReadU32LE(p));
+        }
+    }
+    return RetVoid(ret);
+}
+
 static const NativeEntry kEntries[] = {
     { "UnityEngine.Vector2", ".ctor", Vec2_Ctor },
     { "UnityEngine.Vector2", "get_x", Vec2_GetX },
@@ -575,6 +916,20 @@ static const NativeEntry kEntries[] = {
     { "System.String", "ToUpper", String_ToUpper },
     { "System.String", "ToLower", String_ToLower },
     { "System.String", "Trim", String_Trim },
+    { "System.String", "Contains", String_Contains },
+    { "System.String", "StartsWith", String_StartsWith },
+    { "System.String", "EndsWith", String_EndsWith },
+    { "System.String", "IndexOf", String_IndexOf },
+    { "System.Delegate", "Combine", Delegate_Combine },
+    { "System.Delegate", "Remove", Delegate_Remove },
+    { "System.MulticastDelegate", "CombineImpl", Delegate_Combine },
+    { "System.Type", "GetTypeFromHandle", Type_GetTypeFromHandle },
+    { "System.Type", "get_Name", Type_GetName },
+    { "System.Type", "get_FullName", Type_GetName },
+    { "System.Type", "get_IsEnum", Type_GetIsEnum },
+    { "System.Type", "get_IsValueType", Type_GetIsValueType },
+    { "System.Threading.Interlocked", "CompareExchange", Interlocked_CompareExchange },
+    { "System.Runtime.CompilerServices.RuntimeHelpers", "InitializeArray", RuntimeHelpers_InitializeArray },
 };
 
 bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value* args, Value* ret) {
@@ -599,6 +954,18 @@ bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value
         if (strcmp(n, "MoveNext") == 0) return List_Enumerator_MoveNext(*this, member, arg_count, args, ret);
         if (strcmp(n, "get_Current") == 0) return List_Enumerator_Current(*this, member, arg_count, args, ret);
         if (strcmp(n, "Dispose") == 0) return List_Enumerator_Dispose(*this, member, arg_count, args, ret);
+    }
+    if (IsDictName(t.full_name)) {
+        const char* n = member.name;
+        if (strcmp(n, ".ctor") == 0) return Dict_Ctor(*this, member, arg_count, args, ret);
+        if (strcmp(n, "set_Item") == 0) return Dict_SetItem(*this, member, arg_count, args, ret);
+        if (strcmp(n, "get_Item") == 0) return Dict_GetItem(*this, member, arg_count, args, ret);
+        if (strcmp(n, "TryGetValue") == 0) return Dict_TryGetValue(*this, member, arg_count, args, ret);
+        if (strcmp(n, "ContainsKey") == 0) return Dict_ContainsKey(*this, member, arg_count, args, ret);
+        if (strcmp(n, "ContainsValue") == 0) return Dict_ContainsValue(*this, member, arg_count, args, ret);
+        if (strcmp(n, "get_Count") == 0) return Dict_GetCount(*this, member, arg_count, args, ret);
+        if (strcmp(n, "Clear") == 0) return Dict_Clear(*this, member, arg_count, args, ret);
+        if (strcmp(n, "Remove") == 0) return Dict_Remove(*this, member, arg_count, args, ret);
     }
     for (u32 i = 0; i < CH360_ARRAY_COUNT(kEntries); ++i) {
         if (strcmp(kEntries[i].type, t.full_name) == 0 &&

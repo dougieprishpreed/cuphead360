@@ -35,6 +35,9 @@ int main(int argc, char** argv) {
         } else if (ArgEquals(a, "--unity")) {
             cfg.command = "unity";
             explicit_mode = true;
+        } else if (ArgEquals(a, "--stack")) {
+            cfg.command = "stack";
+            explicit_mode = true;
         } else if (ArgEquals(a, "--play")) {
             cfg.command = "play";
             explicit_mode = true;
@@ -64,6 +67,7 @@ int main(int argc, char** argv) {
             printf("  --logic\n");
             printf("  --scene PATH\n");
             printf("  --unity\n");
+            printf("  --stack\n");
             printf("  --play\n");
             printf("  --manual\n");
             printf("  --screenshot PATH\n");

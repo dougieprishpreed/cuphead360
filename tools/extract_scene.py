@@ -326,6 +326,25 @@ def write_scene_binary(scene: dict, out_dir: str, path: str) -> int:
             elif c["type"] == "Camera":
                 ctype = 3
                 flags |= 1 if c.get("enabled", True) else 0
+            elif c["type"] == "BoxCollider2D":
+                ctype = 5
+                flags |= 1 if c.get("enabled", True) else 0
+                size = c.get("size", [0.0, 0.0])
+                off = c.get("offset", [0.0, 0.0])
+                color = [float(size[0]), float(size[1]), float(off[0]), float(off[1])]
+            elif c["type"] == "CircleCollider2D":
+                ctype = 6
+                flags |= 1 if c.get("enabled", True) else 0
+                off = c.get("offset", [0.0, 0.0])
+                color = [float(c.get("radius", 0.0)), 0.0, float(off[0]), float(off[1])]
+            elif c["type"] == "Rigidbody2D":
+                ctype = 7
+                flags |= 1 if c.get("simulated", True) else 0
+                flags |= 2 if c.get("isKinematic") else 0
+                flags |= 4 if c.get("freezeRotation") else 0
+                flags |= (int(c.get("bodyType", 0)) & 0xFF) << 8
+                color = [float(c.get("mass", 1.0)), float(c.get("drag", 0.0)),
+                         float(c.get("angularDrag", 0.05)), float(c.get("gravityScale", 1.0))]
             else:
                 continue
             components.extend(struct.pack(
@@ -747,13 +766,23 @@ def append_prefab(env, out, atlas_cache, field_builder, root_go_id=5401):
                 try:
                     if tn == "Rigidbody2D":
                         comps.append({"type":"Rigidbody2D","source_id":cp.path_id+id_base,
-                                      "enabled":bool(c.m_Enabled)})
+                                      "enabled":bool(c.m_Simulated),
+                                      "mass":float(getattr(c,"m_Mass",1.0)),
+                                      "drag":float(getattr(c,"m_LinearDrag",0.0)),
+                                      "angularDrag":float(getattr(c,"m_AngularDrag",0.05)),
+                                      "gravityScale":float(getattr(c,"m_GravityScale",1.0)),
+                                      "bodyType":int(getattr(c,"m_BodyType",0)),
+                                      "simulated":bool(c.m_Simulated),
+                                      "isKinematic":bool(getattr(c,"m_IsKinematic",False)),
+                                      "freezeRotation":bool(getattr(c,"m_FixedAngle",False))})
                     else:
                         comps.append({"type":tn,"source_id":cp.path_id+id_base,
                                       "enabled":bool(c.m_Enabled),
                                       "size":[float(c.m_Size.x),float(c.m_Size.y)] if hasattr(c,"m_Size") else [0,0],
+                                      "radius":float(getattr(c,"m_Radius",0.0)),
                                       "offset":[float(c.m_Offset.x),float(c.m_Offset.y)] if hasattr(c,"m_Offset") else [0,0]})
-                except Exception: pass
+                except Exception as e:
+                    print("prefab collider skip", tn, type(e).__name__, e)
         lp = d.m_LocalPosition
         pos = [float(lp.x), float(lp.y), float(lp.z)]
         if gid == root_go_id:

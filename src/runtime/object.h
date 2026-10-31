@@ -44,6 +44,7 @@ struct DelegateObject {
     u32 method_id;
     u32 flags;       // bit 0: static target
     Value target;
+    DelegateObject* next; // multicast chain
 };
 
 // Native BCL List<T>. It is a real managed object (type_id is the generic
@@ -57,15 +58,23 @@ struct ListObject {
     Value* items;
 };
 
-// Native BCL Dictionary<K,V> placeholder layout. The implementation lands
-// with the first game system that needs it; the header keeps object sizes
-// stable for the allocator.
+// Native BCL Dictionary<K,V> placeholder layout. Entries are kept in a
+// simple open array; the game's dictionaries are small.
+struct DictEntry {
+    Value key;
+    Value value;
+    u32 used;
+    u32 reserved;
+};
+
 struct DictionaryObject {
     u32 type_id;
     u32 count;
     u32 key_type;
     u32 value_type;
-    void* entries;
+    DictEntry* entries;
+    u32 capacity;
+    u32 reserved;
 };
 
 inline Object* AsObject(Value v) { return v.data.obj; }

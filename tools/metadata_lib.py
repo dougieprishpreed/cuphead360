@@ -345,11 +345,13 @@ class MetadataBuilder:
         self.user_string_cache = {}
         self.exceptions = []
         self.param_names = []
+        self.field_rvas = []  # (field_id, bytes)
 
         self._build_typedefs()
         self._resolve_bases()
         self._build_nested_relationships()
         self._build_fields_and_methods()
+        self._build_field_rvas()
         self._build_interfaces()
         self._build_memberrefs()
         self._build_methodspecs()
@@ -1002,6 +1004,54 @@ class MetadataBuilder:
         if table == 0x1B and 1 <= idx <= len(self.md.TypeSpec.rows):
             return self.resolve_typespec(idx)
         return 0
+
+    # -- field RVA data ----------------------------------------------------
+
+    def _build_field_rvas(self):
+        """Collects static field initializer blobs used by InitializeArray."""
+        table = getattr(self.md, "FieldRva", None)
+        if table is None:
+            return
+        for row in table.rows:
+            try:
+                fid = row.Field.row_index
+            except Exception:
+                try:
+                    fid = int(row.Field)
+                except Exception:
+                    continue
+            if fid <= 0 or fid >= len(self.fields):
+                continue
+            field = self.fields[fid]
+            if field is None or field.sig is None or not field.sig.type_id:
+                continue
+            t = self.types[field.sig.type_id]
+            name = t.full_name or ""
+            size = 0
+            marker = "$ArrayType="
+            if marker in name:
+                suffix = name.rsplit(marker, 1)[1]
+                digits = ""
+                for ch in suffix:
+                    if ch.isdigit():
+                        digits += ch
+                    else:
+                        break
+                if digits:
+                    size = int(digits)
+            if size <= 0 and t.class_size:
+                size = t.class_size
+            if size <= 0 and t.size:
+                size = t.size
+            if size <= 0:
+                continue
+            try:
+                off = self.pe.get_offset_from_rva(int(row.Rva))
+            except Exception:
+                continue
+            if off is None or off < 0 or off + size > len(self.data):
+                continue
+            self.field_rvas.append((fid, bytes(self.data[off:off + size])))
 
     # -- interfaces --------------------------------------------------------
 

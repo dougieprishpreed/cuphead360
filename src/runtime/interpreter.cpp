@@ -125,6 +125,7 @@ static bool IsTrue(const Value& v) {
 
 Interpreter::Interpreter(MetadataPackage& metadata)
     : metadata_(metadata), trace_(false), last_error_(0),
+      current_method_id_(0), generic_arg_start_(0), generic_arg_count_(0),
       string_type_id_(0), object_type_id_(0), int32_type_id_(0),
       single_type_id_(0), bool_type_id_(0), void_type_id_(0),
       array_type_id_(0), exception_type_id_(0), mathf_type_id_(0),
@@ -428,6 +429,7 @@ Value Interpreter::NewDelegate(u32 type_id, u32 method_id, Value target, bool is
     d->method_id = method_id;
     d->flags = is_static ? 1u : 0u;
     d->target = target;
+    d->next = 0;
     return Value::DelegateRef(d);
 }
 
@@ -443,6 +445,59 @@ u32 Interpreter::ObjectTypeId(const Value& v) const {
     if (v.tag == VT_ARRAY) return array_type_id_;
     if (v.tag == VT_DELEGATE) return v.data.del ? v.data.del->type_id : 0;
     return 0;
+}
+
+u32 Interpreter::GenericArgType(u32 index) const {
+    if (index >= generic_arg_count_) return 0;
+    u32 sig_index = metadata_.MethodSpecArg(generic_arg_start_ + index);
+    if (!sig_index) return 0;
+    const SigInfo& sig = metadata_.Sig(sig_index);
+    if (sig.type_id) return sig.type_id;
+    if (sig.kind == SIG_SZARRAY || sig.kind == SIG_ARRAY) {
+        // Arrays still carry their element type in type_id via the builder.
+        return sig.type_id;
+    }
+    return 0;
+}
+
+bool Interpreter::IsDelegateType(u32 type_id) const {
+    u32 guard = 0;
+    while (type_id && guard++ < 64) {
+        const TypeInfo& t = metadata_.Type(type_id);
+        if (strcmp(t.full_name, "System.Delegate") == 0 ||
+            strcmp(t.full_name, "System.MulticastDelegate") == 0) {
+            return true;
+        }
+        if (t.name && (strcmp(t.name, "Action") == 0 || strcmp(t.name, "Func`1") == 0)) {
+            return true;
+        }
+        type_id = t.base_id;
+    }
+    return false;
+}
+
+bool Interpreter::InvokeDelegate(DelegateObject* d, u32 arg_count, Value* args, Value* ret) {
+    if (!d) return false;
+    bool first = true;
+    for (DelegateObject* cur = d; cur; cur = cur->next) {
+        if (!cur->method_id) continue;
+        const MethodInfo& m = metadata_.Method(cur->method_id);
+        bool is_static = (m.flags & METHOD_FLAG_STATIC) != 0;
+        Value call_args[kMaxCallArgs];
+        u32 argc = arg_count;
+        if (is_static) {
+            for (u32 i = 1; i < arg_count; ++i) call_args[i - 1] = args[i];
+            argc = arg_count - 1;
+        } else {
+            call_args[0] = cur->target;
+            for (u32 i = 1; i < arg_count; ++i) call_args[i] = args[i];
+        }
+        Value r = Value::Void();
+        if (!Invoke(cur->method_id, call_args, argc, &r)) return false;
+        if (first && ret) *ret = r;
+        first = false;
+    }
+    return true;
 }
 
 bool Interpreter::IsAssignable(u32 derived_type, u32 base_type) const {
@@ -641,7 +696,11 @@ bool Interpreter::Invoke(u32 method_id, Value* args, u32 arg_count, Value* ret) 
         return Fail("argument count mismatch", method_id);
     }
     if ((m.flags & METHOD_FLAG_STATIC) && !(sig.flags & 0x20)) {
-        EnsureTypeInitialized(m.decl_id);
+        if (!EnsureTypeInitialized(m.decl_id)) {
+            const TypeInfo& dt = metadata_.Type(m.decl_id);
+            LogWarn("interp", "type initializer failed for %s (called by %s)",
+                    dt.full_name, m.name);
+        }
     }
     if (m.il_size == 0 || !metadata_.Il(method_id)) {
         // Abstract or native-only method. Native dispatch is handled by
@@ -660,8 +719,18 @@ bool Interpreter::InvokeMemberRef(const MemberRefInfo& member, u32 arg_count, Va
 }
 
 bool Interpreter::InvokeVirtual(u32 method_id, u32 arg_count, Value* args, Value* ret) {
-    if (arg_count == 0) return Fail("callvirt without this");
-    if (args[0].tag == VT_NULL) return Fail("callvirt on null");
+    if (arg_count == 0) return Fail("callvirt without this", method_id);
+    if (args[0].tag == VT_DELEGATE && args[0].data.del) {
+        return InvokeDelegate(args[0].data.del, arg_count, args, ret);
+    }
+    if (args[0].tag == VT_NULL) {
+        if (current_method_id_ && current_method_id_ <= metadata_.MethodCount()) {
+            const MethodInfo& caller = metadata_.Method(current_method_id_);
+            LogError("interp", "null callvirt caller=%s.%s id=%u",
+                     metadata_.Type(caller.decl_id).full_name, caller.name, current_method_id_);
+        }
+        return Fail("callvirt on null receiver", method_id);
+    }
     u32 type = ObjectTypeId(args[0]);
     const MethodInfo& base = metadata_.Method(method_id);
     if (type && base.vtable_slot != 0xFFFFFFFFu) {
@@ -684,6 +753,8 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
     const u8* code = metadata_.Il(method_id);
     if (!code) return Fail("missing IL", method_id);
     u32 code_size = method.il_size;
+    u32 saved_method = current_method_id_;
+    current_method_id_ = method_id;
 
     Value* arg_slots = (Value*)MemAlloc((arg_count ? arg_count : 1) * sizeof(Value));
     if (!arg_slots) return Fail("out of memory for args", method_id);
@@ -759,6 +830,13 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                 bool virt = (op == 0x6F);
                 u32 target = metadata_.ResolveMethodToken(token);
                 const MemberRefInfo* mr = metadata_.MemberRefForToken(token);
+                const MethodSpecInfo* spec = 0;
+                if ((token >> 24) == 0x2B) {
+                    spec = &metadata_.MethodSpec(token & 0xFFFFFF);
+                    if (!target && spec->memberref_id) {
+                        mr = &metadata_.MemberRef(spec->memberref_id);
+                    }
+                }
                 u32 argc = 0;
                 const MethodSigInfo* ms = 0;
                 if (target) {
@@ -775,13 +853,23 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                 Value call_args[kMaxCallArgs];
                 for (u32 i = argc; i > 0; --i) POP(call_args[i - 1]);
                 Value call_ret = Value::Void();
-                if (virt) {
-                    if (target) ok = InvokeVirtual(target, argc, call_args, &call_ret);
-                    else ok = InvokeNative(*mr, argc, call_args, &call_ret);
-                } else {
-                    if (target) ok = Invoke(target, call_args, argc, &call_ret);
-                    else ok = InvokeNative(*mr, argc, call_args, &call_ret);
+                u32 saved_arg_start = generic_arg_start_;
+                u32 saved_arg_count = generic_arg_count_;
+                if (spec) {
+                    generic_arg_start_ = spec->arg_start;
+                    generic_arg_count_ = spec->arg_count;
                 }
+                bool call_ok;
+                if (virt) {
+                    if (target) call_ok = InvokeVirtual(target, argc, call_args, &call_ret);
+                    else call_ok = InvokeNative(*mr, argc, call_args, &call_ret);
+                } else {
+                    if (target) call_ok = Invoke(target, call_args, argc, &call_ret);
+                    else call_ok = InvokeNative(*mr, argc, call_args, &call_ret);
+                }
+                generic_arg_start_ = saved_arg_start;
+                generic_arg_count_ = saved_arg_count;
+                ok = call_ok;
                 if (!ok) goto done;
                 if (ms->return_sig) {
                     const SigInfo& rs = metadata_.Sig(ms->return_sig);
@@ -978,16 +1066,28 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                 const MemberRefInfo* mr = metadata_.MemberRefForToken(token);
                 if (!ctor_id) {
                     if (mr) {
-                        // Native constructor (List<T>, String, etc.). The
-                        // constructor has no 'this' on the IL stack yet, so
-                        // pop the explicit params and synthesize a null this.
+                        // Native constructor (List<T>, String, Action, etc.).
                         const MethodSigInfo& ms = metadata_.MethodSig(mr->sig_index);
                         u32 explicit_count = ms.param_count;
                         Value cargs[kMaxCallArgs];
-                        for (u32 i = explicit_count; i > 0; --i) POP(cargs[i]);
-                        cargs[0] = Value::Null();
+                        for (u32 i = explicit_count; i > 0; --i) POP(cargs[i - 1]);
+                        if (IsDelegateType(mr->decl_id)) {
+                            Value target = explicit_count > 0 ? cargs[0] : Value::Null();
+                            Value ftn = explicit_count > 1 ? cargs[1] : Value::Null();
+                            u32 mid = (ftn.tag == VT_DELEGATE && ftn.data.del)
+                                ? ftn.data.del->method_id
+                                : ((ftn.tag == VT_I4) ? (u32)ftn.data.i32 : 0);
+                            bool is_static = (target.tag == VT_NULL);
+                            PUSH(NewDelegate(mr->decl_id, mid, target, is_static));
+                            break;
+                        }
+                        // The constructor has no 'this' on the IL stack yet, so
+                        // synthesize a null this.
+                        Value synth[kMaxCallArgs];
+                        synth[0] = Value::Null();
+                        for (u32 i = 0; i < explicit_count; ++i) synth[i + 1] = cargs[i];
                         Value cr = Value::Void();
-                        ok = InvokeNative(*mr, explicit_count + 1, cargs, &cr);
+                        ok = InvokeNative(*mr, explicit_count + 1, synth, &cr);
                         if (!ok) goto done;
                         PUSH(cr);
                     } else {
@@ -998,6 +1098,20 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                 }
                 const MethodInfo& ctor = metadata_.Method(ctor_id);
                 const MethodSigInfo& ms = metadata_.MethodSig(ctor.sig);
+                if (IsDelegateType(ctor.decl_id)) {
+                    u32 dargc = ms.param_count;
+                    if (dargc > kMaxCallArgs) { ok = Fail("too many delegate ctor args", method_id); goto done; }
+                    Value da[kMaxCallArgs];
+                    for (u32 i = dargc; i > 0; --i) POP(da[i - 1]);
+                    Value target = dargc > 0 ? da[0] : Value::Null();
+                    Value ftn = dargc > 1 ? da[1] : Value::Null();
+                    u32 mid = (ftn.tag == VT_DELEGATE && ftn.data.del)
+                        ? ftn.data.del->method_id
+                        : ((ftn.tag == VT_I4) ? (u32)ftn.data.i32 : 0);
+                    bool is_static = (target.tag == VT_NULL);
+                    PUSH(NewDelegate(ctor.decl_id, mid, target, is_static));
+                    break;
+                }
                 u32 argc = ms.param_count + ((ms.flags & 0x20) ? 1u : 0u);
                 Value cargs[kMaxCallArgs];
                 for (u32 i = argc; i > 1; --i) POP(cargs[i - 1]);
@@ -1074,7 +1188,15 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                 Object* o = (obj.tag == VT_OBJECT || obj.tag == VT_STRUCT) ? obj.data.obj : 0;
                 if (!o) { ok = Fail("ldflda on null", method_id); goto done; }
                 u32 slot = FieldSlot(fid);
-                if (slot >= runtime_types_[o->type_id].total_slots) { ok = Fail("bad field slot", method_id); goto done; }
+                if (slot >= runtime_types_[o->type_id].total_slots) {
+                    const FieldInfo& ff = metadata_.Field(fid);
+                    const TypeInfo& ot = metadata_.Type(o->type_id);
+                    LogError("interp", "bad field slot field=%s id=%u slot=%u type=%s total=%u",
+                             ff.name, fid, slot, ot.full_name,
+                             runtime_types_[o->type_id].total_slots);
+                    ok = Fail("bad field slot", method_id);
+                    goto done;
+                }
                 PUSH(Value::ByRef(&o->Fields()[slot]));
                 break;
             }
@@ -1250,7 +1372,15 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                         u32 token = ReadU32LE(code + pc); pc += 4;
                         u32 mid = metadata_.ResolveMethodToken(token);
                         Value target = Value::Null();
-                        PUSH(NewDelegate(0, mid, target, true));
+                        bool is_static = true;
+                        if (op2 == 0x07) {
+                            // ldvirtftn pops the object reference it resolves
+                            // through; the delegate ctor receives the original
+                            // (duplicated) reference as its target.
+                            POP(target);
+                            is_static = false;
+                        }
+                        PUSH(NewDelegate(0, mid, target, is_static));
                         break;
                     }
                     case 0x09: { u32 i = ReadU16LE(code + pc); pc += 2; PUSH(CopyValue(arg_slots[i])); break; }
@@ -1296,6 +1426,7 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
     }
 
 done:
+    current_method_id_ = saved_method;
     if (ok && returned && ret) *ret = CopyValue(result);
     if (locals) MemFree(locals);
     MemFree(arg_slots);

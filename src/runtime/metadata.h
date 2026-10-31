@@ -161,6 +161,13 @@ struct MethodSpecInfo {
     u32 method_id;
     u32 arg_start;
     u32 arg_count;
+    u32 memberref_id; // 1-based MemberRef row for external generic calls
+};
+
+struct FieldRvaInfo {
+    u32 field_id;
+    u32 data_offset;
+    u32 size;
 };
 
 struct ParamInfo {
@@ -197,6 +204,10 @@ public:
     u32 MethodCount() const { return method_count_; }
     u32 SigCount() const { return sig_count_; }
     u32 MemberRefCount() const { return memberref_count_; }
+    u32 MethodSpecCount() const { return methodspec_count_; }
+    u32 FieldRvaCount() const { return field_rva_count_; }
+    const FieldRvaInfo& FieldRva(u32 index) const;
+    const u8* FieldRvaData(u32 field_id, u32* out_size) const;
 
     const TypeInfo& Type(u32 id) const;
     const FieldInfo& Field(u32 id) const;
@@ -258,6 +269,7 @@ private:
     u32 methodspec_count_;
     u32 exception_count_;
     u32 param_count_;
+    u32 field_rva_count_;
 
     const u8* strings_;
     u32 strings_size_;
@@ -265,6 +277,8 @@ private:
     u32 il_size_;
     const u8* user_bytes_;
     u32 user_bytes_size_;
+    const u8* field_rva_bytes_;
+    u32 field_rva_bytes_size_;
 
     Buffer<TypeInfo> types_;
     Buffer<FieldInfo> fields_;
@@ -276,6 +290,7 @@ private:
     Buffer<MethodSpecInfo> methodspecs_;
     Buffer<ParamInfo> params_;
     Buffer<ExceptionInfo> exceptions_;
+    Buffer<FieldRvaInfo> field_rvas_;
 
     Buffer<u32> interface_ids_;
     Buffer<u32> generic_arg_ids_;

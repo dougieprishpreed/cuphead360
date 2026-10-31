@@ -157,6 +157,31 @@ static void InspectMetadata(MetadataPackage& pkg) {
                     il ? il[4] : 0, il ? il[5] : 0, il ? il[6] : 0, il ? il[7] : 0);
         }
     }
+    static const char* detail_types[] = {
+        "Level", "TutorialLevel", "AbstractPlayerController",
+        "LevelPlayerController", "PlayerInput", "LevelPlayerMotor",
+        "LevelPlayerAnimationController", "LevelPlayerColliderManager",
+        "LevelPlayerWeaponManager", "PlayerDamageReceiver", "PlayerStatsManager",
+    };
+    for (u32 q = 0; q < CH360_ARRAY_COUNT(detail_types); ++q) {
+        u32 id = pkg.FindType(detail_types[q]);
+        if (!id) { LogWarn("inspect", "detail type '%s' not found", detail_types[q]); continue; }
+        const TypeInfo& t = pkg.Type(id);
+        LogInfo("inspect", "-- %s id=%u base=%u fields=%u methods=%u",
+                t.full_name, id, t.base_id, t.field_count, t.method_count);
+        for (u32 fi = 0; fi < t.field_count; ++fi) {
+            u32 fid = t.field_start + fi;
+            const FieldInfo& f = pkg.Field(fid);
+            const SigInfo& fs = pkg.Sig(f.type_sig);
+            LogInfo("inspect", "   field %s id=%u sig=%u kind=%u type=%u flags=0x%x",
+                    f.name, fid, f.type_sig, fs.kind, fs.type_id, f.flags);
+        }
+        for (u32 mi = 0; mi < t.method_count; ++mi) {
+            const MethodInfo& m = pkg.Method(t.method_start + mi);
+            LogInfo("inspect", "   method %s id=%u sig=%u flags=0x%x il=%u",
+                    m.name, t.method_start + mi, m.sig, m.flags, m.il_size);
+        }
+    }
 }
 
 static float InvokeEase3(Interpreter& interp, MetadataPackage& pkg, const char* name,
@@ -392,6 +417,137 @@ static int RunUnityTest(MetadataPackage& pkg, const AppConfig& config) {
     return pass ? 0 : 1;
 }
 
+
+static u32 FindMethodInHierarchy(MetadataPackage& pkg, u32 type_id, const char* name) {
+    u32 guard = 0;
+    while (type_id && guard++ < 64) {
+        u32 m = pkg.FindMethod(type_id, name);
+        if (m) return m;
+        type_id = pkg.Type(type_id).base_id;
+    }
+    return 0;
+}
+
+static bool InvokeOnComponent(Interpreter& interp, u32 method, Value obj, Value* ret) {
+    Value args[1];
+    args[0] = obj;
+    return interp.Invoke(method, args, 1, ret);
+}
+
+// Exercises the original platforming player stack against the extracted
+// prefab: static Level state, generic GetComponent<T>, Awake, LevelInit and
+// LevelStart. Failures are reported by the interpreter with the exact method.
+static int RunStackTest(MetadataPackage& pkg, const AppConfig& config) {
+    if (!config.scene_path) {
+        LogError("stack", "no scene path");
+        return 1;
+    }
+    Scene scene;
+    if (!scene.Load(config.scene_path)) {
+        LogError("stack", "scene load failed: %s", scene.LastError());
+        return 1;
+    }
+    Interpreter interp(pkg);
+    if (!interp.Init() || !interp.BindScene(scene)) {
+        LogError("stack", "interpreter/bind failed");
+        return 1;
+    }
+
+    u32 level_type = pkg.FindType("Level");
+    u32 current_field = pkg.FindField(level_type, "<Current>k__BackingField");
+    u32 players_field = pkg.FindField(level_type, "<PlayersCreated>k__BackingField");
+    u32 level_ci = 0xFFFFFFFFu, controller_ci = 0xFFFFFFFFu;
+    for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+        const SceneComponent& comp = scene.Component(ci);
+        if (comp.type != 4) continue;
+        if (strcmp(comp.controller, "TutorialLevel") == 0) level_ci = ci;
+        else if (strcmp(comp.controller, "LevelPlayerController") == 0) controller_ci = ci;
+    }
+    LogInfo("stack", "level_ci=%u controller_ci=%u current_field=%u players_field=%u",
+            level_ci, controller_ci, current_field, players_field);
+    if (level_ci == 0xFFFFFFFFu || controller_ci == 0xFFFFFFFFu ||
+        current_field == 0 || players_field == 0) {
+        LogError("stack", "required scene components or static fields missing");
+        return 1;
+    }
+    Value level_obj = interp.ManagedComponent(level_ci);
+    Value controller = interp.ManagedComponent(controller_ci);
+    interp.SetField(current_field, Value::Null(), level_obj);
+    interp.SetField(players_field, Value::Null(), Value::Bool(true));
+    LogInfo("stack", "Level.Current set, PlayersCreated=true");
+
+    bool pass = true;
+    u32 ctrl_type = pkg.FindType("LevelPlayerController");
+
+    // get_motor goes through the generic UnityEngine.Component.GetComponent<T>
+    // MethodSpec, verifying MemberRef-based generic dispatch.
+    u32 get_motor = pkg.FindMethod(ctrl_type, "get_motor");
+    Value motor = Value::Null();
+    bool gm_ok = get_motor && InvokeOnComponent(interp, get_motor, controller, &motor);
+    const char* motor_type = (motor.tag == VT_OBJECT && motor.data.obj)
+        ? pkg.Type(motor.data.obj->type_id).full_name : "<null>";
+    bool motor_ok = gm_ok && motor.tag == VT_OBJECT && motor.data.obj &&
+        strcmp(motor_type, "LevelPlayerMotor") == 0;
+    LogInfo("stack", "get_motor ok=%d type=%s %s", gm_ok ? 1 : 0, motor_type,
+            motor_ok ? "PASS" : "FAIL");
+    pass = pass && motor_ok;
+
+    u32 awake = FindMethodInHierarchy(pkg, ctrl_type, "Awake");
+    Value r;
+    bool awake_ok = awake && InvokeOnComponent(interp, awake, controller, &r);
+    LogInfo("stack", "player Awake %s", awake_ok ? "PASS" : "FAIL");
+    pass = pass && awake_ok;
+
+    // Unity calls Awake on every component of the instantiated prefab before
+    // level initialization. Child components cache their player reference and
+    // subscribe to motor/weapon events in Awake, so run the whole prefab.
+    u32 player_oi = 0xFFFFFFFFu;
+    for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
+        if (scene.Object(oi).id == 1005401) { player_oi = oi; break; }
+    }
+    u32 awake_total = 0, awake_passed = 0;
+    if (player_oi != 0xFFFFFFFFu) {
+        const SceneObject& po = scene.Object(player_oi);
+        for (u32 c = 0; c < po.component_count; ++c) {
+            u32 ci = po.component_start + c;
+            if (ci >= scene.ComponentCount()) break;
+            if (ci == controller_ci) continue;
+            const SceneComponent& comp = scene.Component(ci);
+            if (comp.type != 4) continue;
+            u32 ctype = pkg.FindType(comp.controller);
+            u32 cawake = FindMethodInHierarchy(pkg, ctype, "Awake");
+            if (!cawake) continue;
+            Value obj = interp.ManagedComponent(ci);
+            Value args[1]; args[0] = obj; Value cr;
+            bool cok = interp.Invoke(cawake, args, 1, &cr);
+            ++awake_total;
+            if (cok) ++awake_passed;
+            else LogWarn("stack", "prefab Awake failed: %s (last_error=%u)",
+                         comp.controller, interp.LastError());
+        }
+    }
+    LogInfo("stack", "prefab component Awakes %u/%u", awake_passed, awake_total);
+    pass = pass && awake_total > 0 && awake_passed == awake_total;
+
+    u32 level_init = pkg.FindMethod(ctrl_type, "LevelInit");
+    bool init_ok = false;
+    if (level_init) {
+        Value args[2];
+        args[0] = controller;
+        args[1] = Value::I4(0); // PlayerId.PlayerOne
+        init_ok = interp.Invoke(level_init, args, 2, &r);
+    }
+    LogInfo("stack", "player LevelInit %s", init_ok ? "PASS" : "FAIL");
+    pass = pass && init_ok;
+
+    u32 level_start = FindMethodInHierarchy(pkg, ctrl_type, "LevelStart");
+    bool start_ok = level_start && InvokeOnComponent(interp, level_start, controller, &r);
+    LogInfo("stack", "player LevelStart %s", start_ok ? "PASS" : "FAIL");
+    pass = pass && start_ok;
+
+    LogInfo("stack", "result=%s", pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+}
 
 static int RunPlay(const AppConfig& config, MetadataPackage& pkg) {
     if (!config.scene_path) {
@@ -726,6 +882,7 @@ int AppMain(const AppConfig& config) {
         (config.command && (strcmp(config.command, "inspect") == 0 ||
                             strcmp(config.command, "logic") == 0 ||
                             strcmp(config.command, "unity") == 0 ||
+                            strcmp(config.command, "stack") == 0 ||
                             strcmp(config.command, "play") == 0));
     const char* metadata_path = config.metadata_path;
 #if defined(_XBOX)
@@ -760,6 +917,13 @@ int AppMain(const AppConfig& config) {
             result = 1;
         } else {
             result = RunUnityTest(metadata, config);
+        }
+    } else if (config.command && strcmp(config.command, "stack") == 0) {
+        if (!metadata.IsLoaded() || !config.scene_path) {
+            LogError("stack", "metadata and scene required");
+            result = 1;
+        } else {
+            result = RunStackTest(metadata, config);
         }
     } else if (config.command && strcmp(config.command, "scene") == 0) {
         result = RunScene(config);

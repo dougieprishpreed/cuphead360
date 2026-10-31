@@ -11,11 +11,11 @@ namespace ch360 {
 
 static const u32 kMagic = 0x43484D31u; // "CHM1"
 static const u32 kVersion = 1;
-static const u32 kHeaderWords = 64;
+static const u32 kHeaderWords = 80;
 static const u32 kHeaderBytes = kHeaderWords * 4;
 static const u32 kCountBase = 3;
 static const u32 kOffsetBase = 24;
-static const u32 kSizeBase = 44;
+static const u32 kSizeBase = 46;
 
 // Section indices in the package header.
 enum SectionIndex {
@@ -39,6 +39,8 @@ enum SectionIndex {
     SEC_METHOD_PARAM_SIGS,
     SEC_LOCAL_VAR_SIGS,
     SEC_METHODSPEC_ARGS,
+    SEC_FIELD_RVAS,
+    SEC_FIELD_RVA_BYTES,
     SEC_COUNT
 };
 
@@ -68,8 +70,9 @@ MetadataPackage::MetadataPackage()
       field_count_(0), method_count_(0), sig_count_(0), method_sig_count_(0),
       local_sig_count_(0), user_string_count_(0), memberref_count_(0),
       methodspec_count_(0), exception_count_(0), param_count_(0),
-      strings_(0), strings_size_(0), il_(0), il_size_(0), user_bytes_(0),
-      user_bytes_size_(0), type_bucket_mask_(0) {}
+      field_rva_count_(0), strings_(0), strings_size_(0), il_(0), il_size_(0),
+      user_bytes_(0), user_bytes_size_(0), field_rva_bytes_(0),
+      field_rva_bytes_size_(0), type_bucket_mask_(0) {}
 
 MetadataPackage::~MetadataPackage() {
     Unload();
@@ -111,6 +114,8 @@ void MetadataPackage::Unload() {
     il_size_ = 0;
     user_bytes_ = 0;
     user_bytes_size_ = 0;
+    field_rva_bytes_ = 0;
+    field_rva_bytes_size_ = 0;
     types_.Reset();
     fields_.Reset();
     methods_.Reset();
@@ -129,11 +134,13 @@ void MetadataPackage::Unload() {
     methodspec_args_.Reset();
     user_strings_.Reset();
     user_chars_.Reset();
+    field_rvas_.Reset();
     type_buckets_.Reset();
     type_next_.Reset();
     type_count_ = field_count_ = method_count_ = sig_count_ = 0;
     method_sig_count_ = local_sig_count_ = user_string_count_ = 0;
     memberref_count_ = methodspec_count_ = exception_count_ = param_count_ = 0;
+    field_rva_count_ = 0;
     type_bucket_mask_ = 0;
     last_error_ = "not loaded";
 }
@@ -150,8 +157,8 @@ bool MetadataPackage::Load(const char* path) {
     if (ReadWord(file_, 1) != kVersion) return Fail("unsupported package version");
     if (ReadWord(file_, 2) != file_size_) return Fail("package size mismatch");
 
-    u32 counts[17];
-    for (u32 i = 0; i < 17; ++i) counts[i] = ReadWord(file_, kCountBase + i);
+    u32 counts[18];
+    for (u32 i = 0; i < 18; ++i) counts[i] = ReadWord(file_, kCountBase + i);
     type_count_ = counts[0];
     field_count_ = counts[1];
     method_count_ = counts[2];
@@ -163,11 +170,13 @@ bool MetadataPackage::Load(const char* path) {
     methodspec_count_ = counts[8];
     exception_count_ = counts[9];
     param_count_ = counts[10];
+    field_rva_count_ = counts[17];
 
     u32 sec_size = 0;
     strings_ = Section(SEC_STRINGS, &strings_size_);
     il_ = Section(SEC_IL, &il_size_);
     user_bytes_ = Section(SEC_USER_STRING_BYTES, &user_bytes_size_);
+    field_rva_bytes_ = Section(SEC_FIELD_RVA_BYTES, &field_rva_bytes_size_);
     if (!strings_ || !il_ || !user_bytes_) return Fail("missing core section");
 
     // Fixed-size records.
@@ -296,14 +305,15 @@ bool MetadataPackage::Load(const char* path) {
     }
 
     const u8* mspec_data = Section(SEC_METHODSPECS, &sec_size);
-    if (!mspec_data || sec_size < methodspec_count_ * 12u) return Fail("bad methodspec section");
+    if (!mspec_data || sec_size < methodspec_count_ * 16u) return Fail("bad methodspec section");
     if (!methodspecs_.Resize(methodspec_count_)) return Fail("out of memory for methodspecs");
     for (u32 i = 0; i < methodspec_count_; ++i) {
-        const u8* p = mspec_data + i * 12u;
+        const u8* p = mspec_data + i * 16u;
         MethodSpecInfo& s = methodspecs_[i];
         s.method_id = ReadU32LE(p + 0);
         s.arg_start = ReadU32LE(p + 4);
         s.arg_count = ReadU32LE(p + 8);
+        s.memberref_id = ReadU32LE(p + 12);
     }
 
     const u8* param_data = Section(SEC_PARAMS, &sec_size);
@@ -314,6 +324,25 @@ bool MetadataPackage::Load(const char* path) {
         ParamInfo& s = params_[i];
         s.name = StringAt(ReadU32LE(p + 0));
         s.flags = ReadU32LE(p + 4);
+    }
+
+    const u8* rva_data = Section(SEC_FIELD_RVAS, &sec_size);
+    if (field_rva_count_) {
+        if (!rva_data || !field_rva_bytes_ || sec_size < field_rva_count_ * 12u) {
+            return Fail("bad field RVA section");
+        }
+        if (!field_rvas_.Resize(field_rva_count_)) return Fail("out of memory for field RVAs");
+        for (u32 i = 0; i < field_rva_count_; ++i) {
+            const u8* p = rva_data + i * 12u;
+            FieldRvaInfo& r = field_rvas_[i];
+            r.field_id = ReadU32LE(p + 0);
+            r.data_offset = ReadU32LE(p + 4);
+            r.size = ReadU32LE(p + 8);
+            if (r.data_offset > field_rva_bytes_size_ ||
+                r.size > field_rva_bytes_size_ - r.data_offset) {
+                return Fail("field RVA data out of bounds");
+            }
+        }
     }
 
     const u8* exc_data = Section(SEC_EXCEPTIONS, &sec_size);
@@ -452,6 +481,25 @@ const ParamInfo& MetadataPackage::Param(u32 id) const {
     static ParamInfo empty;
     if (id == 0 || id > param_count_) return empty;
     return params_[id - 1];
+}
+
+const FieldRvaInfo& MetadataPackage::FieldRva(u32 index) const {
+    static FieldRvaInfo empty = { 0, 0, 0 };
+    if (index == 0 || index > field_rva_count_) return empty;
+    return field_rvas_[index - 1];
+}
+
+const u8* MetadataPackage::FieldRvaData(u32 field_id, u32* out_size) const {
+    if (out_size) *out_size = 0;
+    if (!field_rva_bytes_) return 0;
+    for (u32 i = 0; i < field_rva_count_; ++i) {
+        const FieldRvaInfo& r = field_rvas_[i];
+        if (r.field_id == field_id) {
+            if (out_size) *out_size = r.size;
+            return field_rva_bytes_ + r.data_offset;
+        }
+    }
+    return 0;
 }
 
 const ExceptionInfo& MetadataPackage::Exception(u32 index) const {

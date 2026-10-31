@@ -16,6 +16,29 @@ static bool RetVec3V(Interpreter& in, Value* ret, f32 x, f32 y, f32 z) {
     if (ret) *ret = in.NewVec3(x, y, z);
     return true;
 }
+static bool RetVec2V(Interpreter& in, Value* ret, f32 x, f32 y) {
+    if (ret) *ret = in.NewVec2(x, y);
+    return true;
+}
+static bool RetF32Field(Value* ret, f32 v) { if (ret) *ret = Value::R4(v); return true; }
+static bool RetBoolField(Value* ret, bool v) { if (ret) *ret = Value::Bool(v); return true; }
+
+// Extra native-only slots on Rigidbody2D objects.
+enum { RB_SLOT_VEL_X = 2, RB_SLOT_VEL_Y = 3, RB_SLOT_ANGULAR = 4, RB_SLOT_BODY = 5,
+       RB_SLOT_KINEMATIC = 6, RB_SLOT_SIMULATED = 7, RB_SLOT_FREEZE = 8 };
+
+static const SceneComponent* SceneComponentFor(Interpreter& in, const Value& v) {
+    u32 ci = in.ManagedComponentIndexFor(v);
+    Scene* scene = in.BoundScene();
+    if (!scene || ci >= scene->ComponentCount()) return 0;
+    return &scene->Component(ci);
+}
+static SceneComponent* MutableSceneComponentFor(Interpreter& in, const Value& v) {
+    u32 ci = in.ManagedComponentIndexFor(v);
+    Scene* scene = in.BoundScene();
+    if (!scene || ci >= scene->ComponentCount()) return 0;
+    return &scene->MutableComponent(ci);
+}
 
 static u32 ManagedObjectIndex(const Interpreter& in, const Value& v) {
     return in.ManagedObjectIndexFor(v);
@@ -162,10 +185,21 @@ bool Interpreter::BindScene(Scene& scene) {
             if (sc.type == 1) type = sprite_renderer_type_id_;
             else if (sc.type == 2) type = animator_type_id_;
             else if (sc.type == 3) type = metadata_.FindType("UnityEngine.Camera");
-            Object* comp = AllocObjectWithSlots(type, 2);
+            else if (sc.type == 5) type = metadata_.FindType("UnityEngine.BoxCollider2D");
+            else if (sc.type == 6) type = metadata_.FindType("UnityEngine.CircleCollider2D");
+            else if (sc.type == 7) type = metadata_.FindType("UnityEngine.Rigidbody2D");
+            if (!type) type = component_type_id_;
+            Object* comp = AllocObjectWithSlots(type, sc.type == 7 ? 10 : 4);
             if (!comp) return false;
             comp->Fields()[0] = Value::I4((s32)oi);
             comp->Fields()[1] = Value::I4((s32)ci);
+            if (sc.type == 7) {
+                comp->Fields()[RB_SLOT_SIMULATED] = Value::I4((sc.flags & 1) ? 1 : 0);
+                comp->Fields()[RB_SLOT_KINEMATIC] = Value::I4((sc.flags & 2) ? 1 : 0);
+                comp->Fields()[RB_SLOT_FREEZE] = Value::I4((sc.flags & 4) ? 1 : 0);
+                comp->Fields()[RB_SLOT_BODY] = Value::I4((s32)((sc.flags >> 8) & 0xFF));
+            }
+            comp->flags = sc.flags;
             AddManagedBinding(comp, oi, ci);
             managed_components_[ci] = Value::ObjectRef(comp);
         }
@@ -282,7 +316,14 @@ static bool GameObject_GetComponent(Interpreter& in, const MemberRefInfo& member
     Scene* scene = in.BoundScene();
     if (!scene || oi >= scene->ObjectCount()) return false;
     const MethodSigInfo& ms = in.Metadata().MethodSig(member.sig_index);
-    u32 target = in.Metadata().Sig(ms.return_sig).type_id;
+    const SigInfo& rs = in.Metadata().Sig(ms.return_sig);
+    u32 target = rs.type_id;
+    if (argc >= 2 && a[1].tag == VT_I4 && a[1].data.i32 > 0) {
+        target = (u32)a[1].data.i32;
+    }
+    if (rs.kind == SIG_MVAR || rs.kind == SIG_VAR || target == 0) {
+        target = in.GenericArgType(0);
+    }
     if (target == in.TransformTypeId()) {
         if (ret) *ret = in.ManagedTransform(oi);
         return true;
@@ -305,6 +346,106 @@ static bool GameObject_GetComponent(Interpreter& in, const MemberRefInfo& member
     return true;
 }
 
+static bool IsSceneDescendant(const Scene& scene, u32 object_index, u32 root_id) {
+    u32 cur = scene.Object(object_index).id;
+    u32 guard = 0;
+    while (cur && guard++ < 256) {
+        if (cur == root_id) return true;
+        u32 idx = FindObjectIndexById(scene, cur);
+        if (idx == 0xFFFFFFFFu) return false;
+        cur = scene.Object(idx).parent;
+    }
+    return false;
+}
+
+static bool Component_GetComponentsInChildren(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    u32 target = in.GenericArgType(0);
+    bool include_inactive = (argc > 1) ? Interpreter::ToBool(a[1]) : false;
+    u32 root_oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    if (!scene || root_oi >= scene->ObjectCount() || !target) {
+        if (ret) *ret = in.NewArrayValue(target, 0);
+        return true;
+    }
+    u32 root_id = scene->Object(root_oi).id;
+    u32 count = 0;
+    for (u32 oi = 0; oi < scene->ObjectCount(); ++oi) {
+        if (!IsSceneDescendant(*scene, oi, root_id)) continue;
+        if (!include_inactive && !(scene->Object(oi).flags & 1u)) continue;
+        const SceneObject& o = scene->Object(oi);
+        for (u32 c = 0; c < o.component_count; ++c) {
+            u32 ci = o.component_start + c;
+            if (ci >= scene->ComponentCount()) break;
+            Value v = in.ManagedComponent(ci);
+            if (v.tag == VT_OBJECT && v.data.obj) {
+                u32 vt = v.data.obj->type_id;
+                if (in.IsAssignable(vt, target) || vt == target) ++count;
+            }
+        }
+    }
+    Value arr = in.NewArrayValue(target, count);
+    if (arr.tag == VT_ARRAY && arr.data.array) {
+        u32 j = 0;
+        for (u32 oi = 0; oi < scene->ObjectCount(); ++oi) {
+            if (!IsSceneDescendant(*scene, oi, root_id)) continue;
+            if (!include_inactive && !(scene->Object(oi).flags & 1u)) continue;
+            const SceneObject& o = scene->Object(oi);
+            for (u32 c = 0; c < o.component_count; ++c) {
+                u32 ci = o.component_start + c;
+                if (ci >= scene->ComponentCount()) break;
+                Value v = in.ManagedComponent(ci);
+                if (v.tag == VT_OBJECT && v.data.obj) {
+                    u32 vt = v.data.obj->type_id;
+                    if (in.IsAssignable(vt, target) || vt == target) {
+                        if (j < count) arr.data.array->Elements()[j++] = in.CopyValue(v);
+                    }
+                }
+            }
+        }
+    }
+    if (ret) *ret = arr;
+    return true;
+}
+
+static bool Component_GetComponentInChildren(Interpreter& in, const MemberRefInfo& member, u32 argc, Value* a, Value* ret) {
+    Value arr;
+    if (!Component_GetComponentsInChildren(in, member, argc, a, &arr)) return false;
+    if (arr.tag == VT_ARRAY && arr.data.array && arr.data.array->length > 0) {
+        if (ret) *ret = arr.data.array->Elements()[0];
+    } else if (ret) {
+        *ret = Value::Null();
+    }
+    return true;
+}
+
+static bool Object_FindObjectsOfType(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    u32 target = in.GenericArgType(0);
+    Scene* scene = in.BoundScene();
+    u32 count = 0;
+    if (scene && target) {
+        for (u32 ci = 0; ci < scene->ComponentCount(); ++ci) {
+            Value v = in.ManagedComponent(ci);
+            if (v.tag == VT_OBJECT && v.data.obj &&
+                in.IsAssignable(v.data.obj->type_id, target)) {
+                ++count;
+            }
+        }
+    }
+    Value arr = in.NewArrayValue(target, count);
+    if (arr.tag == VT_ARRAY && arr.data.array) {
+        u32 j = 0;
+        for (u32 ci = 0; ci < scene->ComponentCount(); ++ci) {
+            Value v = in.ManagedComponent(ci);
+            if (v.tag == VT_OBJECT && v.data.obj &&
+                in.IsAssignable(v.data.obj->type_id, target)) {
+                if (j < count) arr.data.array->Elements()[j++] = in.CopyValue(v);
+            }
+        }
+    }
+    if (ret) *ret = arr;
+    return true;
+}
+
 static bool GameObject_SetActive(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     u32 oi = ManagedObjectIndex(in, a[0]);
     Scene* scene = in.BoundScene();
@@ -322,12 +463,22 @@ static bool GameObject_GetActiveSelf(Interpreter&, const MemberRefInfo&, u32, Va
 static bool Behaviour_SetEnabled(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     u32 ci = ManagedComponentIndex(in, a[0]);
     if (a[0].data.obj) {
-        (void)ci;
-        a[0].data.obj->flags = (a[0].data.obj->flags & ~1u) | (Interpreter::ToBool(a[1]) ? 1u : 0u);
+        bool enabled = Interpreter::ToBool(a[1]);
+        a[0].data.obj->flags = (a[0].data.obj->flags & ~1u) | (enabled ? 1u : 0u);
+        Scene* scene = in.BoundScene();
+        if (scene && ci < scene->ComponentCount()) {
+            scene->MutableComponent(ci).flags =
+                (scene->Component(ci).flags & ~1u) | (enabled ? 1u : 0u);
+        }
     }
     return RetVoid(ret);
 }
 static bool Behaviour_GetEnabled(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 ci = ManagedComponentIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    if (scene && ci < scene->ComponentCount()) {
+        return RetBoolV(ret, (scene->Component(ci).flags & 1u) != 0);
+    }
     return RetBoolV(ret, (a[0].data.obj->flags & 1u) != 0);
 }
 
@@ -413,6 +564,186 @@ static bool Transform_SetParent(Interpreter& in, const MemberRefInfo&, u32, Valu
     return RetVoid(ret);
 }
 
+static bool Collider2D_GetOffset(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    const SceneComponent* c = SceneComponentFor(in, a[0]);
+    if (!c) return RetVec2V(in, ret, 0.0f, 0.0f);
+    return RetVec2V(in, ret, c->color[2], c->color[3]);
+}
+static bool Collider2D_SetOffset(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    SceneComponent* c = MutableSceneComponentFor(in, a[0]);
+    if (c && a[1].tag == VT_VEC2 && a[1].data.ptr) {
+        const Vec2* v = (const Vec2*)a[1].data.ptr;
+        c->color[2] = v->x; c->color[3] = v->y;
+    }
+    return RetVoid(ret);
+}
+static bool BoxCollider2D_GetSize(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    const SceneComponent* c = SceneComponentFor(in, a[0]);
+    if (!c) return RetVec2V(in, ret, 0.0f, 0.0f);
+    return RetVec2V(in, ret, c->color[0], c->color[1]);
+}
+static bool BoxCollider2D_SetSize(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    SceneComponent* c = MutableSceneComponentFor(in, a[0]);
+    if (c && a[1].tag == VT_VEC2 && a[1].data.ptr) {
+        const Vec2* v = (const Vec2*)a[1].data.ptr;
+        c->color[0] = v->x; c->color[1] = v->y;
+    }
+    return RetVoid(ret);
+}
+static bool CircleCollider2D_GetRadius(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    const SceneComponent* c = SceneComponentFor(in, a[0]);
+    return RetF32Field(ret, c ? c->color[0] : 0.0f);
+}
+static bool CircleCollider2D_SetRadius(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    SceneComponent* c = MutableSceneComponentFor(in, a[0]);
+    if (c) c->color[0] = a[1].data.f32;
+    return RetVoid(ret);
+}
+
+// Extra native-only slots on Rigidbody2D objects.
+static Object* RigidbodyObject(const Value& v) {
+    return (v.tag == VT_OBJECT) ? v.data.obj : 0;
+}
+static bool Rigidbody2D_GetVelocity(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = RigidbodyObject(a[0]);
+    if (!o) return RetVec2V(in, ret, 0.0f, 0.0f);
+    f32 x = o->Fields()[RB_SLOT_VEL_X].data.f32;
+    f32 y = o->Fields()[RB_SLOT_VEL_Y].data.f32;
+    return RetVec2V(in, ret, x, y);
+}
+static bool Rigidbody2D_SetVelocity(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = RigidbodyObject(a[0]);
+    if (o && a[1].tag == VT_VEC2 && a[1].data.ptr) {
+        const Vec2* v = (const Vec2*)a[1].data.ptr;
+        o->Fields()[RB_SLOT_VEL_X] = Value::R4(v->x);
+        o->Fields()[RB_SLOT_VEL_Y] = Value::R4(v->y);
+    }
+    return RetVoid(ret);
+}
+static bool Rigidbody2D_GetPosition(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = in.ManagedObjectIndexFor(a[0]);
+    Scene* scene = in.BoundScene();
+    if (!scene || oi >= scene->ObjectCount()) return RetVec2V(in, ret, 0.0f, 0.0f);
+    const SceneObject& o = scene->Object(oi);
+    return RetVec2V(in, ret, o.world_x, o.world_y);
+}
+static bool Rigidbody2D_SetPosition(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = in.ManagedObjectIndexFor(a[0]);
+    Scene* scene = in.BoundScene();
+    if (!scene || oi >= scene->ObjectCount()) return RetVoid(ret);
+    if (a[1].tag != VT_VEC2 || !a[1].data.ptr) return RetVoid(ret);
+    const Vec2* p = (const Vec2*)a[1].data.ptr;
+    SceneObject& o = const_cast<SceneObject&>(scene->Object(oi));
+    o.position[0] = p->x; o.position[1] = p->y;
+    scene->ComputeWorldTransforms();
+    return RetVoid(ret);
+}
+static bool Rigidbody2D_GetMass(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    const SceneComponent* c = SceneComponentFor(in, a[0]);
+    return RetF32Field(ret, c ? c->color[0] : 1.0f);
+}
+static bool Rigidbody2D_SetMass(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    SceneComponent* c = MutableSceneComponentFor(in, a[0]);
+    if (c) c->color[0] = a[1].data.f32;
+    return RetVoid(ret);
+}
+static bool Rigidbody2D_GetDrag(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    const SceneComponent* c = SceneComponentFor(in, a[0]);
+    return RetF32Field(ret, c ? c->color[1] : 0.0f);
+}
+static bool Rigidbody2D_SetDrag(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    SceneComponent* c = MutableSceneComponentFor(in, a[0]);
+    if (c) c->color[1] = a[1].data.f32;
+    return RetVoid(ret);
+}
+static bool Rigidbody2D_GetAngularDrag(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    const SceneComponent* c = SceneComponentFor(in, a[0]);
+    return RetF32Field(ret, c ? c->color[2] : 0.05f);
+}
+static bool Rigidbody2D_SetAngularDrag(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    SceneComponent* c = MutableSceneComponentFor(in, a[0]);
+    if (c) c->color[2] = a[1].data.f32;
+    return RetVoid(ret);
+}
+static bool Rigidbody2D_GetGravityScale(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    const SceneComponent* c = SceneComponentFor(in, a[0]);
+    return RetF32Field(ret, c ? c->color[3] : 1.0f);
+}
+static bool Rigidbody2D_SetGravityScale(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    SceneComponent* c = MutableSceneComponentFor(in, a[0]);
+    if (c) c->color[3] = a[1].data.f32;
+    return RetVoid(ret);
+}
+static bool Rigidbody2D_GetAngularVelocity(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = RigidbodyObject(a[0]);
+    return RetF32Field(ret, o ? o->Fields()[RB_SLOT_ANGULAR].data.f32 : 0.0f);
+}
+static bool Rigidbody2D_SetAngularVelocity(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = RigidbodyObject(a[0]);
+    if (o) o->Fields()[RB_SLOT_ANGULAR] = Value::R4(a[1].data.f32);
+    return RetVoid(ret);
+}
+static bool Rigidbody2D_GetBodyType(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    (void)in;
+    Object* o = RigidbodyObject(a[0]);
+    return RetI32V(ret, o ? o->Fields()[RB_SLOT_BODY].data.i32 : 0);
+}
+static bool Rigidbody2D_SetBodyType(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    (void)in;
+    Object* o = RigidbodyObject(a[0]);
+    if (o) o->Fields()[RB_SLOT_BODY] = Value::I4(a[1].data.i32);
+    return RetVoid(ret);
+}
+static bool Rigidbody2D_GetKinematic(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    (void)in;
+    Object* o = RigidbodyObject(a[0]);
+    return RetBoolV(ret, o ? o->Fields()[RB_SLOT_KINEMATIC].data.i32 != 0 : false);
+}
+static bool Rigidbody2D_SetKinematic(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    (void)in;
+    Object* o = RigidbodyObject(a[0]);
+    if (o) o->Fields()[RB_SLOT_KINEMATIC] = Value::I4(Interpreter::ToBool(a[1]) ? 1 : 0);
+    return RetVoid(ret);
+}
+static bool Rigidbody2D_GetSimulated(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    (void)in;
+    Object* o = RigidbodyObject(a[0]);
+    return RetBoolV(ret, o ? o->Fields()[RB_SLOT_SIMULATED].data.i32 != 0 : true);
+}
+static bool Rigidbody2D_SetSimulated(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    (void)in;
+    Object* o = RigidbodyObject(a[0]);
+    if (o) o->Fields()[RB_SLOT_SIMULATED] = Value::I4(Interpreter::ToBool(a[1]) ? 1 : 0);
+    return RetVoid(ret);
+}
+static bool Rigidbody2D_GetFreezeRotation(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    (void)in;
+    Object* o = RigidbodyObject(a[0]);
+    return RetBoolV(ret, o ? o->Fields()[RB_SLOT_FREEZE].data.i32 != 0 : false);
+}
+static bool Rigidbody2D_SetFreezeRotation(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    (void)in;
+    Object* o = RigidbodyObject(a[0]);
+    if (o) o->Fields()[RB_SLOT_FREEZE] = Value::I4(Interpreter::ToBool(a[1]) ? 1 : 0);
+    return RetVoid(ret);
+}
+static bool Collider2D_GetAttachedRigidbody(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = in.ManagedObjectIndexFor(a[0]);
+    Scene* scene = in.BoundScene();
+    if (!scene || oi >= scene->ObjectCount()) { if (ret) *ret = Value::Null(); return true; }
+    const SceneObject& o = scene->Object(oi);
+    for (u32 c = 0; c < o.component_count; ++c) {
+        u32 ci = o.component_start + c;
+        if (ci >= scene->ComponentCount()) break;
+        if (scene->Component(ci).type == 7) {
+            if (ret) *ret = in.ManagedComponent(ci);
+            return true;
+        }
+    }
+    if (ret) *ret = Value::Null();
+    return true;
+}
+
 static bool MonoBehaviour_NoOp(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
     return RetVoid(ret);
 }
@@ -480,13 +811,18 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
     if (strcmp(type, "UnityEngine.Object") == 0 || strcmp(type, "UnityEngine.Component") == 0 ||
         strcmp(type, "UnityEngine.Behaviour") == 0 || strcmp(type, "UnityEngine.GameObject") == 0 ||
         strcmp(type, "UnityEngine.MonoBehaviour") == 0 || strcmp(type, "UnityEngine.SpriteRenderer") == 0 ||
-        strcmp(type, "UnityEngine.Renderer") == 0 || strcmp(type, "UnityEngine.Animator") == 0) {
+        strcmp(type, "UnityEngine.Renderer") == 0 || strcmp(type, "UnityEngine.Animator") == 0 ||
+        strcmp(type, "UnityEngine.Collider2D") == 0 || strcmp(type, "UnityEngine.BoxCollider2D") == 0 ||
+        strcmp(type, "UnityEngine.CircleCollider2D") == 0 || strcmp(type, "UnityEngine.Rigidbody2D") == 0) {
         if (strcmp(n, "get_gameObject") == 0) return Component_GetGameObject(in, member, argc, args, ret);
         if (strcmp(n, "get_transform") == 0) {
             if (strcmp(type, "UnityEngine.GameObject") == 0) return GameObject_GetTransform(in, member, argc, args, ret);
             return Component_GetTransform(in, member, argc, args, ret);
         }
         if (strcmp(n, "GetComponent") == 0) return GameObject_GetComponent(in, member, argc, args, ret);
+        if (strcmp(n, "FindObjectsOfType") == 0) return Object_FindObjectsOfType(in, member, argc, args, ret);
+        if (strcmp(n, "GetComponentsInChildren") == 0) return Component_GetComponentsInChildren(in, member, argc, args, ret);
+        if (strcmp(n, "GetComponentInChildren") == 0) return Component_GetComponentInChildren(in, member, argc, args, ret);
         if (strcmp(n, "SetActive") == 0) return GameObject_SetActive(in, member, argc, args, ret);
         if (strcmp(n, "set_layer") == 0) return RetVoid(ret);
         if (strcmp(n, "get_layer") == 0) return RetI32V(ret, 0);
@@ -528,6 +864,45 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         }
         if (strcmp(n, "get_gameObject") == 0) return Component_GetGameObject(in, member, argc, args, ret);
         if (strcmp(n, "get_name") == 0) return Object_GetName(in, member, argc, args, ret);
+    }
+    if (strcmp(type, "UnityEngine.Collider2D") == 0 || strcmp(type, "UnityEngine.BoxCollider2D") == 0 ||
+        strcmp(type, "UnityEngine.CircleCollider2D") == 0) {
+        if (strcmp(n, "get_offset") == 0) return Collider2D_GetOffset(in, member, argc, args, ret);
+        if (strcmp(n, "set_offset") == 0) return Collider2D_SetOffset(in, member, argc, args, ret);
+        if (strcmp(n, "get_attachedRigidbody") == 0) return Collider2D_GetAttachedRigidbody(in, member, argc, args, ret);
+        if (strcmp(n, "get_shapeCount") == 0) return RetI32V(ret, 1);
+    }
+    if (strcmp(type, "UnityEngine.BoxCollider2D") == 0) {
+        if (strcmp(n, "get_size") == 0) return BoxCollider2D_GetSize(in, member, argc, args, ret);
+        if (strcmp(n, "set_size") == 0) return BoxCollider2D_SetSize(in, member, argc, args, ret);
+    }
+    if (strcmp(type, "UnityEngine.CircleCollider2D") == 0) {
+        if (strcmp(n, "get_radius") == 0) return CircleCollider2D_GetRadius(in, member, argc, args, ret);
+        if (strcmp(n, "set_radius") == 0) return CircleCollider2D_SetRadius(in, member, argc, args, ret);
+    }
+    if (strcmp(type, "UnityEngine.Rigidbody2D") == 0) {
+        if (strcmp(n, "get_velocity") == 0) return Rigidbody2D_GetVelocity(in, member, argc, args, ret);
+        if (strcmp(n, "set_velocity") == 0) return Rigidbody2D_SetVelocity(in, member, argc, args, ret);
+        if (strcmp(n, "get_position") == 0) return Rigidbody2D_GetPosition(in, member, argc, args, ret);
+        if (strcmp(n, "set_position") == 0) return Rigidbody2D_SetPosition(in, member, argc, args, ret);
+        if (strcmp(n, "get_mass") == 0) return Rigidbody2D_GetMass(in, member, argc, args, ret);
+        if (strcmp(n, "set_mass") == 0) return Rigidbody2D_SetMass(in, member, argc, args, ret);
+        if (strcmp(n, "get_drag") == 0) return Rigidbody2D_GetDrag(in, member, argc, args, ret);
+        if (strcmp(n, "set_drag") == 0) return Rigidbody2D_SetDrag(in, member, argc, args, ret);
+        if (strcmp(n, "get_angularDrag") == 0) return Rigidbody2D_GetAngularDrag(in, member, argc, args, ret);
+        if (strcmp(n, "set_angularDrag") == 0) return Rigidbody2D_SetAngularDrag(in, member, argc, args, ret);
+        if (strcmp(n, "get_gravityScale") == 0) return Rigidbody2D_GetGravityScale(in, member, argc, args, ret);
+        if (strcmp(n, "set_gravityScale") == 0) return Rigidbody2D_SetGravityScale(in, member, argc, args, ret);
+        if (strcmp(n, "get_angularVelocity") == 0) return Rigidbody2D_GetAngularVelocity(in, member, argc, args, ret);
+        if (strcmp(n, "set_angularVelocity") == 0) return Rigidbody2D_SetAngularVelocity(in, member, argc, args, ret);
+        if (strcmp(n, "get_bodyType") == 0) return Rigidbody2D_GetBodyType(in, member, argc, args, ret);
+        if (strcmp(n, "set_bodyType") == 0) return Rigidbody2D_SetBodyType(in, member, argc, args, ret);
+        if (strcmp(n, "get_isKinematic") == 0) return Rigidbody2D_GetKinematic(in, member, argc, args, ret);
+        if (strcmp(n, "set_isKinematic") == 0) return Rigidbody2D_SetKinematic(in, member, argc, args, ret);
+        if (strcmp(n, "get_simulated") == 0) return Rigidbody2D_GetSimulated(in, member, argc, args, ret);
+        if (strcmp(n, "set_simulated") == 0) return Rigidbody2D_SetSimulated(in, member, argc, args, ret);
+        if (strcmp(n, "get_freezeRotation") == 0) return Rigidbody2D_GetFreezeRotation(in, member, argc, args, ret);
+        if (strcmp(n, "set_freezeRotation") == 0) return Rigidbody2D_SetFreezeRotation(in, member, argc, args, ret);
     }
     if (strcmp(type, "UnityEngine.Vector3") == 0) {
         if (strcmp(n, ".ctor") == 0) return Vector3_Ctor(in, member, argc, args, ret);

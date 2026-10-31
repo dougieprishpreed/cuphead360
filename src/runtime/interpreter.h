@@ -99,6 +99,11 @@ public:
     bool GetExternalField(const MemberRefInfo& member, const Value& instance, Value* out);
     bool SetExternalField(const MemberRefInfo& member, const Value& instance, const Value& value);
 
+    // Current generic method instantiation (MethodSpec) context, used by
+    // native Unity methods such as GetComponent<T>/FindObjectsOfType<T>.
+    u32 GenericArgCount() const { return generic_arg_count_; }
+    u32 GenericArgType(u32 index) const;
+
     // Static type initialization / vtable construction.
     bool EnsureTypeInitialized(u32 type_id);
     const TypeRuntime& RuntimeType(u32 type_id) const;
@@ -116,6 +121,8 @@ private:
     void StoreValue(Value* dest, const Value& v);
     bool BoxValue(const Value& v, Value* out);
     bool UnboxValue(const Value& boxed, u32 target_type, Value* out);
+    bool IsDelegateType(u32 type_id) const;
+    bool InvokeDelegate(DelegateObject* d, u32 arg_count, Value* args, Value* ret);
 
     bool Execute(u32 method_id, const MethodInfo& method, const MethodSigInfo& sig,
                  Value* args, u32 arg_count, Value* ret);
@@ -128,6 +135,9 @@ private:
     Buffer<Object*> objects_;
     bool trace_;
     u32 last_error_;
+    u32 current_method_id_;
+    u32 generic_arg_start_;
+    u32 generic_arg_count_;
 
     u32 string_type_id_;
     u32 object_type_id_;

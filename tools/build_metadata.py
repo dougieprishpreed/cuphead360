@@ -21,7 +21,7 @@ from metadata_lib import (
 
 MAGIC = 0x43484D31  # "CHM1"
 VERSION = 1
-HEADER_WORDS = 64
+HEADER_WORDS = 80
 HEADER_SIZE = HEADER_WORDS * 4
 
 # Section tags in header order.
@@ -30,7 +30,7 @@ SECTION_NAMES = [
     "local_sigs", "il", "exceptions", "user_strings", "user_string_bytes",
     "memberrefs", "methodspecs", "params", "interface_ids",
     "generic_arg_ids", "sig_children", "method_param_sigs",
-    "local_var_sigs", "methodspec_args",
+    "local_var_sigs", "methodspec_args", "field_rvas", "field_rva_bytes",
 ]
 
 
@@ -70,6 +70,7 @@ class PackageWriter:
         self.memberref_records = []
         self.methodspec_records = []
         self.param_records = []
+        self.field_rva_records = []
         self.rewritten_il = {}
 
         self._prepare()
@@ -161,12 +162,23 @@ class PackageWriter:
             start = len(self.methodspec_args)
             for a in args:
                 self.methodspec_args.append(b.sig(a.kind, b.sig_type_id(a), a.children, a.extra, a.token))
-            # Method coded index: only MethodDef is meaningful for game code.
+            # Preserve the MemberRef row for external generic calls such as
+            # GameObject.GetComponent<T>(); MethodDef rows keep their id.
             try:
-                mid = method.row_index if type(method.table).__name__ == "MethodDef" else 0
+                table_name = type(method.table).__name__
+                if table_name == "MethodDef":
+                    mid = method.row_index
+                    mrid = 0
+                elif table_name == "MemberRef":
+                    mid = 0
+                    mrid = method.row_index
+                else:
+                    mid = 0
+                    mrid = 0
             except Exception:
                 mid = 0
-            self.methodspec_records.append((mid, start, len(args)))
+                mrid = 0
+            self.methodspec_records.append((mid, start, len(args), mrid))
         # Param names.
         for i in range(len(b.md.Param.rows)):
             row = b.md.Param.rows[i]
@@ -266,8 +278,17 @@ class PackageWriter:
         local_sigs = b"".join(pack_local(r) for r in self.local_sig_records)
         user_strings = b"".join(struct.pack("<3I", *r) for r in self.user_records)
         memberrefs = b"".join(struct.pack("<6I", *r) for r in self.memberref_records)
-        methodspecs = b"".join(struct.pack("<3I", *r) for r in self.methodspec_records)
+        methodspecs = b"".join(struct.pack("<4I", *r) for r in self.methodspec_records)
         params = b"".join(struct.pack("<2I", *r) for r in self.param_records)
+
+        field_rva_bytes = bytearray()
+        for fid, data in b.field_rvas:
+            off = len(field_rva_bytes)
+            field_rva_bytes.extend(data)
+            while len(field_rva_bytes) & 15:
+                field_rva_bytes.append(0)
+            self.field_rva_records.append((fid, off, len(data)))
+        field_rvas = b"".join(struct.pack("<3I", *r) for r in self.field_rva_records)
 
         def u32arr(values):
             return b"".join(struct.pack("<I", v) for v in values)
@@ -297,6 +318,8 @@ class PackageWriter:
             "method_param_sigs": u32arr(self.method_param_sigs),
             "local_var_sigs": u32arr(self.local_var_sigs),
             "methodspec_args": u32arr(self.methodspec_args),
+            "field_rvas": field_rvas,
+            "field_rva_bytes": bytes(field_rva_bytes),
         }
 
         # Header layout: magic/version/file_size + counts + section offsets.
@@ -315,6 +338,7 @@ class PackageWriter:
             "methodspec_count": len(self.methodspec_records),
             "exception_count": len(exceptions) // 24,
             "param_count": len(self.param_records),
+            "field_rva_count": len(self.field_rva_records),
         }
 
         header = [MAGIC, VERSION, 0]  # file_size patched below
@@ -326,7 +350,7 @@ class PackageWriter:
             "param_count",
             "interface_id_count", "generic_arg_id_count", "sig_child_count",
             "method_param_sig_count", "local_var_sig_count",
-            "methodspec_arg_count",
+            "methodspec_arg_count", "field_rva_count",
         ]
         extra_counts = {
             "interface_id_count": len(self.interface_ids),
@@ -338,9 +362,9 @@ class PackageWriter:
         }
         for k in order:
             header.append(counts.get(k, extra_counts.get(k, 0)))
-        # Pad to HEADER_WORDS - 3 - len(order) - len(section offsets).
-        # We will patch offsets after laying out sections.
-        header.extend([0] * (HEADER_WORDS - len(header) - len(SECTION_NAMES) * 2))
+        # Section offsets start at word 24; sizes follow all section offsets.
+        while len(header) < 24:
+            header.append(0)
 
         body = bytearray()
         offsets = {}
@@ -356,6 +380,8 @@ class PackageWriter:
         size_words = [len(sections[name]) for name in SECTION_NAMES]
         header.extend(off_words)
         header.extend(size_words)
+        while len(header) < HEADER_WORDS:
+            header.append(0)
         assert len(header) == HEADER_WORDS, len(header)
         header[2] = HEADER_SIZE + len(body)
         blob = struct.pack("<%dI" % HEADER_WORDS, *header) + bytes(body)
