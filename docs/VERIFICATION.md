@@ -179,6 +179,17 @@ This is not a validated visual slice.
   projectiles whose original `Update` methods execute. `Object.Instantiate`
   is still template reuse rather than true cloning, and damage/target
   destruction are not yet validated.
+- The content pipeline now loads all shared assets, follows scene-authored
+  external PPtrs and maps `RectTransform` references. The first normal
+  platforming level (`scene_level_platforming_1_1F`) was converted with 2346
+  GameObjects / 4619 sprites; `PlatformingLevel.Awake` and
+  `PlatformingLevel.Start` both PASS on Windows.
+- Generic runtime support now includes nested method-generic substitution,
+  `Comparison<T>` delegates, `List<T>.Sort` and a GOG achievement-sync no-op.
+- `--levelplay` on the platforming level still fails: the player falls
+  through the start area. Platform/ground collider runtime support and the
+  full UI/audio/Animator stack remain missing, so no normal level is playable
+  yet.
 - Sprite world size now uses the cropped sprite rect instead of the atlas
   rect, fixing the oversized character art in both the native play slice and
   the original-level play harness.

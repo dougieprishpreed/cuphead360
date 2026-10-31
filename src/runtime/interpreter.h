@@ -142,6 +142,8 @@ private:
     u32 current_method_id_;
     u32 generic_arg_start_;
     u32 generic_arg_count_;
+    u32 generic_arg_types_[32];
+    u32 generic_arg_type_count_;
 
     u32 string_type_id_;
     u32 object_type_id_;

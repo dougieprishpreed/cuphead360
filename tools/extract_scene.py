@@ -33,18 +33,38 @@ def scene_index(managed_dir: str) -> list[str]:
 
 
 def load_scene_bundle(managed_dir: str, scene_file: str):
-    """Loads a scene plus its serialized-file dependencies."""
+    """Loads a scene plus all shared-asset dependencies.
+
+    Prefab graphs can reference objects in any sharedassets file, not only
+    the scene's direct externals (for example LevelGUI's OptionsGUI prefab
+    lives in sharedassets2.assets). Load the shared set so cross-file PPtrs
+    resolve consistently.
+    """
     scene_path = os.path.join(managed_dir, scene_file)
     env = UnityPy.load(scene_path)
     deps = []
+    seen = set()
+
+    def add_dep(path):
+        if not path or not os.path.exists(path):
+            return
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen:
+            return
+        seen.add(key)
+        deps.append(path)
+
     for name, f in env.files.items():
         if hasattr(f, "externals"):
             for ext in f.externals:
                 p = str(ext.path)
                 if p and not p.startswith("library/") and p != "unity default resources":
-                    candidate = os.path.join(managed_dir, p)
-                    if os.path.exists(candidate):
-                        deps.append(candidate)
+                    add_dep(os.path.join(managed_dir, p))
+    for name in os.listdir(managed_dir):
+        low = name.lower()
+        if (low.startswith("sharedassets") and low.endswith(".assets")) or \
+           low in ("resources.assets", "globalgamemanagers.assets"):
+            add_dep(os.path.join(managed_dir, name))
     if deps:
         env = UnityPy.load(scene_path, *deps)
     return env
@@ -510,7 +530,7 @@ def _pptr_target_kind(builder, sig):
     t = builder.types[sig.type_id] if sig.type_id else None
     if t is None:
         return 0, 0
-    if t.full_name == "UnityEngine.Transform":
+    if t.full_name in ("UnityEngine.Transform", "UnityEngine.RectTransform"):
         return 1, 0
     if t.full_name == "UnityEngine.GameObject":
         return 0, 0
@@ -1048,7 +1068,8 @@ def apply_pptr_maps(out, state, scene_file):
 
 
 def append_asset_closure(env, out, atlas_cache, field_builder, roots, scene_file,
-                         include_cuphead_core=False, scene_tr_map=None):
+                         include_cuphead_core=False, scene_tr_map=None,
+                         include_scene_refs=False):
     """Pulls in prefab graphs referenced by roots, recursively."""
     state = {"index": _env_object_index(env), "files": _env_files_by_name(env),
              "cache": {}, "go_map": {}, "comp_map": {}, "tr_map": {},
@@ -1063,8 +1084,20 @@ def append_asset_closure(env, out, atlas_cache, field_builder, roots, scene_file
                 state["comp_map"][(scene_file, int(c["source_id"]))] = int(c["source_id"])
     for file_name, root_go in roots:
         append_asset_graph(env, out, atlas_cache, field_builder, state, file_name, root_go)
+    if include_scene_refs:
+        # Scene-authored MonoBehaviours also reference cross-file prefabs
+        # (enemies, platforms, effects). Seed the same closure with their
+        # external PPtrs so arbitrary scenes carry their real content.
+        for g in out["gameobjects"]:
+            for c in g.get("components", []):
+                for v in c.get("values", []):
+                    if v.get("kind") != 7:
+                        continue
+                    tf = _pptr_file(state["files"], scene_file, v.get("file_id", 0))
+                    if tf:
+                        _enqueue_target(state, tf, int(v.get("object_id", 0)))
     guard = 0
-    while state["queue"] and guard < 4096:
+    while state["queue"] and guard < 20000:
         guard += 1
         file_name, root_go = state["queue"].pop(0)
         append_asset_graph(env, out, atlas_cache, field_builder, state, file_name, root_go)
@@ -1645,7 +1678,8 @@ def main():
         append_asset_closure(env, out, atlas_cache, field_builder,
                              [("sharedassets8.assets", 6208)], scene_file,
                              include_cuphead_core=True,
-                             scene_tr_map=transform_go)
+                             scene_tr_map=transform_go,
+                             include_scene_refs=True)
     elif args.add_player_prefab:
         append_prefab(env, out, atlas_cache, field_builder)
     append_level_bounds(out)

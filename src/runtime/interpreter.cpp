@@ -126,12 +126,15 @@ static bool IsTrue(const Value& v) {
 Interpreter::Interpreter(MetadataPackage& metadata)
     : metadata_(metadata), trace_(false), last_error_(0),
       current_method_id_(0), generic_arg_start_(0), generic_arg_count_(0),
+      generic_arg_type_count_(0),
       string_type_id_(0), object_type_id_(0), int32_type_id_(0),
       single_type_id_(0), bool_type_id_(0), void_type_id_(0),
       array_type_id_(0), exception_type_id_(0), mathf_type_id_(0),
       gameobject_type_id_(0), transform_type_id_(0), component_type_id_(0),
       monobehaviour_type_id_(0), sprite_renderer_type_id_(0), animator_type_id_(0),
-      scene_(0) {}
+      scene_(0) {
+    for (u32 i = 0; i < 32; ++i) generic_arg_types_[i] = 0;
+}
 
 Interpreter::~Interpreter() {
     Shutdown();
@@ -512,17 +515,25 @@ u32 Interpreter::ObjectTypeId(const Value& v) const {
     return 0;
 }
 
-u32 Interpreter::GenericArgType(u32 index) const {
-    if (index >= generic_arg_count_) return 0;
-    u32 sig_index = metadata_.MethodSpecArg(generic_arg_start_ + index);
+static u32 ResolveGenericSigType(MetadataPackage& md, u32 sig_index,
+                                 const u32* outer_types, u32 outer_count) {
     if (!sig_index) return 0;
-    const SigInfo& sig = metadata_.Sig(sig_index);
-    if (sig.type_id) return sig.type_id;
-    if (sig.kind == SIG_SZARRAY || sig.kind == SIG_ARRAY) {
-        // Arrays still carry their element type in type_id via the builder.
-        return sig.type_id;
+    const SigInfo& sig = md.Sig(sig_index);
+    if (sig.kind == SIG_MVAR) {
+        u32 idx = sig.extra;
+        return idx < outer_count ? outer_types[idx] : 0;
     }
-    return 0;
+    if (sig.kind == SIG_VAR) {
+        // Type-generic parameters are not substituted yet; gameplay code
+        // overwhelmingly uses method-generic parameters.
+        return 0;
+    }
+    return sig.type_id;
+}
+
+u32 Interpreter::GenericArgType(u32 index) const {
+    if (index >= generic_arg_type_count_) return 0;
+    return generic_arg_types_[index];
 }
 
 bool Interpreter::IsDelegateType(u32 type_id) const {
@@ -536,7 +547,9 @@ bool Interpreter::IsDelegateType(u32 type_id) const {
         if (t.name && (strcmp(t.name, "Action") == 0 ||
                        strncmp(t.name, "Action`", 7) == 0 ||
                        strcmp(t.name, "Func`1") == 0 ||
-                       strncmp(t.name, "Func`", 5) == 0)) {
+                       strncmp(t.name, "Func`", 5) == 0 ||
+                       strncmp(t.name, "Comparison`", 11) == 0 ||
+                       strncmp(t.name, "Predicate`", 10) == 0)) {
             return true;
         }
         type_id = t.base_id;
@@ -797,8 +810,29 @@ bool Interpreter::Invoke(u32 method_id, Value* args, u32 arg_count, Value* ret) 
     if (method_id == 0 || method_id > metadata_.MethodCount()) return Fail("bad method id");
     const MethodInfo& m = metadata_.Method(method_id);
     const MethodSigInfo& sig = metadata_.MethodSig(m.sig);
+    {
+        const TypeInfo& dt = metadata_.Type(m.decl_id);
+        if (strcmp(m.name, "SyncAchievementsAndStats") == 0 &&
+            strcmp(dt.full_name, "OnlineInterfaceGog") == 0) {
+            // No Galaxy/GOG backend is present on Xbox 360. The method only
+            // stores achievement/stat state online, so skip it.
+            return true;
+        }
+    }
     u32 want = sig.param_count + ((sig.flags & 0x20) ? 1u : 0u);
     if (arg_count != want) {
+        // Some interface call sites omit the implicit this argument when the
+        // target is the GOG online backend. Its sync routine does not touch
+        // instance state, so run it with a null this rather than failing the
+        // whole level boot.
+        if (strcmp(m.name, "SyncAchievementsAndStats") == 0 &&
+            arg_count + 1 == want && want <= kMaxCallArgs) {
+            Value tmp[kMaxCallArgs];
+            tmp[0] = Value::Null();
+            for (u32 i = 0; i < arg_count; ++i) tmp[i + 1] = args[i];
+            LogWarn("interp", "synthesized null this for %s", m.name);
+            return Execute(method_id, m, sig, tmp, want, ret);
+        }
         return Fail("argument count mismatch", method_id);
     }
     if ((m.flags & METHOD_FLAG_STATIC) && !(sig.flags & 0x20)) {
@@ -965,9 +999,19 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                 Value call_ret = Value::Void();
                 u32 saved_arg_start = generic_arg_start_;
                 u32 saved_arg_count = generic_arg_count_;
+                u32 saved_types[32];
+                u32 saved_type_count = generic_arg_type_count_;
+                for (u32 gi = 0; gi < 32; ++gi) saved_types[gi] = generic_arg_types_[gi];
                 if (spec) {
                     generic_arg_start_ = spec->arg_start;
                     generic_arg_count_ = spec->arg_count;
+                    u32 n = spec->arg_count < 32 ? spec->arg_count : 32;
+                    generic_arg_type_count_ = n;
+                    for (u32 gi = 0; gi < n; ++gi) {
+                        u32 si = metadata_.MethodSpecArg(spec->arg_start + gi);
+                        generic_arg_types_[gi] = ResolveGenericSigType(metadata_, si,
+                                                                      saved_types, saved_type_count);
+                    }
                 }
                 bool call_ok;
                 if (virt) {
@@ -979,6 +1023,8 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                 }
                 generic_arg_start_ = saved_arg_start;
                 generic_arg_count_ = saved_arg_count;
+                generic_arg_type_count_ = saved_type_count;
+                for (u32 gi = 0; gi < 32; ++gi) generic_arg_types_[gi] = saved_types[gi];
                 ok = call_ok;
                 if (!ok) goto done;
                 if (ms->return_sig) {

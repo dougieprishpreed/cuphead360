@@ -789,19 +789,28 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         LogError("level", "interpreter/bind failed");
         return 1;
     }
-    u32 level_type = pkg.FindType("TutorialLevel");
+    u32 level_base = pkg.FindType("Level");
+    u32 level_type = 0;
     u32 level_ci = 0xFFFFFFFFu;
     for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
         const SceneComponent& comp = scene.Component(ci);
-        if (comp.type == 4 && strcmp(comp.controller, "TutorialLevel") == 0) {
+        if (comp.type != 4) continue;
+        Value v = interp.ManagedComponent(ci);
+        if (v.tag != VT_OBJECT || !v.data.obj) continue;
+        u32 vt = v.data.obj->type_id;
+        if ((level_base && interp.IsAssignable(vt, level_base)) ||
+            strcmp(comp.controller, "TutorialLevel") == 0) {
+            level_type = vt;
             level_ci = ci;
             break;
         }
     }
     if (!level_type || level_ci == 0xFFFFFFFFu) {
-        LogError("level", "TutorialLevel component not found");
+        LogError("level", "Level-derived component not found");
         return 1;
     }
+    LogInfo("level", "level controller=%s type=%u",
+            scene.Component(level_ci).controller, level_type);
     Value level = interp.ManagedComponent(level_ci);
     u32 awake = FindMethodInHierarchy(pkg, level_type, "Awake");
     u32 start = FindMethodInHierarchy(pkg, level_type, "Start");

@@ -595,8 +595,58 @@ static bool List_Remove(Interpreter& in, const MemberRefInfo&, u32, Value* a, Va
     return RetBool(ret, false);
 }
 
-static bool List_GetEnumerator(Interpreter& in, const MemberRefInfo& member, u32, Value* a, Value* ret) {
+static bool List_Sort(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
     ListObject* list = AsList(a[0]);
+    if (!list || list->count < 2) return RetVoid(ret);
+    bool has_cmp = argc >= 2 && a[1].tag == VT_DELEGATE && a[1].data.del;
+    for (u32 i = 1; i < list->count; ++i) {
+        Value key = list->items[i];
+        s32 j = (s32)i - 1;
+        while (j >= 0) {
+            s32 cmp = 0;
+            if (has_cmp) {
+                DelegateObject* d = a[1].data.del;
+                Value cargs[3];
+                u32 cargc = 0;
+                if (d->flags & 1u) {
+                    cargs[0] = list->items[j];
+                    cargs[1] = key;
+                    cargc = 2;
+                } else {
+                    cargs[0] = d->target;
+                    cargs[1] = list->items[j];
+                    cargs[2] = key;
+                    cargc = 3;
+                }
+                Value r;
+                if (!in.Invoke(d->method_id, cargs, cargc, &r)) return false;
+                cmp = Interpreter::ToI32(r);
+            } else if (list->items[j].tag == VT_STRING && key.tag == VT_STRING) {
+                const u16* x = list->items[j].data.str ? list->items[j].data.str->Chars() : 0;
+                const u16* y = key.data.str ? key.data.str->Chars() : 0;
+                u32 xn = list->items[j].data.str ? list->items[j].data.str->length : 0;
+                u32 yn = key.data.str ? key.data.str->length : 0;
+                u32 n = xn < yn ? xn : yn;
+                for (u32 k = 0; k < n && cmp == 0; ++k) {
+                    if (x[k] < y[k]) cmp = -1;
+                    else if (x[k] > y[k]) cmp = 1;
+                }
+                if (cmp == 0) cmp = xn < yn ? -1 : (xn > yn ? 1 : 0);
+            } else {
+                f64 x = Interpreter::ToF64(list->items[j]);
+                f64 y = Interpreter::ToF64(key);
+                cmp = x < y ? -1 : (x > y ? 1 : 0);
+            }
+            if (cmp <= 0) break;
+            list->items[j + 1] = list->items[j];
+            --j;
+        }
+        list->items[j + 1] = key;
+    }
+    return RetVoid(ret);
+}
+
+static bool List_GetEnumerator(Interpreter& in, const MemberRefInfo& member, u32, Value* a, Value* ret) {    ListObject* list = AsList(a[0]);
     if (!list) return false;
     const MethodSigInfo& ms = in.Metadata().MethodSig(member.sig_index);
     u32 et = in.Metadata().Sig(ms.return_sig).type_id;
@@ -1590,6 +1640,7 @@ bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value
         if (strcmp(n, "IndexOf") == 0) return List_IndexOf(*this, member, arg_count, args, ret);
         if (strcmp(n, "RemoveAt") == 0) return List_RemoveAt(*this, member, arg_count, args, ret);
         if (strcmp(n, "Remove") == 0) return List_Remove(*this, member, arg_count, args, ret);
+        if (strcmp(n, "Sort") == 0) return List_Sort(*this, member, arg_count, args, ret);
         if (strcmp(n, "GetEnumerator") == 0) return List_GetEnumerator(*this, member, arg_count, args, ret);
     }
     if (strstr(t.full_name, "List`1") && strstr(t.full_name, "Enumerator")) {

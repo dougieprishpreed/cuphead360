@@ -97,6 +97,22 @@ been validated, and what remains.
   and weapons, enemies, damage, parry/super, hazards, win/lose and transitions
   are still absent.
 
+### Broader content boot
+
+- The extractor now loads the full shared-asset set and follows scene-authored
+  external PPtrs, not only `LevelResources`. It also maps `RectTransform`
+  references to their owning Transforms.
+- The boot harness accepts any `Level` subclass. On the first normal
+  platforming scene (`scene_level_platforming_1_1F`) the converted graph has
+  2346 GameObjects and 4619 sprites, and original `PlatformingLevel.Awake` /
+  `PlatformingLevel.Start` both PASS on Windows.
+- Generic runtime fixes include nested method-generic substitution
+  (`EnumUtils.Parse<T> -> GetValues<T>`), `Comparison<T>` delegates,
+  `List<T>.Sort`, and a no-op GOG achievement-sync path.
+- `--levelplay` on that platforming scene still fails: the player falls
+  through the start area. Platform/ground collider content and/or runtime
+  collider creation are incomplete, so this is not yet a playable level.
+
 ### Runtime primitives
 
 - UnityEngine: `GameObject`/`Transform`/`Component`/`Behaviour`, generic and
@@ -155,7 +171,9 @@ startup:
   checkpoints, death/revive, win/lose and scene transitions are absent.
 - Only the tutorial scene and its referenced prefab graph are prepared.
   Arbitrary scene dependencies and the other 78 scenes are not yet extracted
-  or validated.
+  or validated for gameplay. (The first platforming scene now boots but the
+  player falls through the start area; its collider/platform runtime support
+  is incomplete.)
 - Saves, dialogue content, localization, menus, cutscenes, audio banks and
   both DLC campaigns remain unimplemented.
 - Windows is the validated target. Xbox 360/Xenia revalidation of the newest
