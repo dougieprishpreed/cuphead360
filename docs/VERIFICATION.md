@@ -96,7 +96,34 @@ wrote `game:\play.45.bmp`, `play.100.bmp`, `play.200.bmp`, and
 `play.final.bmp` (real framebuffer renders of the tutorial scene with
 Cuphead).
 
+## Original player stack harness
+
+```
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_prefab\scene.chs --stack --headless ^
+  --log build\logs\stack.log
+```
+
+Observed:
+
+```
+[INFO] [stack] Level.Current set, PlayersCreated=true
+[INFO] [stack] get_motor ok=1 type=LevelPlayerMotor PASS
+[INFO] [stack] player Awake PASS
+[INFO] [stack] prefab component Awakes 11/11
+[INFO] [stack] LevelInit method=15706
+[ERROR] [interp] execute failed ... DialoguerDataManager.Initialize
+[INFO] [stack] player LevelInit FAIL
+```
+
+This verifies generic `GetComponent<T>`, the entire player-prefab `Awake`
+chain (motor, animation, collider, weapon, damage, stats, camera), and the
+start of the original `LevelPlayerController.LevelInit`. It does not yet
+complete level initialization because save/dialogue content loading
+(`Resources.Load`) is not implemented.
+
 ## Status
 
-This verifies the runtime/metadata/scene/script foundation. It does **not**
-verify any complete level, boss, menu, save, audio, or DLC gameplay.
+This verifies the runtime/metadata/scene/script foundation and the beginning
+of the original player lifecycle. It does **not** verify any complete level,
+boss, menu, save, audio, or DLC gameplay.

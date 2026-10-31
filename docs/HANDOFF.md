@@ -89,6 +89,26 @@ Unity-bridge test scene with full serialized-field recovery:
 `LevelPlatform.Awake`, `PlayerDeathEffect.Start`, `AnimationHelper.Update`,
 plus `AbstractMonoBehaviour.Awake`, on both Windows and Xenia.
 
+Original player stack harness:
+
+```
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_prefab\scene.chs --stack --log build\logs\stack.log
+```
+
+Prepare the prefab scene with:
+
+```
+python tools\extract_scene.py --game game\Cuphead_Data ^
+  --scene scene_level_tutorial --out work\extract_prefab --add-player-prefab
+```
+
+Current observed state: `get_motor`, player `Awake`, and all 11 prefab
+component `Awake` methods pass. `LevelInit` stops in
+`PlayerStatsManager.LevelInit -> PlayerData -> Dialoguer` at
+`UnityEngine.Resources.Load`; save/dialogue content loading is the next
+blocker.
+
 Command:
 
 ```

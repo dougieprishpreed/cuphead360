@@ -20,19 +20,57 @@
 
 ## Native APIs currently implemented
 
-- `Component.gameObject`, `Component.transform`, `GetComponent<T>`
-- `GameObject.transform`, `SetActive`, `activeSelf`, `name`
+- `Component.gameObject`, `Component.transform`, `GetComponent<T>`,
+  `GetComponent(Type)`, `GetComponentsInChildren<T>`,
+  `GetComponentInChildren<T>`, `Object.FindObjectsOfType<T>` (generic
+  MethodSpec calls are resolved through the MemberRef recorded in metadata)
+- `GameObject.transform`, `SetActive`, `activeSelf`, `name`, runtime
+  `new GameObject(...)` with unbound Transform storage
 - `Transform.position`, `localPosition`, `localScale`, `parent`, `SetParent`,
   `localEulerAngles`/`eulerAngles` (rotation is stored but not yet applied by
   the renderer)
 - `Behaviour.enabled`, `MonoBehaviour.useGUILayout` (no-op)
 - `MonoBehaviour.StartCoroutine`/`StopCoroutine`/`Invoke` (stub)
 - `Object.name`, equality/inequality
-- `Vector2`/`Vector3` constructors, fields, common operators, conversion
+- `Vector2`/`Vector3` constructors, fields, common operators, conversion;
+  `Rect` component properties backed by 4 struct slots
+- `Animator.speed`
+- `BoxCollider2D.size/offset`, `CircleCollider2D.radius/offset`,
+  `Rigidbody2D` mass/drag/gravity/velocity/body type (values are bound, but
+  the physics solver is still native gameplay scaffolding)
+- Delegates: construction, multicast `Delegate.Combine/Remove`, invocation;
+  C# event add/remove methods execute from original IL
+- BCL: `List<T>`, `Dictionary<K,V>` (Add, indexer, TryGetValue, ContainsKey,
+  Remove, Clear, Count), `String` search/substring/case/trim,
+  `Array.GetEnumerator`, `Enum.GetValues`, `Type.GetTypeFromHandle`,
+  `RuntimeHelpers.InitializeArray` (FieldRVA data), `Interlocked.CompareExchange`
 - `AnimationHelper.Update` and `AbstractMonoBehaviour.Awake` execute from
   original IL
 - `TransformExtensions.ResetLocalTransforms` executes from original IL and
   changes the scene transform
+
+## Player stack harness
+
+`--stack` loads the tutorial scene with the extracted player prefab, sets
+`Level.Current` and `PlayersCreated`, seeds `PlayerManager.players` and
+`playerInputs`, then runs the original controller lifecycle.
+
+Observed on Windows:
+
+```
+[INFO] [stack] get_motor ok=1 type=LevelPlayerMotor PASS
+[INFO] [stack] player Awake PASS
+[INFO] [stack] prefab component Awakes 11/11
+[INFO] [stack] LevelInit method=15706
+[ERROR] [interp] execute failed ... DialoguerDataManager.Initialize
+[INFO] [stack] player LevelInit FAIL
+```
+
+All eleven player-prefab component `Awake` methods now run. `LevelInit`
+reaches `PlayerStatsManager.LevelInit -> PlayerData -> Dialoguer` and stops at
+the first missing content/runtime dependency (`Resources.Load`). This is the
+current blocker for the original player controller; it is not yet a playable
+original-logic level.
 
 ## Verified
 
@@ -74,11 +112,10 @@ All pass on Windows and on the Xbox 360 XEX under Xenia.
   classes). Those are rejected safely at the first unsupported field.
 - Fields inherited from complex base classes can stop parsing early; the
   recovered prefix is still usable.
-- `Transform` PPtrs from serialized component path IDs are not yet mapped;
-  component and GameObject references are handled.
-- `GetComponent<T>` uses the MemberRef return type; generic MethodSpec
-  resolution is not implemented yet.
-- Coroutines/scheduler, `Time`, colliders/physics, audio, `Animator` state
-  parameters, UI/Canvas, and `Destroy` lifecycle.
+- `Resources.Load`/`AssetBundle` content, save files, dialogue data, audio,
+  coroutine scheduling, physics simulation, UI/Canvas, and the Animator state
+  machine are not implemented yet.
+- Runtime-created GameObjects/Transforms have native storage but are not yet
+  registered as scene objects, so they are not rendered or collided with.
 - `SetActive` is stored in the managed object flag only; the renderer still
   uses the scene object's active flag.
