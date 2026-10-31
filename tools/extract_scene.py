@@ -19,6 +19,8 @@ import sys
 import zlib
 
 import UnityPy
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from metadata_lib import MetadataBuilder as CupheadMetadata, SIG_BOOL, SIG_I4, SIG_U4, SIG_R4, SIG_I8, SIG_U8, SIG_R8, SIG_VALUETYPE, SIG_CLASS, SIG_STRING
 
 
 def scene_index(managed_dir: str) -> list[str]:
@@ -250,6 +252,7 @@ def write_scene_binary(scene: dict, out_dir: str, path: str) -> int:
 
     components = bytearray()
     go_records = bytearray()
+    script_values = bytearray()
     for g in scene["gameobjects"]:
         comp_start = len(components) // 48
         count = 0
@@ -279,6 +282,28 @@ def write_scene_binary(scene: dict, out_dir: str, path: str) -> int:
                 ctype = 4
                 flags = 1
                 controller_off = s(c.get("script", ""))
+                for v in c.get("values", []):
+                    k = int(v.get("kind", 0))
+                    d0 = d1 = d2 = 0
+                    if k in (1, 3):
+                        d0 = int(v.get("value", 0)) & 0xFFFFFFFF
+                    elif k == 2:
+                        d0 = struct.unpack("<I", struct.pack("<f", float(v.get("value", 0.0))))[0]
+                    elif k == 4:
+                        d0 = struct.unpack("<I", struct.pack("<f", float(v["value"][0])))[0]
+                        d1 = struct.unpack("<I", struct.pack("<f", float(v["value"][1])))[0]
+                    elif k == 5:
+                        d0 = struct.unpack("<I", struct.pack("<f", float(v["value"][0])))[0]
+                        d1 = struct.unpack("<I", struct.pack("<f", float(v["value"][1])))[0]
+                        d2 = struct.unpack("<I", struct.pack("<f", float(v["value"][2])))[0]
+                    else:
+                        continue
+                    script_values.extend(struct.pack("<6I", int(v.get("field_id", 0)), k, d0, d1, d2, 0))
+                if script_values:
+                    # The interpreter reads these two fields as the script
+                    # value range for type-4 components.
+                    sprite_id = (len(script_values) // 24) - (len(c.get("values", [])))
+                    layer = len(c.get("values", []))
             elif c["type"] == "Camera":
                 ctype = 3
                 flags |= 1 if c.get("enabled", True) else 0
@@ -353,7 +378,7 @@ def write_scene_binary(scene: dict, out_dir: str, path: str) -> int:
     body = bytearray()
     hdr = [MAGIC_SCENE, 1, 0, len(go_records)//64, len(sprites)//64,
            len(textures)//24, len(cameras)//64, len(components)//48]
-    sections = [strings, go_records, sprites, textures, cameras, components]
+    sections = [strings, go_records, sprites, textures, cameras, components, script_values]
     offsets = []
     sizes = []
     base = SCENE_HEADER_WORDS * 4
@@ -372,6 +397,91 @@ def write_scene_binary(scene: dict, out_dir: str, path: str) -> int:
         f.write(blob)
     return len(blob)
 
+
+
+
+def mb_header_offset(raw: bytes) -> int:
+    # Unity 2017 MonoBehaviour header: GameObject PPtr (4+8), enabled (4),
+    # script PPtr (4+8), m_Name (int32 length + bytes + align).
+    if len(raw) < 32:
+        return len(raw)
+    pos = 28
+    n = struct.unpack_from("<I", raw, pos)[0]
+    pos += 4 + n
+    while pos & 3:
+        pos += 1
+    return pos
+
+
+def serialized_fields(builder, full_name: str):
+    """Returns serialized fields in Unity order (base class first)."""
+    t = builder.typedef_by_fullname.get(full_name)
+    if t is None:
+        return None
+    chain = []
+    cur = t
+    guard = 0
+    while cur is not None and guard < 64:
+        chain.append(cur)
+        if not cur.base_id:
+            break
+        cur = builder.types[cur.base_id]
+        guard += 1
+    fields = []
+    for typ in reversed(chain):
+        for fid in range(typ.field_start, typ.field_start + typ.field_count):
+            f = builder.fields[fid]
+            if not f.serialized:
+                continue
+            if f.flags & 0x50:  # static or literal
+                continue
+            fields.append(f)
+    return fields
+
+
+def parse_script_values(builder, full_name: str, raw: bytes):
+    fields = serialized_fields(builder, full_name)
+    if fields is None:
+        return []
+    pos = mb_header_offset(raw)
+    values = []
+    for f in fields:
+        sig = f.sig
+        kind = sig.kind
+        if kind == SIG_BOOL:
+            if pos + 4 > len(raw): break
+            v = struct.unpack_from("<I", raw, pos)[0]; pos += 4
+            values.append({"field_id": f.id, "kind": 3, "value": 1 if v else 0})
+        elif kind in (SIG_I4, SIG_U4):
+            if pos + 4 > len(raw): break
+            v = struct.unpack_from("<i", raw, pos)[0]; pos += 4
+            values.append({"field_id": f.id, "kind": 1, "value": v})
+        elif kind == SIG_R4:
+            if pos + 4 > len(raw): break
+            v = struct.unpack_from("<f", raw, pos)[0]; pos += 4
+            values.append({"field_id": f.id, "kind": 2, "value": v})
+        elif kind == SIG_VALUETYPE:
+            tn = builder.types[sig.type_id].full_name if sig.type_id else ""
+            if tn == "UnityEngine.Vector2":
+                if pos + 8 > len(raw): break
+                x, y = struct.unpack_from("<ff", raw, pos); pos += 8
+                values.append({"field_id": f.id, "kind": 4, "value": [x, y]})
+            elif tn == "UnityEngine.Vector3":
+                if pos + 12 > len(raw): break
+                x, y, z = struct.unpack_from("<fff", raw, pos); pos += 12
+                values.append({"field_id": f.id, "kind": 5, "value": [x, y, z]})
+            else:
+                # Game enums and other 4-byte value types are serialized as
+                # an underlying int by Unity for these scripts.
+                if pos + 4 > len(raw): break
+                v = struct.unpack_from("<i", raw, pos)[0]; pos += 4
+                values.append({"field_id": f.id, "kind": 1, "value": v})
+        else:
+            # Strings, PPtrs, arrays and nested serializable classes are
+            # intentionally deferred; stop here so later fields are not
+            # decoded at the wrong offset.
+            break
+    return values
 
 
 def decode_streamed_frames(clip):
@@ -604,6 +714,11 @@ def main():
     bundle_dir = os.path.join(args.game, "StreamingAssets", "AssetBundles")
     atlas_cache = AtlasCache(bundle_dir, args.out)
     os.makedirs(args.out, exist_ok=True)
+    field_builder = None
+    assembly_path = os.path.join(args.game, "Managed", "Assembly-CSharp.dll")
+    if os.path.exists(assembly_path):
+        print("loading field schema from", assembly_path)
+        field_builder = CupheadMetadata(assembly_path)
 
     out = {
         "format": 1,
@@ -708,11 +823,13 @@ def main():
                 ns = str(sc.m_Namespace or "")
                 cn = str(sc.m_ClassName or "")
                 full = (ns + "." + cn) if ns else cn
+                full = full.replace("+", "/")
                 if full:
-                    gos[go_id]["components"].append({
-                        "type": "MonoBehaviour",
-                        "script": full,
-                    })
+                    vals = parse_script_values(field_builder, full, o.get_raw_data()) if field_builder else []
+                    comp = {"type": "MonoBehaviour", "script": full}
+                    if vals:
+                        comp["values"] = vals
+                    gos[go_id]["components"].append(comp)
             except Exception as e:
                 print("MonoBehaviour parse skipped", o.path_id, e)
         elif o.type.name == "Camera":

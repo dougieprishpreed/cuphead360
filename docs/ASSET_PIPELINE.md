@@ -39,7 +39,11 @@ Produced by `tools/extract_scene.py`. The tool:
 
 Header: 32 u32 words (`CHSC`, version, file size, counts, section offsets and
 sizes). Sections: strings, GameObjects (64 bytes), sprites (64), textures
-(24), cameras (64), components (48).
+(24), cameras (64), components (48), script values (24 bytes each).
+For type-4 (MonoBehaviour) components, the component's `sprite_id` field is
+the first script-value index and `sorting_layer` is the value count.
+Script values store a field id, a primitive kind, and up to three 32-bit
+payload words; primitive/enum/Vector2/Vector3 values are currently encoded.
 
 Raw texture files begin with `CHTX`, then width, height, format (`1` =
 RGBA8), then tightly packed top-down RGBA bytes.

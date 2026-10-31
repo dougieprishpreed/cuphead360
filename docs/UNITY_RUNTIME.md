@@ -42,11 +42,22 @@
   PASS.
 - Xbox 360 (Xenia, big-endian): same binding and script calls PASS.
 
+## Serialized fields
+
+`tools/extract_scene.py` reads the MonoBehaviour header, resolves the script
+type, and walks the script's serialized fields in Unity order. Primitive,
+enum, Vector2, and Vector3 fields are encoded into the scene package and
+applied when the managed script object is created. `AnimationHelper`'s
+serialized `layer`/`speed` fields are verified on Windows and Xenia.
+
+The parser deliberately stops at the first string/PPtr/array/nested field so
+later fields are never decoded at the wrong offset. Those types are the next
+field-recovery milestone.
+
 ## Missing
 
-- MonoBehaviour serialized-field parsing/initialization. Script objects
-  currently start with zeroed fields, so scripts requiring scene references
-  are not safe to run yet.
+- String/PPtr/array and nested serializable field initialization. Scripts
+  that require scene references still see null/defaults for those fields.
 - `GetComponent<T>` uses the MemberRef return type; generic MethodSpec
   resolution is not implemented yet.
 - Coroutines/scheduler, `Time`, colliders/physics, audio, `Animator` state

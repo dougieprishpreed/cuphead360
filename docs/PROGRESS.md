@@ -74,8 +74,13 @@ XDK built / Xenia tested / Hardware tested**
   bound scene: position/scale changed in the real scene graph.
 - [x] Execute original `AnimationHelper.Update` and
   `AbstractMonoBehaviour.Awake` lifecycle methods.
+- [x] Recover serialized MonoBehaviour primitive/enum/Vector2/Vector3 fields
+  from scene data and initialize script object fields in the runtime.
+- [x] Verify `AnimationHelper` serialized `speed`/`layer` values on Windows
+  and on the Xbox 360 XEX in Xenia.
 - [x] All of the above PASS on Windows and on the Xbox 360 XEX in Xenia.
-- [ ] Parse MonoBehaviour serialized fields (currently zeroed).
+- [ ] Recover string/PPtr/array/nested serialized fields (current parser
+  stops at the first unsupported field).
 
 ### Content pipeline and renderer
 

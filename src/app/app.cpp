@@ -235,6 +235,24 @@ static int RunUnityTest(MetadataPackage& pkg, const AppConfig& config) {
     LogInfo("unity", "AnimationHelper.Update %s", lifecycle_ok ? "PASS" : "FAIL");
     if (!lifecycle_ok) pass = false;
 
+    // Verify serialized primitive fields were initialized from scene data.
+    if (helper_type) {
+        u32 speed_field = pkg.FindField(helper_type, "speed");
+        u32 layer_field = pkg.FindField(helper_type, "layer");
+        for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+            const SceneComponent& comp = scene.Component(ci);
+            if (comp.type != 4 || strcmp(comp.controller, "AnimationHelper") != 0) continue;
+            Value obj = interp.ManagedComponent(ci);
+            Value speed = interp.GetField(speed_field, obj);
+            Value layer = interp.GetField(layer_field, obj);
+            bool fields_ok = speed.tag == VT_R4 && speed.data.f32 == 1.0f && layer.data.i32 == 1;
+            LogInfo("unity", "AnimationHelper serialized speed=%.2f layer=%d %s",
+                    speed.data.f32, layer.data.i32, fields_ok ? "PASS" : "FAIL");
+            if (!fields_ok) pass = false;
+            break;
+        }
+    }
+
     // AbstractMonoBehaviour.Awake on a PlayerDebug instance (base-only Awake
     // sets useGUILayout; no scene references required).
     u32 dbg_type = pkg.FindType("PlayerDebug");

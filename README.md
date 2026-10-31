@@ -21,8 +21,9 @@ Foundation plus first executable vertical slices. The current build:
 - extracts real scenes, sprites, and sprite animation tracks from the user's
   game data and renders them with the same shared software renderer on
   Windows and Xbox 360;
-- binds scene GameObjects/Transforms/components to managed objects and
-  executes original `TransformExtensions`, `AnimationHelper.Update`, and
+- binds scene GameObjects/Transforms/components to managed objects, recovers
+  serialized primitive component fields, and executes original
+  `TransformExtensions`, `AnimationHelper.Update`, and
   `AbstractMonoBehaviour.Awake` logic against them.
 
 It is **not** yet a playable Cuphead port. See

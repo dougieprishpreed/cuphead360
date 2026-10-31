@@ -66,6 +66,12 @@ Xenia big-endian.
 The currently committed XEX source boots `scene` mode (animated tutorial
 viewer, 120 frames, `game:\frame.bmp`).
 
+Unity-bridge test scene with serialized fields:
+`work\extract_tutorial_fields2\scene.chs`; `--unity` verifies
+`TransformExtensions.ResetLocalTransforms`, `AnimationHelper.Update`,
+serialized `speed=1`/`layer=1`, and `AbstractMonoBehaviour.Awake` on both
+Windows and Xenia.
+
 ## Current code map
 
 - `src/core/` — endian, files, logging, memory, buffers.

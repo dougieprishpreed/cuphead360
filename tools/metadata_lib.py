@@ -259,7 +259,7 @@ class TypeModel:
 
 
 class FieldModel:
-    __slots__ = ("id", "name", "type_sig", "flags", "offset", "decl_id", "external", "sig")
+    __slots__ = ("id", "name", "type_sig", "flags", "offset", "decl_id", "external", "sig", "serialized")
 
     def __init__(self):
         self.id = 0
@@ -270,6 +270,7 @@ class FieldModel:
         self.decl_id = 0
         self.external = False
         self.sig = None
+        self.serialized = False
 
 
 class MethodModel:
@@ -830,6 +831,37 @@ class MetadataBuilder:
             for fid in range(t.field_start, t.field_start + t.field_count):
                 if fid < len(self.fields):
                     self.fields[fid].decl_id = t.id
+
+        # Field serialization flags from custom attributes.
+        attrs = {}
+        for ca in self.md.CustomAttribute.rows:
+            try:
+                if type(ca.Parent.table).__name__ != "Field":
+                    continue
+                fid = ca.Parent.row_index
+                t = ca.Type
+                tbl = type(t.table).__name__
+                attr_type = None
+                if tbl == "MemberRef":
+                    mr = t.row
+                    parent = mr.Class
+                    ptbl = type(parent.table).__name__
+                    if ptbl == "TypeRef":
+                        attr_type = self.resolve_typeref(parent.row).full_name
+                    elif ptbl == "TypeDef":
+                        attr_type = self.typedef_by_id[parent.row_index].full_name
+                elif tbl == "MethodDef":
+                    attr_type = self.types[self.methods[t.row_index].decl_id].full_name
+                if attr_type:
+                    attrs.setdefault(fid, set()).add(attr_type)
+            except Exception:
+                pass
+        for i, f in enumerate(self.fields[1:], start=1):
+            public = (f.flags & 0x7) == 0x6
+            names = attrs.get(i, set())
+            f.serialized = public or ("UnityEngine.SerializeField" in names)
+            if "System.NonSerializedAttribute" in names or "System.NonSerialized" in names:
+                f.serialized = False
 
         # Methods.
         for i, row in enumerate(self.md.MethodDef.rows, start=1):

@@ -116,6 +116,30 @@ bool Interpreter::BindScene(Scene& scene) {
                     if (!script) return false;
                     AddManagedBinding(script, oi, ci);
                     managed_components_[ci] = Value::ObjectRef(script);
+                    u32 vstart = sc.sprite_id;
+                    u32 vcount = (u32)sc.sorting_layer;
+                    for (u32 vi = 0; vi < vcount && vstart + vi < scene.ScriptValueCount(); ++vi) {
+                        const ScriptValue& sv = scene.ScriptValueAt(vstart + vi);
+                        Value val = Value::Null();
+                        if (sv.kind == 1) val = Value::I4((s32)sv.data0);
+                        else if (sv.kind == 2) {
+                            f32 f;
+                            memcpy(&f, &sv.data0, 4);
+                            val = Value::R4(f);
+                        } else if (sv.kind == 3) val = Value::Bool(sv.data0 != 0);
+                        else if (sv.kind == 4) {
+                            f32 x, y;
+                            memcpy(&x, &sv.data0, 4); memcpy(&y, &sv.data1, 4);
+                            val = NewVec2(x, y);
+                        } else if (sv.kind == 5) {
+                            f32 x, y, z;
+                            memcpy(&x, &sv.data0, 4); memcpy(&y, &sv.data1, 4); memcpy(&z, &sv.data2, 4);
+                            val = NewVec3(x, y, z);
+                        } else {
+                            continue;
+                        }
+                        SetField(sv.field_id, Value::ObjectRef(script), val);
+                    }
                 }
                 continue;
             }

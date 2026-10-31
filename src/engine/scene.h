@@ -59,6 +59,14 @@ struct SceneTexture {
     u32 data_size;
 };
 
+struct ScriptValue {
+    u32 field_id;
+    u32 kind;
+    u32 data0;
+    u32 data1;
+    u32 data2;
+};
+
 struct SceneCamera {
     u32 go_id;
     u32 flags; // bit 0 orthographic
@@ -86,6 +94,8 @@ public:
     u32 ComponentCount() const { return components_.Size(); }
     u32 SpriteCount() const { return sprites_.Size(); }
     u32 TextureCount() const { return textures_.Size(); }
+    u32 ScriptValueCount() const { return script_values_.Size(); }
+    const ScriptValue& ScriptValueAt(u32 index) const { return script_values_[index]; }
 
     const SceneObject& Object(u32 index) const { return objects_[index]; }
     const SceneComponent& Component(u32 index) const { return components_[index]; }
@@ -113,6 +123,7 @@ private:
     Buffer<SceneSprite> sprites_;
     Buffer<SceneTexture> textures_;
     Buffer<SceneCamera> cameras_;
+    Buffer<ScriptValue> script_values_;
 };
 
 } // namespace ch360
