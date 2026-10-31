@@ -194,8 +194,8 @@ def sprite_info(sprite, atlas_cache: AtlasCache, out_sprites: dict, out_textures
         "offset": [0.0, 0.0],
         "pivot": [float(sprite.m_Pivot.x), float(sprite.m_Pivot.y)],
         "pixels_per_unit": float(sprite.m_PixelsToUnits),
-        "width": float(sprite.m_Rect.width) / max(0.0001, float(sprite.m_PixelsToUnits)),
-        "height": float(sprite.m_Rect.height) / max(0.0001, float(sprite.m_PixelsToUnits)),
+        "width": float(crop.width) / max(0.0001, float(sprite.m_PixelsToUnits)),
+        "height": float(crop.height) / max(0.0001, float(sprite.m_PixelsToUnits)),
         "atlas": tag or "",
     }
     out_sprites[name] = rec
@@ -314,6 +314,11 @@ def write_scene_binary(scene: dict, out_dir: str, path: str) -> int:
                         d0 = int(v.get("count", 0))
                         d1 = value_start + vi + 1
                         d2 = 0
+                    elif k == 8:
+                        # Keep null PPtrs in the value stream. Skipping them
+                        # without adjusting the component's value count shifts
+                        # every following field onto the wrong slot.
+                        pass
                     else:
                         continue
                     script_values.extend(struct.pack("<8I", int(v.get("field_id", 0)),
@@ -485,6 +490,13 @@ def _is_unity_object_type(builder, t):
         if cur.full_name in ("UnityEngine.Object", "UnityEngine.Component", "UnityEngine.MonoBehaviour",
                              "UnityEngine.ScriptableObject", "UnityEngine.Behaviour"):
             return True
+        if cur.external:
+            # MonoBehaviour subclasses from external assemblies (for example
+            # Rewired.InputManager_Base) stop the local base chain before it
+            # reaches UnityEngine.MonoBehaviour. Such external roots are Unity
+            # object references; BCL roots are value/reference data instead.
+            return not (cur.full_name.startswith("System.") or
+                        cur.full_name.startswith("Microsoft."))
         if not cur.base_id:
             break
         cur = builder.types[cur.base_id]
@@ -537,9 +549,14 @@ def parse_sig_value(builder, sig, raw, pos, values, field_id, parent, index):
         pid = struct.unpack_from("<q", raw, pos + 4)[0]
         pos += 12
         tk, tt = _pptr_target_kind(builder, sig)
-        if fid == 0 and pid != 0:
+        if pid != 0:
+            # file_id is resolved against the owning serialized file's
+            # externals table after extraction. Keeping it here lets the
+            # converter pull in cross-file prefab graphs and rebind their
+            # path ids to scene-local ids.
             values.append({"field_id": field_id, "parent": parent, "index": index, "kind": 7,
-                           "object_id": pid & 0xFFFFFFFF, "target_kind": tk, "target_type": tt})
+                           "object_id": pid & 0xFFFFFFFF, "target_kind": tk, "target_type": tt,
+                           "file_id": fid})
         else:
             values.append({"field_id": field_id, "parent": parent, "index": index, "kind": 8})
         return pos
@@ -667,6 +684,96 @@ def decode_streamed_frames(clip):
     return out
 
 
+def _asset_basename(path):
+    s = str(path).replace("\\", "/")
+    return s.rsplit("/", 1)[-1]
+
+
+def _env_files_by_name(env):
+    out = {}
+    for name, f in env.files.items():
+        out[_asset_basename(name)] = f
+    return out
+
+
+def _env_object_index(env):
+    idx = {}
+    for o in env.objects:
+        idx[(_asset_basename(o.assets_file.name), o.path_id)] = o
+    return idx
+
+
+def _pptr_file(files_by_name, source_file, file_id):
+    """Resolves a PPtr file id to a loaded serialized file name."""
+    if file_id == 0:
+        return source_file
+    src = files_by_name.get(source_file)
+    if src is None:
+        return None
+    exts = list(getattr(src, "externals", []) or [])
+    if file_id < 1 or file_id > len(exts):
+        return None
+    name = _asset_basename(exts[file_id - 1].path)
+    return name if name in files_by_name else None
+
+
+def _transform_and_go_for(env_idx, file_name, path_id):
+    """Returns (transform_reader, transform_data, gameobject_id) for an object."""
+    o = env_idx.get((file_name, path_id))
+    if o is None:
+        return None, None, 0
+    try:
+        if o.type.name in ("Transform", "RectTransform"):
+            d = o.read()
+            go = d.m_GameObject.m_PathID if d.m_GameObject else 0
+            return o, d, go
+        if o.type.name == "GameObject":
+            d = o.read()
+            tr = d.m_Transform
+            to = env_idx.get((file_name, tr.m_PathID)) if tr else None
+            if to is None:
+                return None, None, path_id
+            return to, to.read(), path_id
+        d = o.read()
+        go = d.m_GameObject.m_PathID if getattr(d, "m_GameObject", None) else 0
+        if go:
+            return _transform_and_go_for(env_idx, file_name, _transform_path_for_go(env_idx, file_name, go))
+    except Exception:
+        pass
+    return None, None, 0
+
+
+def _transform_path_for_go(env_idx, file_name, go_id):
+    for (f, pid), o in env_idx.items():
+        if f != file_name or o.type.name not in ("Transform", "RectTransform"):
+            continue
+        try:
+            d = o.read()
+            if d.m_GameObject and d.m_GameObject.m_PathID == go_id:
+                return pid
+        except Exception:
+            pass
+    return 0
+
+
+def _root_transform_for(env_idx, file_name, path_id):
+    """Walks a Transform's parents and returns the root Transform path id."""
+    tro, td, go = _transform_and_go_for(env_idx, file_name, path_id)
+    if td is None:
+        return 0, 0
+    guard = 0
+    while td is not None and guard < 256:
+        father = td.m_Father
+        if not father or not father.m_PathID:
+            return tro.path_id, go
+        ft, fd, fgo = _transform_and_go_for(env_idx, file_name, father.m_PathID)
+        if fd is None:
+            return tro.path_id, go
+        tro, td, go = ft, fd, fgo
+        guard += 1
+    return (tro.path_id if tro else 0), go
+
+
 def relative_path(gos_by_id, root_id, go_id):
     names = []
     cur = go_id
@@ -683,6 +790,294 @@ def relative_path(gos_by_id, root_id, go_id):
         cur = tr.get("parent", 0)
     return None
 
+
+
+def _file_cache(env_idx, file_name):
+    trs = {}
+    gos = {}
+    mbs = {}
+    for (f, pid), o in env_idx.items():
+        if f != file_name:
+            continue
+        tn = o.type.name
+        try:
+            if tn in ("Transform", "RectTransform"):
+                trs[pid] = (o, o.read())
+            elif tn == "GameObject":
+                gos[pid] = o.read()
+            elif tn == "MonoBehaviour":
+                mbs[pid] = o
+        except Exception:
+            continue
+    return {"trs": trs, "gos": gos, "mbs": mbs}
+
+
+def _find_transform_for_go(cache, go_id):
+    for tid, (o, d) in cache["trs"].items():
+        if d.m_GameObject and d.m_GameObject.m_PathID == go_id:
+            return tid
+    return 0
+
+
+def _root_transform(cache, tr_id):
+    d = cache["trs"].get(tr_id)
+    if d is None:
+        return 0, 0
+    guard = 0
+    while guard < 256:
+        f = d[1].m_Father
+        if not f or not f.m_PathID:
+            break
+        nd = cache["trs"].get(f.m_PathID)
+        if nd is None:
+            break
+        tr_id, d = f.m_PathID, nd
+        guard += 1
+    go = d[1].m_GameObject.m_PathID if d[1].m_GameObject else 0
+    return tr_id, go
+
+
+def _enqueue_target(state, file_name, path_id):
+    key = (file_name, path_id)
+    if key in state["go_map"] or key in state["comp_map"] or key in state["tr_map"]:
+        return
+    o = state["index"].get(key)
+    if o is None:
+        return
+    cache = state["cache"].get(file_name)
+    if cache is None:
+        cache = _file_cache(state["index"], file_name)
+        state["cache"][file_name] = cache
+    if o.type.name == "GameObject":
+        go_id = path_id
+    elif o.type.name in ("Transform", "RectTransform"):
+        _, go_id = _root_transform(cache, path_id)
+    else:
+        try:
+            if o.type.name == "MonoBehaviour":
+                h = o.parse_monobehaviour_head()
+                go = h.m_GameObject.m_PathID if h.m_GameObject else 0
+            else:
+                d = o.read()
+                go = d.m_GameObject.m_PathID if getattr(d, "m_GameObject", None) else 0
+        except Exception:
+            go = 0
+        if not go:
+            return
+        tr = _find_transform_for_go(cache, go)
+        _, go_id = _root_transform(cache, tr)
+    if go_id:
+        state["queue"].append((file_name, go_id))
+
+
+def append_asset_graph(env, out, atlas_cache, field_builder, state,
+                       file_name, root_go_id, force_inactive=True):
+    """Includes a cross-file prefab subtree and remaps its PPtrs to scene ids."""
+    key = (file_name, root_go_id)
+    if key in state["included"]:
+        return
+    state["included"].add(key)
+    cache = state["cache"].get(file_name)
+    if cache is None:
+        cache = _file_cache(state["index"], file_name)
+        state["cache"][file_name] = cache
+    tr_id = _find_transform_for_go(cache, root_go_id)
+    if not tr_id:
+        print("asset graph root not found:", file_name, root_go_id)
+        return
+
+    collected = []
+    def walk(tid, parent_new, is_root):
+        d = cache["trs"].get(tid)
+        if d is None:
+            return
+        d = d[1]
+        gid = d.m_GameObject.m_PathID if d.m_GameObject else 0
+        g = cache["gos"].get(gid)
+        if g is None:
+            return
+        new_id = state["next_go"]
+        state["next_go"] += 1
+        state["go_map"][(file_name, gid)] = new_id
+        state["tr_map"][(file_name, tid)] = new_id
+        comps = []
+        for cptr in g.m_Component:
+            cp = cptr.component
+            if cp.type.name in ("Transform", "RectTransform"):
+                continue
+            cid = state["next_comp"]
+            state["next_comp"] += 1
+            state["comp_map"][(file_name, cp.path_id)] = cid
+            comps.append((cp, cid))
+        collected.append((gid, new_id, parent_new, is_root, d, g, comps))
+        for ch in (d.m_Children or []):
+            walk(ch.m_PathID, new_id, False)
+
+    walk(tr_id, 0, True)
+
+    for gid, new_id, parent_new, is_root, d, g, comps in collected:
+        rec_comps = []
+        for cp, cid in comps:
+            tn = cp.type.name
+            if tn == "MonoBehaviour":
+                try:
+                    reader = cache["mbs"].get(cp.path_id)
+                    if reader is None:
+                        raise LookupError("MonoBehaviour reader missing")
+                    h = reader.parse_monobehaviour_head()
+                    sc = h.m_Script.deref_parse_as_object()
+                    ns = str(sc.m_Namespace or "")
+                    cn = str(sc.m_ClassName or "")
+                    full = ((ns + "." + cn) if ns else cn).replace("+", "/")
+                    vals = parse_script_values(field_builder, full, reader.get_raw_data()) if field_builder else []
+                    comp = {"type": "MonoBehaviour", "source_id": cid, "script": full}
+                    if vals:
+                        comp["values"] = vals
+                        for v in vals:
+                            if v.get("kind") != 7:
+                                continue
+                            tf = _pptr_file(state["files"], file_name, v.get("file_id", 0))
+                            if tf:
+                                _enqueue_target(state, tf, int(v.get("object_id", 0)))
+                    rec_comps.append(comp)
+                except Exception as e:
+                    print("asset MB skip", file_name, cp.path_id, type(e).__name__, e)
+                continue
+            try:
+                c = cp.read()
+            except Exception as e:
+                print("asset component skip", tn, type(e).__name__, e)
+                continue
+            if tn == "SpriteRenderer":
+                spr = None
+                if c.m_Sprite:
+                    try:
+                        spr = c.m_Sprite.read()
+                    except Exception:
+                        pass
+                si = sprite_info(spr, atlas_cache, out["sprites"], out["textures"]) if spr else None
+                rec_comps.append({"type": "SpriteRenderer", "source_id": cid,
+                                  "enabled": bool(c.m_Enabled), "sprite": si["name"] if si else "",
+                                  "color": [float(c.m_Color.r), float(c.m_Color.g), float(c.m_Color.b), float(c.m_Color.a)],
+                                  "flipX": bool(c.m_FlipX), "flipY": bool(c.m_FlipY),
+                                  "sortingOrder": int(c.m_SortingOrder), "sortingLayer": int(c.m_SortingLayer),
+                                  "sortingLayerName": str(getattr(c, "m_SortingLayerName", "") or "")})
+            elif tn == "Animator":
+                cn = ""
+                try:
+                    if c.m_Controller:
+                        cn = c.m_Controller.read().m_Name
+                except Exception:
+                    pass
+                rec_comps.append({"type": "Animator", "source_id": cid,
+                                  "enabled": bool(c.m_Enabled), "controller": cn})
+            elif tn in ("BoxCollider2D", "CircleCollider2D", "Rigidbody2D"):
+                try:
+                    if tn == "Rigidbody2D":
+                        rec_comps.append({"type": "Rigidbody2D", "source_id": cid,
+                                          "enabled": bool(c.m_Simulated),
+                                          "mass": float(getattr(c, "m_Mass", 1.0)),
+                                          "drag": float(getattr(c, "m_LinearDrag", 0.0)),
+                                          "angularDrag": float(getattr(c, "m_AngularDrag", 0.05)),
+                                          "gravityScale": float(getattr(c, "m_GravityScale", 1.0)),
+                                          "bodyType": int(getattr(c, "m_BodyType", 0)),
+                                          "simulated": bool(c.m_Simulated),
+                                          "isKinematic": bool(getattr(c, "m_IsKinematic", False)),
+                                          "freezeRotation": bool(getattr(c, "m_FixedAngle", False))})
+                    else:
+                        rec_comps.append({"type": tn, "source_id": cid,
+                                          "enabled": bool(c.m_Enabled),
+                                          "size": [float(c.m_Size.x), float(c.m_Size.y)] if hasattr(c, "m_Size") else [0, 0],
+                                          "radius": float(getattr(c, "m_Radius", 0.0)),
+                                          "offset": [float(c.m_Offset.x), float(c.m_Offset.y)] if hasattr(c, "m_Offset") else [0, 0]})
+                except Exception as e:
+                    print("asset collider skip", tn, type(e).__name__, e)
+            elif tn == "Camera":
+                pass
+        lp = d.m_LocalPosition
+        lr = d.m_LocalRotation
+        ls = d.m_LocalScale
+        rec = {"id": new_id, "name": g.m_Name,
+               "active": (bool(g.m_IsActive) and not is_root) if force_inactive else bool(g.m_IsActive),
+               "transform": {"position": [float(lp.x), float(lp.y), float(lp.z)],
+                             "rotation": [float(lr.x), float(lr.y), float(lr.z), float(lr.w)],
+                             "scale": [float(ls.x), float(ls.y), float(ls.z)],
+                             "parent": parent_new, "children": []},
+               "components": rec_comps, "_file": file_name}
+        out["gameobjects"].append(rec)
+        if parent_new:
+            for prev in reversed(out["gameobjects"][:-1]):
+                if prev["id"] == parent_new:
+                    prev["transform"]["children"].append(new_id)
+                    break
+    return collected
+
+
+def apply_pptr_maps(out, state, scene_file):
+    """Rebinds serialized PPtrs to included prefab objects and scene ids."""
+    for g in out["gameobjects"]:
+        src_file = g.pop("_file", scene_file)
+        for c in g.get("components", []):
+            for v in c.get("values", []):
+                if v.get("kind") != 7:
+                    continue
+                tf = _pptr_file(state["files"], src_file, v.get("file_id", 0))
+                if tf is None:
+                    v["kind"] = 8
+                    continue
+                key = (tf, int(v.get("object_id", 0)))
+                tk = int(v.get("target_kind", 0))
+                if tk == 2:
+                    if key in state["comp_map"]:
+                        v["object_id"] = state["comp_map"][key]
+                        v["target_kind"] = 2
+                    else:
+                        v["kind"] = 8
+                elif tk == 1:
+                    if key in state["tr_map"]:
+                        v["object_id"] = state["tr_map"][key]
+                        v["target_kind"] = 1
+                    else:
+                        v["kind"] = 8
+                else:
+                    if key in state["go_map"]:
+                        v["object_id"] = state["go_map"][key]
+                        v["target_kind"] = tk
+                    else:
+                        v["kind"] = 8
+
+
+def append_asset_closure(env, out, atlas_cache, field_builder, roots, scene_file,
+                         include_cuphead_core=False, scene_tr_map=None):
+    """Pulls in prefab graphs referenced by roots, recursively."""
+    state = {"index": _env_object_index(env), "files": _env_files_by_name(env),
+             "cache": {}, "go_map": {}, "comp_map": {}, "tr_map": {},
+             "next_go": 2000000, "next_comp": 3000000,
+             "included": set(), "queue": []}
+    for tid, goid in (scene_tr_map or {}).items():
+        state["tr_map"][(scene_file, int(tid))] = int(goid)
+    for g in out["gameobjects"]:
+        state["go_map"][(scene_file, int(g["id"]))] = int(g["id"])
+        for c in g.get("components", []):
+            if "source_id" in c:
+                state["comp_map"][(scene_file, int(c["source_id"]))] = int(c["source_id"])
+    for file_name, root_go in roots:
+        append_asset_graph(env, out, atlas_cache, field_builder, state, file_name, root_go)
+    guard = 0
+    while state["queue"] and guard < 4096:
+        guard += 1
+        file_name, root_go = state["queue"].pop(0)
+        append_asset_graph(env, out, atlas_cache, field_builder, state, file_name, root_go)
+    if include_cuphead_core:
+        append_asset_graph(env, out, atlas_cache, field_builder, state,
+                           "resources.assets", 596)
+        guard = 0
+        while state["queue"] and guard < 4096:
+            guard += 1
+            file_name, root_go = state["queue"].pop(0)
+            append_asset_graph(env, out, atlas_cache, field_builder, state, file_name, root_go)
+    apply_pptr_maps(out, state, scene_file)
+    return state
 
 
 def append_prefab(env, out, atlas_cache, field_builder, root_go_id=5401):
@@ -1041,6 +1436,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--add-player", action="store_true")
     ap.add_argument("--add-player-prefab", action="store_true")
+    ap.add_argument("--add-level-resources", action="store_true",
+                    help="Include the cross-file LevelResources/UI/HUD/audio prefab graph and CupheadCore")
     args = ap.parse_args()
 
     scenes = scene_index(args.game)
@@ -1244,7 +1641,12 @@ def main():
         else:
             cam["position"] = [0.0, 0.0, 0.0]
 
-    if args.add_player_prefab:
+    if args.add_level_resources:
+        append_asset_closure(env, out, atlas_cache, field_builder,
+                             [("sharedassets8.assets", 6208)], scene_file,
+                             include_cuphead_core=True,
+                             scene_tr_map=transform_go)
+    elif args.add_player_prefab:
         append_prefab(env, out, atlas_cache, field_builder)
     append_level_bounds(out)
     deactivate_ghost_placeholders(out)

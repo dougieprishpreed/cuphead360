@@ -66,6 +66,11 @@ const SceneCamera* Scene::MainCamera() const {
     return &cameras_[0];
 }
 
+SceneCamera* Scene::MutableMainCamera() {
+    if (cameras_.Empty()) return 0;
+    return &cameras_[0];
+}
+
 void Scene::Unload() {
     for (u32 i = 0; i < textures_.Size(); ++i) {
         if (textures_[i].owned) MemFree(textures_[i].owned);

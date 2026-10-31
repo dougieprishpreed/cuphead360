@@ -774,7 +774,7 @@ static int RunStackTest(MetadataPackage& pkg, const AppConfig& config, bool driv
     return pass ? 0 : 1;
 }
 
-static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config) {
+static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play = false) {
     if (!config.scene_path) {
         LogError("level", "no scene path");
         return 1;
@@ -812,8 +812,231 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config) {
     bool start_ok = start && InvokeOnComponent(interp, start, level, &r);
     LogInfo("level", "TutorialLevel.Start %s (last_error=%u)",
             start_ok ? "PASS" : "FAIL", interp.LastError());
-    LogInfo("level", "result=%s", (awake_ok && start_ok) ? "PASS" : "FAIL");
-    return (awake_ok && start_ok) ? 0 : 1;
+    if (!awake_ok || !start_ok) {
+        LogInfo("level", "result=FAIL");
+        return 1;
+    }
+    if (!play) {
+        LogInfo("level", "result=PASS");
+        return 0;
+    }
+
+    // Level.Start has created the real player through
+    // AbstractPlayerController.Create. Drive the original motor/controller
+    // with synthesized Rewired input and render the level.
+    u32 player_base = pkg.FindType("AbstractPlayerController");
+    Value player = Value::Null();
+    u32 player_ci = 0xFFFFFFFFu;
+    for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+        const SceneComponent& comp = scene.Component(ci);
+        if (comp.type != 4) continue;
+        Value v = interp.ManagedComponent(ci);
+        if (v.tag != VT_OBJECT || !v.data.obj) continue;
+        if (strcmp(comp.controller, "LevelPlayerController") == 0 && !player.data.obj) {
+            player = v;
+            player_ci = ci;
+        }
+    }
+    if (!player.data.obj && player_base) {
+        for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+            if (scene.Component(ci).type != 4) continue;
+            Value v = interp.ManagedComponent(ci);
+            if (v.tag == VT_OBJECT && v.data.obj &&
+                interp.IsAssignable(v.data.obj->type_id, player_base)) {
+                player = v;
+                player_ci = ci;
+                break;
+            }
+        }
+    }
+    if (!player.data.obj) {
+        LogError("levelplay", "no player controller was created");
+        return 1;
+    }
+    u32 player_oi = interp.ManagedObjectIndexFor(player);
+    if (player_oi >= scene.ObjectCount()) {
+        LogError("levelplay", "player has no scene object");
+        return 1;
+    }
+    Value motor = Value::Null();
+    const SceneObject& po = scene.Object(player_oi);
+    for (u32 c = 0; c < po.component_count; ++c) {
+        u32 ci = po.component_start + c;
+        if (ci >= scene.ComponentCount()) break;
+        if (scene.Component(ci).type == 4 &&
+            strcmp(scene.Component(ci).controller, "LevelPlayerMotor") == 0) {
+            motor = interp.ManagedComponent(ci);
+            break;
+        }
+    }
+    u32 motor_type = pkg.FindType("LevelPlayerMotor");
+    u32 fixed_update = pkg.FindMethod(motor_type, "FixedUpdate");
+    u32 motor_update = FindMethodInHierarchy(pkg, motor_type, "Update");
+    u32 motor_start = FindMethodInHierarchy(pkg, motor_type, "Start");
+    if (motor.tag != VT_OBJECT || !fixed_update) {
+        LogError("levelplay", "player motor not found");
+        return 1;
+    }
+    if (motor_start) {
+        Value args[1]; args[0] = motor; Value sr;
+        if (!interp.Invoke(motor_start, args, 1, &sr)) {
+            LogWarn("levelplay", "motor Start failed");
+        }
+    }
+
+    if (!scene.LoadTextures()) {
+        LogError("levelplay", "texture load failed");
+        return 1;
+    }
+    if (!DisplayInit(1280, 720, config.headless)) {
+        LogError("levelplay", "display init failed");
+        return 1;
+    }
+    InputInit();
+    SoftRenderer renderer(1280, 720);
+
+    u32 cuphead_sr_ci = 0xFFFFFFFFu;
+    for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
+        const SceneObject& o = scene.Object(oi);
+        u32 cur = o.parent;
+        bool under_player = (oi == player_oi);
+        u32 guard = 0;
+        while (cur && guard++ < 256) {
+            if (cur == po.id) { under_player = true; break; }
+            u32 pi = 0xFFFFFFFFu;
+            for (u32 k = 0; k < scene.ObjectCount(); ++k) {
+                if (scene.Object(k).id == cur) { pi = k; break; }
+            }
+            if (pi == 0xFFFFFFFFu) break;
+            cur = scene.Object(pi).parent;
+        }
+        if (!under_player) continue;
+        if (strcmp(o.name, "Cuphead") != 0 && oi != player_oi) continue;
+        for (u32 c = 0; c < o.component_count; ++c) {
+            u32 ci = o.component_start + c;
+            if (ci < scene.ComponentCount() && scene.Component(ci).type == 1) {
+                cuphead_sr_ci = ci;
+                break;
+            }
+        }
+        if (cuphead_sr_ci != 0xFFFFFFFFu) break;
+    }
+    Buffer<u32> idle_frames, run_frames, jump_frames, dash_frames;
+    for (u32 si = 0; si < scene.SpriteCount(); ++si) {
+        const SceneSprite& sp = scene.Sprite(si + 1);
+        if (strncmp(sp.name, "cuphead_idle_", 13) == 0) idle_frames.PushBack(si + 1);
+        else if (strncmp(sp.name, "cuphead_run_", 12) == 0) run_frames.PushBack(si + 1);
+        else if (strncmp(sp.name, "cuphead_jump_", 13) == 0) jump_frames.PushBack(si + 1);
+        else if (strncmp(sp.name, "cuphead_dash_", 13) == 0) dash_frames.PushBack(si + 1);
+    }
+    LogInfo("levelplay", "player=%s sprite=%u frames idle=%u run=%u jump=%u dash=%u",
+            po.name, cuphead_sr_ci, idle_frames.Size(), run_frames.Size(),
+            jump_frames.Size(), dash_frames.Size());
+
+    u32 grounded_field = pkg.FindField(motor_type, "<Grounded>k__BackingField");
+    u32 player_update = FindMethodInHierarchy(pkg, pkg.FindType("LevelPlayerController"), "Update");
+    u32 level_update = FindMethodInHierarchy(pkg, level_type, "Update");
+    f32 start_x = scene.Object(player_oi).world_x;
+    f32 start_y = scene.Object(player_oi).world_y;
+    f32 prev_x = start_x;
+    f32 anim_time = 0.0f;
+    u32 anim_state = 0xFFFFFFFFu;
+    f32 max_x = start_x, max_y = start_y, min_y = start_y;
+    u32 frames = config.frames > 1 ? config.frames : 240;
+    u32 saved = 0;
+    bool loop_ok = true;
+    bool logged_player_update_fail = false;
+    bool logged_level_update_fail = false;
+    for (u32 i = 0; i < frames; ++i) {
+        InputState in_state;
+        in_state = InputRead();
+        f32 ax = 1.0f, ay = 0.0f;
+        u32 buttons = 0;
+        if (!config.auto_input) {
+            ax = in_state.axis_x;
+            ay = in_state.axis_y;
+            if (in_state.jump_held) buttons |= 1u << 2;
+            if (in_state.dash_pressed) buttons |= 1u << 7;
+            if (in_state.start_pressed) buttons |= 1u << 8;
+        } else {
+            if (i >= 20 && i < 50) buttons |= 1u << 2;
+            if (i == 100) buttons |= 1u << 7;
+        }
+        SetRewiredInputState(ax, ay, buttons);
+        Value args[1]; args[0] = motor; Value mr;
+        if (!interp.Invoke(fixed_update, args, 1, &mr)) loop_ok = false;
+        if (motor_update) {
+            Value uargs[1]; uargs[0] = motor; Value ur;
+            if (!interp.Invoke(motor_update, uargs, 1, &ur)) loop_ok = false;
+        }
+        if (player_update) {
+            Value pargs[1]; pargs[0] = player; Value pr;
+            if (!interp.Invoke(player_update, pargs, 1, &pr) && !logged_player_update_fail) {
+                LogWarn("levelplay", "player Update failed");
+                logged_player_update_fail = true;
+            }
+        }
+        if (level_update) {
+            Value largs[1]; largs[0] = level; Value lr;
+            if (!interp.Invoke(level_update, largs, 1, &lr) && !logged_level_update_fail) {
+                LogWarn("levelplay", "Level Update failed");
+                logged_level_update_fail = true;
+            }
+        }
+        f32 px = scene.Object(player_oi).world_x;
+        f32 py = scene.Object(player_oi).world_y;
+        if (px > max_x) max_x = px;
+        if (py > max_y) max_y = py;
+        if (py < min_y) min_y = py;
+        if (cuphead_sr_ci != 0xFFFFFFFFu) {
+            bool grounded = true;
+            Value gv = grounded_field ? interp.GetField(grounded_field, motor) : Value::Null();
+            if (gv.tag == VT_BOOL) grounded = gv.data.i32 != 0;
+            f32 dx = px - prev_x;
+            bool dashing = fabsf(dx) > 12.0f;
+            u32 state = dashing ? 3u : (!grounded ? 2u : (fabsf(dx) > 0.4f ? 1u : 0u));
+            Buffer<u32>* set = &idle_frames;
+            if (state == 1) set = &run_frames;
+            else if (state == 2) set = &jump_frames;
+            else if (state == 3) set = &dash_frames;
+            if (set->Size() > 0) {
+                if (state != anim_state) { anim_time = 0.0f; anim_state = state; }
+                anim_time += config.fixed_dt;
+                u32 idx = ((u32)(anim_time * 15.0f)) % set->Size();
+                SceneComponent& spr = scene.MutableComponent(cuphead_sr_ci);
+                spr.sprite_id = (*set)[idx];
+                if (dx < -0.01f) spr.flags |= 2u;
+                else if (dx > 0.01f) spr.flags &= ~2u;
+            }
+            prev_x = px;
+        }
+        if (i % 30 == 0) {
+            LogInfo("levelplay", "frame=%u pos=%.2f,%.2f", i, px, py);
+        }
+        f32 cam_x = px + 200.0f;
+        f32 cam_y = py + 35.0f;
+        if (cam_y < -120.0f) cam_y = -120.0f;
+        scene.SetMainCameraPosition(cam_x, cam_y);
+        renderer.DrawScene(scene);
+        if (config.screenshot_path && saved < 3 &&
+            (i == 45 || i == 100 || i == 200)) {
+            char path[1024];
+            _snprintf(path, sizeof(path) - 1, "%s.%u.bmp", config.screenshot_path, i);
+            path[sizeof(path) - 1] = 0;
+            if (renderer.SaveBmp(path)) {
+                LogInfo("levelplay", "screenshot=%s", path);
+                ++saved;
+            }
+        }
+        DisplayPresent(renderer.Pixels());
+        DisplayPump();
+        if (DisplayShouldQuit() || in_state.quit_pressed) break;
+        if (!config.headless) PlatformSleepMs(16);
+    }
+    bool pass = loop_ok && (max_x - start_x > 50.0f);
+    LogInfo("levelplay", "start=%.1f,%.1f max_x=%.1f max_y=%.1f min_y=%.1f result=%s",
+            start_x, start_y, max_x, max_y, min_y, pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
 }
 
 static int RunPlay(const AppConfig& config, MetadataPackage& pkg) {
@@ -1215,6 +1438,13 @@ int AppMain(const AppConfig& config) {
             result = 1;
         } else {
             result = RunLevelTest(metadata, config);
+        }
+    } else if (config.command && strcmp(config.command, "levelplay") == 0) {
+        if (!metadata.IsLoaded() || !config.scene_path) {
+            LogError("levelplay", "metadata and scene required");
+            result = 1;
+        } else {
+            result = RunLevelTest(metadata, config, true);
         }
     } else if (config.command && strcmp(config.command, "scene") == 0) {
         result = RunScene(config);

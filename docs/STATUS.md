@@ -66,6 +66,31 @@ been validated, and what remains.
   is not the original Animator state machine; the player art remains
   oversized and the slice is a logic/rendering smoke test.
 
+### Original level startup and play harness
+
+- `tools\extract_scene.py --add-level-resources` now resolves cross-file
+  PPtrs and pulls in the serialized `LevelResources` graph, `CupheadCore`,
+  `LevelGUI`, `LevelHUD`, `LevelAudio`, `PlayerJoinEffect`, the dialogue UI
+  and the real player prefab. The resulting tutorial scene binds 1515
+  GameObjects and 1993 components.
+- The runtime implements `Resources.Load` template lookup,
+  `UnityEngine.Object.Instantiate` (activation plus `Awake`), prefab
+  constructors, generic base-class field layout, delegates, `Nullable<T>`,
+  `List<T>.ToArray`, and the Unity UI/audio/input/player-prefs primitives the
+  startup sequence needs.
+- `--level` now runs the original `TutorialLevel.Awake` and
+  `TutorialLevel.Start`: both PASS on Windows.
+- `--levelplay` additionally drives the real `LevelPlayerController` /
+  `LevelPlayerMotor` created by `Level.Start` with synthesized Rewired input,
+  camera follow and software sprite rendering. Observed:
+  `start=-410.0,-270.0 max_x=804.9 max_y=-270.0 min_y=-274.5 result=PASS`.
+- Screenshots: `work\extract_level\levelplay.45.bmp`,
+  `levelplay.100.bmp`, `levelplay.200.bmp`.
+- This is a startup/movement slice, not a complete level. UI/audio component
+  calls are mostly shims, the original Animator state machine is not running,
+  and weapons, enemies, damage, parry/super, hazards, win/lose and transitions
+  are still absent.
+
 ### Runtime primitives
 
 - UnityEngine: `GameObject`/`Transform`/`Component`/`Behaviour`, generic and
@@ -106,22 +131,32 @@ visually validated playable slice is the native tutorial movement slice,
 which uses original sprites and the original velocity calculation but native
 jump/dash/collision scaffolding rather than the full original controller.
 
-## Real level-flow blockers (measured)
+## Current measured limits
 
-`--level` invokes the original `TutorialLevel.Awake` and `TutorialLevel.Start`
-on the extracted scene. Current results:
+`--level` and `--levelplay` now pass original `TutorialLevel.Awake` and
+`TutorialLevel.Start` on Windows. The remaining gap is gameplay/content, not
+startup:
 
-- `Level.Awake` stops at `Cuphead.Init -> Resources.Load<Cuphead>("Core/CupheadCore")`
-  followed by `UnityEngine.Object.Instantiate`. Prefab/resource instantiation
-  is not implemented.
-- `Level.Start` stops at `LevelAudio.Create -> Level.Current.LevelResources.levelAudio`
-  because the serialized `LevelResources` reference is null in the converted
-  scene (the asset and its prefab graph are not included).
+- Level.Start creates the real player, camera, HUD and audio objects, but the
+  Unity UI/audio calls are mostly deterministic shims; no UI is drawn and no
+  audio is played.
+- The player uses a native idle/run/jump/dash sprite bridge; the original
+  Animator state machine, animation events and material/shader behavior are
+  not implemented.
+- Physics is still an AABB approximation, not Box2D. Platforms, one-way
+  colliders, triggers, moving geometry and hazards are incomplete.
+- Weapons, projectiles, damage, parry, super, enemies, bosses, coins,
+  checkpoints, death/revive, win/lose and scene transitions are absent.
+- Only the tutorial scene and its referenced prefab graph are prepared.
+  Arbitrary scene dependencies and the other 78 scenes are not yet extracted
+  or validated.
+- Saves, dialogue content, localization, menus, cutscenes, audio banks and
+  both DLC campaigns remain unimplemented.
+- Windows is the validated target. Xbox 360/Xenia revalidation of the newest
+  runtime and real-hardware performance are still pending.
 
-These are the next foundational blockers for real level flow: a prefab /
-Resources asset pipeline, `Object.Instantiate`, and proper `LevelResources`
-binding. They are larger than the scene-script bridge and are not yet
-implemented.
+`--level` now reaching `PASS` means the original startup stack runs to
+completion; it does not mean a complete level or boss is playable.
 
 ## Validation commands
 

@@ -233,13 +233,23 @@ void Interpreter::BuildFieldSlots(u32 type_id, u32 base_slots, bool* visiting) {
     if (rt.reserved0) return;
     visiting[type_id] = true;
     const TypeInfo& t = metadata_.Type(type_id);
-    if (t.base_id) {
+    // Closed generic instantiations are represented as external TypeRefs with
+    // zero fields. Their storage layout still comes from the local generic
+    // TypeDef (for example AbstractLevelProperties`3.goalTimes).
+    const TypeInfo* fields_type = &t;
+    if (t.generic_type_id && t.generic_type_id <= metadata_.TypeCount()) {
+        fields_type = &metadata_.Type(t.generic_type_id);
+    }
+    if (fields_type->base_id) {
+        BuildFieldSlots(fields_type->base_id, 0, visiting);
+        base_slots = runtime_types_[fields_type->base_id].total_slots;
+    } else if (t.base_id) {
         BuildFieldSlots(t.base_id, 0, visiting);
         base_slots = runtime_types_[t.base_id].total_slots;
     }
     u32 inst = 0;
     u32 stat = 0;
-    for (u32 fid = t.field_start; fid < t.field_start + t.field_count; ++fid) {
+    for (u32 fid = fields_type->field_start; fid < fields_type->field_start + fields_type->field_count; ++fid) {
         const FieldInfo& f = metadata_.Field(fid);
         if (f.flags & FIELD_FLAG_LITERAL) continue;
         if (f.flags & FIELD_FLAG_STATIC) {
@@ -459,7 +469,39 @@ Value Interpreter::NewDelegate(u32 type_id, u32 method_id, Value target, bool is
 const char* Interpreter::StringUtf8(const Value& v, u32* out_len) const {
     if (out_len) *out_len = 0;
     if (v.tag != VT_STRING || !v.data.str) return "";
-    return ""; // UTF-8 conversion is provided lazily by native helpers.
+    const StringObject* s = v.data.str;
+    u32 n = s->length;
+    if (!utf8_scratch_.Resize(n * 4 + 1)) return "";
+    char* out = utf8_scratch_.Data();
+    u32 o = 0;
+    for (u32 i = 0; i < n; ++i) {
+        u32 cp = s->Chars()[i];
+        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < n) {
+            u32 lo = s->Chars()[i + 1];
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                ++i;
+            }
+        }
+        if (cp < 0x80) {
+            out[o++] = (char)cp;
+        } else if (cp < 0x800) {
+            out[o++] = (char)(0xC0 | (cp >> 6));
+            out[o++] = (char)(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            out[o++] = (char)(0xE0 | (cp >> 12));
+            out[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            out[o++] = (char)(0x80 | (cp & 0x3F));
+        } else {
+            out[o++] = (char)(0xF0 | (cp >> 18));
+            out[o++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+            out[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            out[o++] = (char)(0x80 | (cp & 0x3F));
+        }
+    }
+    out[o] = 0;
+    if (out_len) *out_len = o;
+    return out;
 }
 
 u32 Interpreter::ObjectTypeId(const Value& v) const {
@@ -491,7 +533,10 @@ bool Interpreter::IsDelegateType(u32 type_id) const {
             strcmp(t.full_name, "System.MulticastDelegate") == 0) {
             return true;
         }
-        if (t.name && (strcmp(t.name, "Action") == 0 || strcmp(t.name, "Func`1") == 0)) {
+        if (t.name && (strcmp(t.name, "Action") == 0 ||
+                       strncmp(t.name, "Action`", 7) == 0 ||
+                       strcmp(t.name, "Func`1") == 0 ||
+                       strncmp(t.name, "Func`", 5) == 0)) {
             return true;
         }
         type_id = t.base_id;
@@ -664,6 +709,22 @@ bool Interpreter::GetExternalField(const MemberRefInfo& member, const Value& ins
         if (strcmp(n, "y") == 0) { if (out) *out = Value::R4(v->y); return true; }
         if (strcmp(n, "z") == 0) { if (out) *out = Value::R4(v->z); return true; }
     }
+    // Fields inherited from a closed generic base are emitted as MemberRefs
+    // against the instantiation. Resolve them through the local generic
+    // definition so generic gameplay classes keep their storage.
+    u32 cur = member.decl_id;
+    u32 guard = 0;
+    while (cur && guard++ < 64) {
+        const TypeInfo& ct = metadata_.Type(cur);
+        u32 def = ct.generic_type_id ? ct.generic_type_id : cur;
+        const TypeInfo& dt = metadata_.Type(def);
+        u32 fid = metadata_.FindField(def, n);
+        if (fid) {
+            if (out) *out = GetField(fid, instance);
+            return true;
+        }
+        cur = ct.generic_type_id ? dt.base_id : ct.base_id;
+    }
     return false;
 }
 
@@ -681,6 +742,19 @@ bool Interpreter::SetExternalField(const MemberRefInfo& member, const Value& ins
         if (strcmp(n, "x") == 0) { v->x = (f32)NumF64(value); return true; }
         if (strcmp(n, "y") == 0) { v->y = (f32)NumF64(value); return true; }
         if (strcmp(n, "z") == 0) { v->z = (f32)NumF64(value); return true; }
+    }
+    u32 cur = member.decl_id;
+    u32 guard = 0;
+    while (cur && guard++ < 64) {
+        const TypeInfo& ct = metadata_.Type(cur);
+        u32 def = ct.generic_type_id ? ct.generic_type_id : cur;
+        const TypeInfo& dt = metadata_.Type(def);
+        u32 fid = metadata_.FindField(def, n);
+        if (fid) {
+            SetField(fid, instance, value);
+            return true;
+        }
+        cur = ct.generic_type_id ? dt.base_id : ct.base_id;
     }
     return false;
 }

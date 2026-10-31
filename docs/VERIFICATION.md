@@ -162,25 +162,30 @@ This is not a validated visual slice.
 - Windows `--logic`, `--stack`, `--motor` and the native `--play` tutorial
   slice all PASS with the current runtime; `--play` reports
   `result=PASS ... jumped=1 landed=1 dashes=2`.
-- The Xbox 360 XEX builds and boots under Xenia. A full 240-frame play run
-  passed before the newest runtime changes. The most recent Xenia run reached
-  frame 90 before the background harness ended, so full big-endian
-  revalidation of the newest changes is still pending.
-- The original `--level` flow is blocked: `TutorialLevel.Awake` stops at
-  `Cuphead.Init -> Resources.Load` plus `Object.Instantiate`, and
-  `TutorialLevel.Start` stops at a null `LevelResources.levelAudio`
-  (`LevelAudio.Create`). A prefab/resource instantiation pipeline and
-  LevelResources binding are not implemented.
-- The original player motor moves and grounds on Windows
-  (`motor moved ... PASS`). Its rendered mode (`--motorplay`) draws an
-  animated Cuphead in the tutorial scene with camera follow after loading
-  textures, honoring scene active flags, and selecting extracted
-  idle/run/jump/dash frames from the motor state. This is a native animation
-  bridge, not the original Animator state machine; the player art is still
-  oversized, and it is a logic/rendering smoke test rather than a polished
-  playable level.
+- `tools\extract_scene.py --add-level-resources` now resolves cross-file
+  PPtrs and includes `LevelResources`, `CupheadCore`, `LevelGUI`, `LevelHUD`,
+  `LevelAudio`, `PlayerJoinEffect`, the dialogue UI and the real player
+  prefab. The generated tutorial scene binds 1515 GameObjects and 1993
+  components.
+- The original `--level` flow now PASSes on Windows:
+  `TutorialLevel.Awake PASS`, `TutorialLevel.Start PASS`, `result=PASS`.
+- `--levelplay` drives the real player/motor created by `Level.Start` with
+  synthesized input, camera follow and software rendering:
+  `start=-410.0,-270.0 max_x=804.9 max_y=-270.0 min_y=-274.5 result=PASS`.
+  Screenshots: `work\extract_level\levelplay.45.bmp`,
+  `levelplay.100.bmp`, `levelplay.200.bmp`.
+- Sprite world size now uses the cropped sprite rect instead of the atlas
+  rect, fixing the oversized character art in both the native play slice and
+  the original-level play harness.
+- The Xbox 360 XEX is rebuilt from the current runtime. Full 240-frame play
+  revalidation under Xenia is recorded below once complete.
+- This milestone validates original level startup and a movement/rendering
+  slice. It does **not** validate complete gameplay: weapons, enemies,
+  bosses, damage, parry/super, hazards, real Animator state, audio playback,
+  UI rendering, saves, dialogue, menus, cutscenes, transitions and DLC remain
+  absent. See `docs/STATUS.md` for the honest breakdown.
 
-This verifies the runtime/metadata/scene/script foundation and the beginning
-of the original player lifecycle. It does **not** verify any complete level,
-boss, menu, save, audio, or DLC gameplay. See `docs/STATUS.md` for the
-implemented/validated/missing breakdown and roadmap.
+This verifies the runtime/metadata/scene/script foundation, original
+`TutorialLevel.Awake`/`Start`, and the beginning of the original player
+lifecycle. It does **not** verify any complete level, boss, menu, save,
+audio, or DLC gameplay.

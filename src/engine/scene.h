@@ -108,6 +108,7 @@ public:
     const SceneSprite& Sprite(u32 id) const;
     const SceneTexture& Texture(u32 id) const;
     const SceneCamera* MainCamera() const;
+    SceneCamera* MutableMainCamera();
 
     const char* LastError() const { return last_error_; }
     const char* Directory() const { return directory_; }

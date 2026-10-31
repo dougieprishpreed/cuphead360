@@ -235,6 +235,14 @@ Value Interpreter::ManagedComponent(u32 component_index) const {
     return managed_components_[component_index];
 }
 
+bool Interpreter::IsComponentAwake(u32 component_index) const {
+    return component_index < awake_flags_.Size() && awake_flags_[component_index] != 0;
+}
+
+void Interpreter::MarkComponentAwake(u32 component_index) {
+    if (component_index < awake_flags_.Size()) awake_flags_[component_index] = 1;
+}
+
 void Interpreter::AddManagedBinding(Object* obj, u32 object_index, u32 component_index) {
     if (!obj) return;
     ManagedBinding b;
@@ -269,6 +277,8 @@ bool Interpreter::BindScene(Scene& scene, bool run_script_ctors) {
     if (!managed_gameobjects_.Resize(scene.ObjectCount())) return false;
     if (!managed_transforms_.Resize(scene.ObjectCount())) return false;
     if (!managed_components_.Resize(scene.ComponentCount())) return false;
+    if (!awake_flags_.Resize(scene.ComponentCount())) return false;
+    if (scene.ComponentCount()) memset(awake_flags_.Data(), 0, scene.ComponentCount());
 
     for (u32 i = 0; i < scene.ObjectCount(); ++i) {
         Object* go = AllocObjectWithSlots(gameobject_type_id_, 2);
@@ -502,7 +512,10 @@ static bool GameObject_GetComponent(Interpreter& in, const MemberRefInfo& member
     (void)argc;
     u32 oi = ManagedObjectIndex(in, a[0]);
     Scene* scene = in.BoundScene();
-    if (!scene || oi >= scene->ObjectCount()) return false;
+    if (!scene || oi >= scene->ObjectCount()) {
+        if (ret) *ret = Value::Null();
+        return true;
+    }
     const MethodSigInfo& ms = in.Metadata().MethodSig(member.sig_index);
     const SigInfo& rs = in.Metadata().Sig(ms.return_sig);
     u32 target = rs.type_id;
@@ -528,6 +541,37 @@ static bool GameObject_GetComponent(Interpreter& in, const MemberRefInfo& member
         if (in.IsAssignable(vt, target) || vt == target || is_component_base) {
             if (ret) *ret = v;
             return true;
+        }
+    }
+    if (target) {
+        const TypeInfo& tt = in.Metadata().Type(target);
+        // Unity UI components are not part of the compact scene component set.
+        // Expose bound managed stand-ins so UI initialization can run.
+        if (tt.full_name && strcmp(tt.full_name, "UnityEngine.RectTransform") == 0) {
+            if (ret) *ret = in.ManagedTransform(oi);
+            return true;
+        }
+        if (tt.full_name && (strcmp(tt.full_name, "UnityEngine.CanvasGroup") == 0 ||
+                             strncmp(tt.full_name, "UnityEngine.UI.", 15) == 0)) {
+            Object* ui = in.AllocObjectWithSlots(target, 4);
+            if (ui) {
+                ui->Fields()[0] = Value::I4((s32)oi);
+                ui->Fields()[1] = Value::I4(-1);
+                if (ret) *ret = Value::ObjectRef(ui);
+                return true;
+            }
+        }
+        // AudioSource is not part of the compact scene component set, but
+        // gameplay/Awake code expects one on several prefabs. Expose a
+        // managed stand-in bound to the same GameObject.
+        if (tt.full_name && strcmp(tt.full_name, "UnityEngine.AudioSource") == 0) {
+            Object* src = in.AllocObjectWithSlots(target, 4);
+            if (src) {
+                src->Fields()[0] = Value::I4((s32)oi);
+                src->Fields()[1] = Value::I4(-1);
+                if (ret) *ret = Value::ObjectRef(src);
+                return true;
+            }
         }
     }
     if (ret) *ret = Value::Null();
@@ -1217,17 +1261,6 @@ static bool Physics2D_NonAlloc(Interpreter& in, u32 argc, Value* a, bool box, Va
     f32 len = sqrtf(dx * dx + dy * dy);
     if (len > 0.000001f) { dx /= len; dy /= len; }
     u32 count = Physics2D_CollectHits(in, ox, oy, hw, hh, dx, dy, dist, hits, max);
-    static u32 s_phys_logs = 0;
-    if (s_phys_logs < 8) {
-        LogInfo("phys", "cast box=%d origin=%.1f,%.1f half=%.1f,%.1f dir=%.1f,%.1f dist=%.1f len=%u hits=%u",
-                box ? 1 : 0, ox, oy, hw, hh, dx, dy, dist, arr->length, count);
-        for (u32 i = 0; i < count && i < 4; ++i) {
-            LogInfo("phys", "  hit t=%.1f point=%.1f,%.1f collider=%u object=%u",
-                    hits[i].t, ox + dx * hits[i].t, oy + dy * hits[i].t,
-                    hits[i].ci, hits[i].oi);
-        }
-        ++s_phys_logs;
-    }
     for (u32 i = 0; i < count; ++i) {
         Object* hit = in.AllocObjectWithSlots(hit_type, 8);
         if (!hit) { count = i; break; }
@@ -1422,35 +1455,209 @@ static bool StringEqualsAscii(const Value& v, const char* text) {
     return true;
 }
 
-// Temporary dialogue-content scaffold. The real dialoguer_data_object lives
-// in resources.assets (MonoBehaviour 1175) and is serialized as a large
-// nested graph. Until that graph is extracted into a runtime asset, return an
-// empty wrapper so save/player initialization can proceed.
+static u32 FindMethodInHierarchy(Interpreter& in, u32 type_id, const char* name) {
+    u32 cur = type_id;
+    u32 guard = 0;
+    while (cur && guard++ < 64) {
+        u32 m = in.Metadata().FindMethod(cur, name);
+        if (m) return m;
+        cur = in.Metadata().Type(cur).base_id;
+    }
+    return 0;
+}
+
+static const char* LastPathSegment(const char* path) {
+    if (!path) return "";
+    const char* slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+// Templates included in the converted scene are bound like normal scene
+// objects but stay inactive until Object.Instantiate is called. Resources.Load
+// resolves the resource path to one of those template objects.
 static bool Resources_Load(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
-    if (argc < 1 || !StringEqualsAscii(a[0], "dialoguer_data_object")) {
+    if (argc < 1 || a[0].tag != VT_STRING) {
         if (ret) *ret = Value::Null();
         return true;
     }
-    u32 wrapper_type = in.Metadata().FindType("DialoguerEditor.DialogueEditorMasterObjectWrapper");
-    u32 data_type = in.Metadata().FindType("DialoguerEditor.DialogueEditorMasterObject");
-    if (!wrapper_type || !data_type) {
+    const char* path = in.StringUtf8(a[0]);
+    if (!path) path = "";
+    if (strcmp(path, "Audio/AudioMixer") == 0) {
+        // Audio initialization reads the mixer asset and its serialized
+        // groups. Provide a deterministic scaffold until the real audio
+        // assets are extracted; this keeps level startup from dereferencing
+        // a null mixer while audio playback remains a documented gap.
+        u32 mix_type = in.Metadata().FindType("AudioManagerMixer");
+        u32 mixer_type = in.Metadata().FindType("UnityEngine.Audio.AudioMixer");
+        u32 groups_type = in.Metadata().FindType("AudioManagerMixer/Groups");
+        if (!mix_type) {
+            if (ret) *ret = Value::Null();
+            return true;
+        }
+        Value mixer = Value::Null();
+        if (mixer_type) {
+            Object* mo = in.AllocObjectWithSlots(mixer_type, 4);
+            if (mo) mixer = Value::ObjectRef(mo);
+        }
+        Value groups = Value::Null();
+        if (groups_type) groups = in.NewObjectValue(groups_type);
+        Value mgr = in.NewObjectValue(mix_type);
+        if (mgr.tag == VT_OBJECT && mgr.data.obj) {
+            u32 f = in.Metadata().FindField(mix_type, "mixer");
+            if (f) in.SetField(f, mgr, mixer);
+            f = in.Metadata().FindField(mix_type, "audioGroups");
+            if (f) in.SetField(f, mgr, groups);
+        }
+        if (ret) *ret = mgr;
+        return true;
+    }
+    if (strcmp(path, "dialoguer_data_object") == 0) {        u32 wrapper_type = in.Metadata().FindType("DialoguerEditor.DialogueEditorMasterObjectWrapper");
+        u32 data_type = in.Metadata().FindType("DialoguerEditor.DialogueEditorMasterObject");
+        if (!wrapper_type || !data_type) {
+            if (ret) *ret = Value::Null();
+            return true;
+        }
+        Value data = in.NewObjectValue(data_type);
+        if (data.tag == VT_NULL) return false;
+        u32 ctor = in.Metadata().FindMethod(data_type, ".ctor");
+        if (ctor) {
+            Value args[1];
+            args[0] = data;
+            Value r;
+            if (!in.Invoke(ctor, args, 1, &r)) return false;
+        }
+        Value wrapper = in.NewObjectValue(wrapper_type);
+        if (wrapper.tag == VT_NULL) return false;
+        u32 data_field = in.Metadata().FindField(wrapper_type, "data");
+        if (data_field) in.SetField(data_field, wrapper, data);
+        if (ret) *ret = wrapper;
+        return true;
+    }
+
+    const char* name = LastPathSegment(path);
+    u32 target = in.GenericArgType(0);
+    Scene* scene = in.BoundScene();
+    if (!scene || !name[0]) {
+        LogInfo("unity", "Resources.Load '%s' -> null (no scene)", path);
         if (ret) *ret = Value::Null();
         return true;
     }
-    Value data = in.NewObjectValue(data_type);
-    if (data.tag == VT_NULL) return false;
-    u32 ctor = in.Metadata().FindMethod(data_type, ".ctor");
-    if (ctor) {
-        Value args[1];
-        args[0] = data;
-        Value r;
-        if (!in.Invoke(ctor, args, 1, &r)) return false;
+    for (u32 oi = 0; oi < scene->ObjectCount(); ++oi) {
+        const SceneObject& o = scene->Object(oi);
+        if (strcmp(o.name, name) != 0) continue;
+        if (target == in.GameObjectTypeId()) {
+            LogInfo("unity", "Resources.Load '%s' -> GameObject '%s'", path, o.name);
+            if (ret) *ret = in.ManagedGameObject(oi);
+            return true;
+        }
+        for (u32 c = 0; c < o.component_count; ++c) {
+            u32 ci = o.component_start + c;
+            if (ci >= scene->ComponentCount()) break;
+            Value v = in.ManagedComponent(ci);
+            if (v.tag == VT_OBJECT && v.data.obj) {
+                u32 vt = v.data.obj->type_id;
+                if (!target || vt == target || in.IsAssignable(vt, target)) {
+                    LogInfo("unity", "Resources.Load '%s' -> %s on '%s' (target=%u)",
+                            path, scene->Component(ci).controller, o.name, target);
+                    if (ret) *ret = v;
+                    return true;
+                }
+            }
+        }
     }
-    Value wrapper = in.NewObjectValue(wrapper_type);
-    if (wrapper.tag == VT_NULL) return false;
-    u32 data_field = in.Metadata().FindField(wrapper_type, "data");
-    if (data_field) in.SetField(data_field, wrapper, data);
-    if (ret) *ret = wrapper;
+    LogInfo("unity", "Resources.Load '%s' -> null (template not found, target=%u)", path, target);
+    if (ret) *ret = Value::Null();
+    return true;
+}
+
+static void InvokeAwakeOnTree(Interpreter& in, u32 root_oi) {
+    Scene* scene = in.BoundScene();
+    if (!scene || root_oi >= scene->ObjectCount()) return;
+    u32 root_id = scene->Object(root_oi).id;
+    // Root first, then descendants, mirroring the parent-before-child order
+    // used by the prefab extractor.
+    for (u32 pass = 0; pass < 2; ++pass) {
+        for (u32 oi = 0; oi < scene->ObjectCount(); ++oi) {
+            bool is_root = (oi == root_oi);
+            if (pass == 0 && !is_root) continue;
+            if (pass == 1 && is_root) continue;
+            if (!is_root && !IsSceneDescendant(*scene, oi, root_id)) continue;
+            const SceneObject& o = scene->Object(oi);
+            for (u32 c = 0; c < o.component_count; ++c) {
+                u32 ci = o.component_start + c;
+                if (ci >= scene->ComponentCount()) break;
+                if (scene->Component(ci).type != 4) continue;
+                if (in.IsComponentAwake(ci)) continue;
+                const char* ctrl = scene->Component(ci).controller;
+                // UI and Rewired editor UI stacks are not gameplay; their
+                // initialization depends on the full Unity UI/Rewired editor
+                // runtime and would block level startup.
+                if (strncmp(ctrl, "Rewired.UI.", 11) == 0 ||
+                    strncmp(ctrl, "Rewired.Integration.", 20) == 0 ||
+                    strncmp(ctrl, "UnityEngine.EventSystems.", 24) == 0 ||
+                    strncmp(ctrl, "UnityEngine.UI.", 15) == 0 ||
+                    strncmp(ctrl, "TMPro.", 6) == 0 ||
+                    strncmp(ctrl, "AudioIgnorePauseBehaviour", 25) == 0 ||
+                    strncmp(ctrl, "AudioManagerComponent", 21) == 0) {
+                    in.MarkComponentAwake(ci);
+                    continue;
+                }
+                Value self = in.ManagedComponent(ci);
+                if (self.tag != VT_OBJECT || !self.data.obj) continue;
+                u32 awake = FindMethodInHierarchy(in, self.data.obj->type_id, "Awake");
+                if (awake) {
+                    Value r;
+                    bool ok = in.Invoke(awake, &self, 1, &r);
+                    if (!ok) {
+                        LogWarn("unity", "Awake %s on '%s' failed",
+                                scene->Component(ci).controller, o.name);
+                    }
+                }
+                in.MarkComponentAwake(ci);
+            }
+        }
+    }
+}
+
+static bool Object_Instantiate(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    if (argc < 1 || a[0].tag != VT_OBJECT || !a[0].data.obj) {
+        if (ret) *ret = Value::Null();
+        return true;
+    }
+    u32 oi = in.ManagedObjectIndexFor(a[0]);
+    Scene* scene = in.BoundScene();
+    if (!scene || oi >= scene->ObjectCount()) {
+        if (ret) *ret = a[0];
+        return true;
+    }
+    SceneObject& o = scene->MutableObject(oi);
+    o.flags |= 1u;
+    a[0].data.obj->flags |= 1u;
+    InvokeAwakeOnTree(in, oi);
+    if (ret) *ret = a[0];
+    return true;
+}
+
+static bool Object_FindObjectOfType(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    u32 target = in.GenericArgType(0);
+    Scene* scene = in.BoundScene();
+    if (scene && target) {
+        for (u32 ci = 0; ci < scene->ComponentCount(); ++ci) {
+            Value v = in.ManagedComponent(ci);
+            if (v.tag == VT_OBJECT && v.data.obj) {
+                u32 vt = v.data.obj->type_id;
+                if (vt == target || in.IsAssignable(vt, target)) {
+                    if (ret) *ret = v;
+                    return true;
+                }
+            }
+        }
+        if (target == in.GameObjectTypeId() && scene->ObjectCount()) {
+            if (ret) *ret = in.ManagedGameObject(0);
+            return true;
+        }
+    }
+    if (ret) *ret = Value::Null();
     return true;
 }
 static Object* RectObject(const Value& v) {
@@ -1507,6 +1714,121 @@ static bool Rect_GetSize(Interpreter& in, const MemberRefInfo&, u32, Value* a, V
     Object* o = RectObject(a[0]);
     return RetVec2V(in, ret, o ? o->Fields()[2].data.f32 : 0.0f,
                     o ? o->Fields()[3].data.f32 : 0.0f);
+}
+static bool Rect_GetXMin(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = RectObject(a[0]);
+    return RetF32Field(ret, o ? o->Fields()[0].data.f32 : 0.0f);
+}
+static bool Rect_SetXMin(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = RectObject(a[0]);
+    if (o) {
+        f32 xmax = o->Fields()[0].data.f32 + o->Fields()[2].data.f32;
+        o->Fields()[0] = Value::R4(a[1].data.f32);
+        o->Fields()[2] = Value::R4(xmax - a[1].data.f32);
+    }
+    return RetVoid(ret);
+}
+static bool Rect_GetXMax(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = RectObject(a[0]);
+    return RetF32Field(ret, o ? o->Fields()[0].data.f32 + o->Fields()[2].data.f32 : 0.0f);
+}
+static bool Rect_SetXMax(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = RectObject(a[0]);
+    if (o) o->Fields()[2] = Value::R4(a[1].data.f32 - o->Fields()[0].data.f32);
+    return RetVoid(ret);
+}
+static bool Rect_GetYMin(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = RectObject(a[0]);
+    return RetF32Field(ret, o ? o->Fields()[1].data.f32 : 0.0f);
+}
+static bool Rect_SetYMin(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = RectObject(a[0]);
+    if (o) {
+        f32 ymax = o->Fields()[1].data.f32 + o->Fields()[3].data.f32;
+        o->Fields()[1] = Value::R4(a[1].data.f32);
+        o->Fields()[3] = Value::R4(ymax - a[1].data.f32);
+    }
+    return RetVoid(ret);
+}
+static bool Rect_GetYMax(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = RectObject(a[0]);
+    return RetF32Field(ret, o ? o->Fields()[1].data.f32 + o->Fields()[3].data.f32 : 0.0f);
+}
+static bool Rect_SetYMax(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = RectObject(a[0]);
+    if (o) o->Fields()[3] = Value::R4(a[1].data.f32 - o->Fields()[1].data.f32);
+    return RetVoid(ret);
+}
+
+static bool Camera_GetMain(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    Scene* scene = in.BoundScene();
+    if (scene) {
+        for (u32 ci = 0; ci < scene->ComponentCount(); ++ci) {
+            Value v = in.ManagedComponent(ci);
+            if (v.tag != VT_OBJECT || !v.data.obj) continue;
+            const TypeInfo& t = in.Metadata().Type(v.data.obj->type_id);
+            if (t.full_name && strcmp(t.full_name, "UnityEngine.Camera") == 0) {
+                if (ret) *ret = v;
+                return true;
+            }
+        }
+    }
+    if (ret) *ret = Value::Null();
+    return true;
+}
+static bool Camera_SetOrthographicSize(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag == VT_OBJECT && a[0].data.obj && a[0].data.obj->slots > 2) {
+        a[0].data.obj->Fields()[2] = Value::R4(a[1].data.f32);
+    }
+    Scene* scene = in.BoundScene();
+    if (scene && scene->MutableMainCamera()) scene->MutableMainCamera()->orthographic_size = a[1].data.f32;
+    return RetVoid(ret);
+}
+static bool Camera_GetOrthographicSize(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag == VT_OBJECT && a[0].data.obj && a[0].data.obj->slots > 2 &&
+        a[0].data.obj->Fields()[2].tag == VT_R4) {
+        return RetF32V(ret, a[0].data.obj->Fields()[2].data.f32);
+    }
+    Scene* scene = in.BoundScene();
+    return RetF32V(ret, scene && scene->MainCamera() ? scene->MainCamera()->orthographic_size : 360.0f);
+}
+static bool Camera_SetOrthographic(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    bool on = Interpreter::ToBool(a[1]);
+    if (a[0].tag == VT_OBJECT && a[0].data.obj) {
+        a[0].data.obj->flags = (a[0].data.obj->flags & ~1u) | (on ? 1u : 0u);
+    }
+    Scene* scene = in.BoundScene();
+    if (scene && scene->MutableMainCamera()) {
+        SceneCamera* c = scene->MutableMainCamera();
+        c->flags = (c->flags & ~1u) | (on ? 1u : 0u);
+    }
+    return RetVoid(ret);
+}
+static bool Camera_GetOrthographic(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag == VT_OBJECT && a[0].data.obj) return RetBoolV(ret, (a[0].data.obj->flags & 1u) != 0);
+    Scene* scene = in.BoundScene();
+    return RetBoolV(ret, scene && scene->MainCamera() && (scene->MainCamera()->flags & 1u));
+}
+static bool Camera_SetBackgroundColor(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Scene* scene = in.BoundScene();
+    SceneCamera* c = scene ? scene->MutableMainCamera() : 0;
+    if (c && (a[1].tag == VT_STRUCT || a[1].tag == VT_OBJECT) && a[1].data.obj) {
+        Object* col = a[1].data.obj;
+        c->background[0] = col->Fields()[0].data.f32;
+        c->background[1] = col->Fields()[1].data.f32;
+        c->background[2] = col->Fields()[2].data.f32;
+        c->background[3] = col->Fields()[3].data.f32;
+    }
+    return RetVoid(ret);
+}
+static bool Camera_SetDepth(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Scene* scene = in.BoundScene();
+    if (scene && scene->MutableMainCamera()) scene->MutableMainCamera()->depth = a[1].data.f32;
+    return RetVoid(ret);
+}
+static bool Camera_GetDepth(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    Scene* scene = in.BoundScene();
+    return RetF32V(ret, scene && scene->MainCamera() ? scene->MainCamera()->depth : 0.0f);
 }
 static bool Animator_SetSpeed(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     SceneComponent* c = MutableSceneComponentFor(in, a[0]);
@@ -1589,10 +1911,187 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
     const char* type = t.full_name;
     const char* n = member.name;
 
+    if (strcmp(type, "UnityEngine.EventSystems.UIBehaviour") == 0) {
+        if (strcmp(n, "Awake") == 0 || strcmp(n, "Start") == 0 ||
+            strcmp(n, "OnEnable") == 0 || strcmp(n, "OnDisable") == 0) {
+            return RetVoid(ret);
+        }
+    }
+
+    if (strcmp(type, "UnityEngine.AudioSource") == 0) {
+        if (strcmp(n, "set_ignoreListenerPause") == 0 || strcmp(n, "set_volume") == 0 ||
+            strcmp(n, "set_pitch") == 0 || strcmp(n, "set_loop") == 0 ||
+            strcmp(n, "set_playOnAwake") == 0 || strcmp(n, "set_mute") == 0 ||
+            strcmp(n, "set_spatialBlend") == 0 || strcmp(n, "set_clip") == 0 ||
+            strcmp(n, "set_outputAudioMixerGroup") == 0 || strcmp(n, "Play") == 0 ||
+            strcmp(n, "Stop") == 0 || strcmp(n, "Pause") == 0 ||
+            strcmp(n, "UnPause") == 0 || strcmp(n, "PlayOneShot") == 0 ||
+            strcmp(n, "PlayDelayed") == 0) {
+            return RetVoid(ret);
+        }
+        if (strcmp(n, "get_ignoreListenerPause") == 0 || strcmp(n, "get_loop") == 0 ||
+            strcmp(n, "get_playOnAwake") == 0 || strcmp(n, "get_mute") == 0 ||
+            strcmp(n, "get_isPlaying") == 0) {
+            return RetBoolV(ret, false);
+        }
+        if (strcmp(n, "get_volume") == 0 || strcmp(n, "get_pitch") == 0 ||
+            strcmp(n, "get_spatialBlend") == 0) {
+            return RetF32V(ret, 1.0f);
+        }
+        if (strcmp(n, "get_clip") == 0 || strcmp(n, "get_outputAudioMixerGroup") == 0 ||
+            strcmp(n, "get_time") == 0) {
+            if (ret) *ret = Value::Null();
+            return true;
+        }
+    }
+    if (strcmp(type, "UnityEngine.Audio.AudioMixer") == 0) {
+        if (strcmp(n, "GetFloat") == 0) {
+            if (argc >= 3 && args[2].tag == VT_BYREF && args[2].data.ref) {
+                *args[2].data.ref = Value::R4(0.0f);
+            }
+            return RetBoolV(ret, true);
+        }
+        if (strcmp(n, "SetFloat") == 0) return RetVoid(ret);
+        if (strcmp(n, "FindMatchingGroups") == 0) {
+            if (ret) *ret = in.NewArrayValue(0, 0);
+            return true;
+        }
+    }
+    if (strcmp(type, "UnityEngine.Screen") == 0) {
+        if (strcmp(n, "get_currentResolution") == 0) {
+            u32 rt = in.Metadata().FindType("UnityEngine.Resolution");
+            Object* ro = rt ? in.AllocObjectWithSlots(rt, 4) : 0;
+            if (ret) *ret = ro ? Value::StructRef(ro) : Value::Null();
+            return true;
+        }
+        if (strcmp(n, "get_fullScreen") == 0) return RetBoolV(ret, false);
+        if (strcmp(n, "get_width") == 0) return RetI32V(ret, 1280);
+        if (strcmp(n, "get_height") == 0) return RetI32V(ret, 720);
+        if (strcmp(n, "SetResolution") == 0) return RetVoid(ret);
+    }
+    if (strcmp(type, "UnityEngine.Resolution") == 0) {
+        if (strcmp(n, "get_width") == 0) return RetI32V(ret, 1280);
+        if (strcmp(n, "get_height") == 0) return RetI32V(ret, 720);
+        if (strcmp(n, "get_refreshRate") == 0) return RetI32V(ret, 60);
+    }
+    if (strcmp(type, "UnityEngine.CanvasGroup") == 0) {
+        if (strcmp(n, "set_alpha") == 0) {
+            if (args[0].tag == VT_OBJECT && args[0].data.obj && args[0].data.obj->slots > 2) {
+                args[0].data.obj->Fields()[2] = Value::R4(args[1].data.f32);
+            }
+            return RetVoid(ret);
+        }
+        if (strcmp(n, "get_alpha") == 0) {
+            if (args[0].tag == VT_OBJECT && args[0].data.obj && args[0].data.obj->slots > 2) {
+                return RetF32V(ret, args[0].data.obj->Fields()[2].data.f32);
+            }
+            return RetF32V(ret, 1.0f);
+        }
+        if (strcmp(n, "set_interactable") == 0 || strcmp(n, "set_blocksRaycasts") == 0 ||
+            strcmp(n, "set_ignoreParentGroups") == 0) return RetVoid(ret);
+        if (strcmp(n, "get_interactable") == 0 || strcmp(n, "get_blocksRaycasts") == 0 ||
+            strcmp(n, "get_ignoreParentGroups") == 0) return RetBoolV(ret, true);
+    }
+    if (strcmp(type, "UnityEngine.RectTransform") == 0) {
+        if (strcmp(n, "get_sizeDelta") == 0 || strcmp(n, "get_anchoredPosition") == 0 ||
+            strcmp(n, "get_anchorMin") == 0 || strcmp(n, "get_anchorMax") == 0 ||
+            strcmp(n, "get_offsetMin") == 0 || strcmp(n, "get_offsetMax") == 0) {
+            if (ret) *ret = in.NewVec2(0.0f, 0.0f);
+            return true;
+        }
+        if (strcmp(n, "get_pivot") == 0) {
+            if (ret) *ret = in.NewVec2(0.5f, 0.5f);
+            return true;
+        }
+        if (strcmp(n, "set_sizeDelta") == 0 || strcmp(n, "set_anchoredPosition") == 0 ||
+            strcmp(n, "set_anchorMin") == 0 || strcmp(n, "set_anchorMax") == 0 ||
+            strcmp(n, "set_pivot") == 0 || strcmp(n, "set_offsetMin") == 0 ||
+            strcmp(n, "set_offsetMax") == 0) return RetVoid(ret);
+        if (strcmp(n, "get_rect") == 0) {
+            u32 rt = in.Metadata().FindType("UnityEngine.Rect");
+            Object* o = rt ? in.AllocObjectWithSlots(rt, 4) : 0;
+            if (ret) *ret = o ? Value::StructRef(o) : Value::Null();
+            return true;
+        }
+    }
+    if (strncmp(type, "UnityEngine.UI.", 15) == 0) {
+        if (strcmp(n, "get_text") == 0) {
+            if (ret) *ret = in.NewStringAscii("");
+            return true;
+        }
+        if (strcmp(n, "set_text") == 0 || strcmp(n, "set_font") == 0 ||
+            strcmp(n, "set_fontSize") == 0 || strcmp(n, "set_alignment") == 0 ||
+            strcmp(n, "set_fontStyle") == 0 || strcmp(n, "set_sprite") == 0 ||
+            strcmp(n, "set_material") == 0 || strcmp(n, "SetAllDirty") == 0 ||
+            strcmp(n, "set_preserveAspect") == 0 || strcmp(n, "set_type") == 0 ||
+            strcmp(n, "set_fillAmount") == 0 || strcmp(n, "set_supportRichText") == 0) {
+            return RetVoid(ret);
+        }
+        if (strcmp(n, "get_fontSize") == 0 || strcmp(n, "get_alignment") == 0 ||
+            strcmp(n, "get_fontStyle") == 0 || strcmp(n, "get_type") == 0 ||
+            strcmp(n, "get_verticalOverflow") == 0 || strcmp(n, "get_horizontalOverflow") == 0) {
+            return RetI32V(ret, 0);
+        }
+        if (strcmp(n, "get_lineSpacing") == 0 || strcmp(n, "get_pixelsPerUnit") == 0) {
+            return RetF32V(ret, 1.0f);
+        }
+        if (strcmp(n, "get_resizeTextForBestFit") == 0 || strcmp(n, "get_supportRichText") == 0 ||
+            strcmp(n, "get_alignByGeometry") == 0) {
+            return RetBoolV(ret, false);
+        }
+        if (strcmp(n, "get_rectTransform") == 0) {
+            return GameObject_GetTransform(in, member, argc, args, ret);
+        }
+        if (strcmp(n, "get_color") == 0) {
+            u32 ct = in.Metadata().FindType("UnityEngine.Color");
+            Object* o = ct ? in.AllocObjectWithSlots(ct, 4) : 0;
+            if (o) {
+                o->Fields()[0] = Value::R4(1.0f);
+                o->Fields()[1] = Value::R4(1.0f);
+                o->Fields()[2] = Value::R4(1.0f);
+                o->Fields()[3] = Value::R4(1.0f);
+            }
+            if (ret) *ret = o ? Value::StructRef(o) : Value::Null();
+            return true;
+        }
+        if (strcmp(n, "set_color") == 0) return RetVoid(ret);
+        if (strcmp(n, "get_sprite") == 0 || strcmp(n, "get_material") == 0 ||
+            strcmp(n, "get_font") == 0 || strcmp(n, "get_canvasRenderer") == 0) {
+            if (ret) *ret = Value::Null();
+            return true;
+        }
+    }
+    if (strcmp(type, "UnityEngine.Canvas") == 0) {
+        if (strcmp(n, "get_sortingOrder") == 0) return RetI32V(ret, 0);
+        if (strcmp(n, "set_sortingOrder") == 0 || strcmp(n, "set_renderMode") == 0 ||
+            strcmp(n, "set_worldCamera") == 0 || strcmp(n, "set_overrideSorting") == 0) {
+            return RetVoid(ret);
+        }
+    }
+    if (strcmp(type, "UnityEngine.Application") == 0) {
+        if (strcmp(n, "set_targetFrameRate") == 0) return RetVoid(ret);
+        if (strcmp(n, "get_targetFrameRate") == 0) return RetI32V(ret, 60);
+        if (strcmp(n, "get_isPlaying") == 0) return RetBoolV(ret, true);
+        if (strcmp(n, "get_isEditor") == 0) return RetBoolV(ret, false);
+        if (strcmp(n, "get_platform") == 0) return RetI32V(ret, 2);
+        if (strcmp(n, "Quit") == 0) return RetVoid(ret);
+        if (strcmp(n, "get_persistentDataPath") == 0 ||
+            strcmp(n, "get_dataPath") == 0 ||
+            strcmp(n, "get_streamingAssetsPath") == 0) {
+            if (ret) *ret = in.NewStringAscii("");
+            return true;
+        }
+    }
+    if (strcmp(type, "UnityEngine.QualitySettings") == 0) {
+        if (strcmp(n, "get_vSyncCount") == 0) return RetI32V(ret, 0);
+        if (strcmp(n, "set_vSyncCount") == 0) return RetVoid(ret);
+    }
+
     if (strcmp(type, "UnityEngine.Object") == 0 || strcmp(type, "UnityEngine.Component") == 0 ||
         strcmp(type, "UnityEngine.Behaviour") == 0 || strcmp(type, "UnityEngine.GameObject") == 0 ||
         strcmp(type, "UnityEngine.MonoBehaviour") == 0 || strcmp(type, "UnityEngine.SpriteRenderer") == 0 ||
         strcmp(type, "UnityEngine.Renderer") == 0 || strcmp(type, "UnityEngine.Animator") == 0 ||
+        strcmp(type, "UnityEngine.Camera") == 0 ||
         strcmp(type, "UnityEngine.Collider2D") == 0 || strcmp(type, "UnityEngine.BoxCollider2D") == 0 ||
         strcmp(type, "UnityEngine.CircleCollider2D") == 0 || strcmp(type, "UnityEngine.Rigidbody2D") == 0) {
         if (strcmp(n, "get_gameObject") == 0) return Component_GetGameObject(in, member, argc, args, ret);
@@ -1601,6 +2100,26 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
             return Component_GetTransform(in, member, argc, args, ret);
         }
         if (strcmp(n, "GetComponent") == 0) return GameObject_GetComponent(in, member, argc, args, ret);
+        if (strcmp(n, "AddComponent") == 0) {
+            u32 target = 0;
+            if (argc >= 2 && args[1].tag == VT_I4) target = (u32)args[1].data.i32;
+            if (!target) target = in.GenericArgType(0);
+            if (!target) {
+                if (ret) *ret = Value::Null();
+                return true;
+            }
+            Object* comp = in.AllocObjectWithSlots(target, 8);
+            if (comp) {
+                comp->Fields()[0] = Value::I4((s32)ManagedObjectIndex(in, args[0]));
+                comp->Fields()[1] = Value::I4(-1);
+                if (ret) *ret = Value::ObjectRef(comp);
+            } else if (ret) {
+                *ret = Value::Null();
+            }
+            return true;
+        }
+        if (strcmp(n, "Instantiate") == 0) return Object_Instantiate(in, member, argc, args, ret);
+        if (strcmp(n, "FindObjectOfType") == 0) return Object_FindObjectOfType(in, member, argc, args, ret);
         if (strcmp(n, "get_material") == 0 || strcmp(n, "get_sharedMaterial") == 0) return Renderer_GetMaterial(in, member, argc, args, ret);
         if (strcmp(n, "FindObjectsOfType") == 0) return Object_FindObjectsOfType(in, member, argc, args, ret);
         if (strcmp(n, "GetComponentsInChildren") == 0) return Component_GetComponentsInChildren(in, member, argc, args, ret);
@@ -1636,6 +2155,28 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
             return RetVoid(ret);
         }
     }
+    if (strcmp(type, "UnityEngine.Camera") == 0) {
+        if (strcmp(n, "get_main") == 0) return Camera_GetMain(in, member, argc, args, ret);
+        if (strcmp(n, "set_orthographicSize") == 0) return Camera_SetOrthographicSize(in, member, argc, args, ret);
+        if (strcmp(n, "get_orthographicSize") == 0) return Camera_GetOrthographicSize(in, member, argc, args, ret);
+        if (strcmp(n, "set_orthographic") == 0) return Camera_SetOrthographic(in, member, argc, args, ret);
+        if (strcmp(n, "get_orthographic") == 0) return Camera_GetOrthographic(in, member, argc, args, ret);
+        if (strcmp(n, "set_backgroundColor") == 0) return Camera_SetBackgroundColor(in, member, argc, args, ret);
+        if (strcmp(n, "set_depth") == 0) return Camera_SetDepth(in, member, argc, args, ret);
+        if (strcmp(n, "get_depth") == 0) return Camera_GetDepth(in, member, argc, args, ret);
+        if (strcmp(n, "set_clearFlags") == 0 || strcmp(n, "set_aspect") == 0 ||
+            strcmp(n, "set_fieldOfView") == 0 || strcmp(n, "set_nearClipPlane") == 0 ||
+            strcmp(n, "set_farClipPlane") == 0 || strcmp(n, "set_cullingMask") == 0) {
+            return RetVoid(ret);
+        }
+        if (strcmp(n, "get_clearFlags") == 0) return RetI32V(ret, 1);
+        if (strcmp(n, "get_aspect") == 0) return RetF32V(ret, 16.0f / 9.0f);
+        if (strcmp(n, "get_fieldOfView") == 0) return RetF32V(ret, 60.0f);
+        if (strcmp(n, "ScreenToWorldPoint") == 0 || strcmp(n, "WorldToScreenPoint") == 0) {
+            if (ret) *ret = in.NewVec3(0.0f, 0.0f, 0.0f);
+            return true;
+        }
+    }
     if (strcmp(type, "UnityEngine.Transform") == 0) {        if (strcmp(n, "get_position") == 0) return Transform_GetPosition(in, member, argc, args, ret);
         if (strcmp(n, "set_position") == 0) return Transform_SetPosition(in, member, argc, args, ret);
         if (strcmp(n, "get_localPosition") == 0) return Transform_GetLocalPosition(in, member, argc, args, ret);
@@ -1658,6 +2199,8 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "get_offset") == 0) return Collider2D_GetOffset(in, member, argc, args, ret);
         if (strcmp(n, "set_offset") == 0) return Collider2D_SetOffset(in, member, argc, args, ret);
         if (strcmp(n, "get_attachedRigidbody") == 0) return Collider2D_GetAttachedRigidbody(in, member, argc, args, ret);
+        if (strcmp(n, "set_isTrigger") == 0) return RetVoid(ret);
+        if (strcmp(n, "get_isTrigger") == 0) return RetBoolV(ret, false);
         if (strcmp(n, "get_shapeCount") == 0) return RetI32V(ret, 1);
     }
     if (strcmp(type, "UnityEngine.BoxCollider2D") == 0) {
@@ -1761,6 +2304,14 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "set_height") == 0) return Rect_SetHeight(in, member, argc, args, ret);
         if (strcmp(n, "get_center") == 0) return Rect_GetCenter(in, member, argc, args, ret);
         if (strcmp(n, "get_size") == 0) return Rect_GetSize(in, member, argc, args, ret);
+        if (strcmp(n, "get_xMin") == 0) return Rect_GetXMin(in, member, argc, args, ret);
+        if (strcmp(n, "set_xMin") == 0) return Rect_SetXMin(in, member, argc, args, ret);
+        if (strcmp(n, "get_xMax") == 0) return Rect_GetXMax(in, member, argc, args, ret);
+        if (strcmp(n, "set_xMax") == 0) return Rect_SetXMax(in, member, argc, args, ret);
+        if (strcmp(n, "get_yMin") == 0) return Rect_GetYMin(in, member, argc, args, ret);
+        if (strcmp(n, "set_yMin") == 0) return Rect_SetYMin(in, member, argc, args, ret);
+        if (strcmp(n, "get_yMax") == 0) return Rect_GetYMax(in, member, argc, args, ret);
+        if (strcmp(n, "set_yMax") == 0) return Rect_SetYMax(in, member, argc, args, ret);
     }
     if (strcmp(type, "UnityEngine.Vector3") == 0) {
         if (strcmp(n, ".ctor") == 0) return Vector3_Ctor(in, member, argc, args, ret);

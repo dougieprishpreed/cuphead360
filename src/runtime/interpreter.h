@@ -90,6 +90,8 @@ public:
     u32 ManagedObjectIndexFor(const Value& v) const;
     u32 ManagedComponentIndexFor(const Value& v) const;
     void AddManagedBinding(Object* obj, u32 object_index, u32 component_index);
+    bool IsComponentAwake(u32 component_index) const;
+    void MarkComponentAwake(u32 component_index);
     u32 GameObjectTypeId() const { return gameobject_type_id_; }
     u32 TransformTypeId() const { return transform_type_id_; }
     u32 ComponentTypeId() const { return component_type_id_; }
@@ -161,6 +163,8 @@ private:
     Buffer<Value> managed_gameobjects_;
     Buffer<Value> managed_transforms_;
     Buffer<Value> managed_components_;
+    Buffer<u8> awake_flags_;
+    mutable Buffer<char> utf8_scratch_;
 
     struct ManagedBinding {
         Object* obj;

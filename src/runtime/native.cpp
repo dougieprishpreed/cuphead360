@@ -5,6 +5,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
 
 namespace ch360 {
 
@@ -514,6 +515,19 @@ static bool List_Add(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, 
 static bool List_GetCount(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
     ListObject* list = AsList(a[0]);
     return RetI32(ret, list ? (s32)list->count : 0);
+}
+
+static bool List_ToArray(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    ListObject* list = AsList(a[0]);
+    u32 elem = ListElementType(in, list);
+    Value arr = in.NewArrayValue(elem, list ? list->count : 0);
+    if (arr.tag == VT_ARRAY && arr.data.array && list) {
+        for (u32 i = 0; i < list->count; ++i) {
+            arr.data.array->Elements()[i] = in.CopyValue(list->items[i]);
+        }
+    }
+    if (ret) *ret = arr;
+    return true;
 }
 
 static bool List_GetItem(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
@@ -1109,6 +1123,215 @@ static bool Rewired_GetButtonUp(Interpreter&, const MemberRefInfo&, u32 argc, Va
                         (g_rewired_buttons_prev & bit) != 0);
 }
 
+// Minimal Rewired runtime shim. Cuphead's initialization only needs the
+// player handles to exist before input is polled through the native bridge.
+static bool Rewired_ReInput_IsReady(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
+    return RetBool(ret, true);
+}
+static bool Rewired_ReInput_Players(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    u32 t = in.Metadata().FindType("Rewired.ReInput/PlayerHelper");
+    if (!t) t = in.Metadata().FindType("Rewired.ReInput.PlayerHelper");
+    if (!t) {
+        if (ret) *ret = Value::Null();
+        return true;
+    }
+    Object* o = in.AllocObjectWithSlots(t, 4);
+    if (ret) *ret = o ? Value::ObjectRef(o) : Value::Null();
+    return true;
+}
+static bool Rewired_PlayerHelper_GetPlayer(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    u32 t = in.Metadata().FindType("Rewired.Player");
+    if (!t) {
+        if (ret) *ret = Value::Null();
+        return true;
+    }
+    Object* o = in.AllocObjectWithSlots(t, 8);
+    if (o) {
+        s32 id = argc >= 2 ? Interpreter::ToI32(a[1]) : 0;
+        o->Fields()[0] = Value::I4(id);
+    }
+    if (ret) *ret = o ? Value::ObjectRef(o) : Value::Null();
+    return true;
+}
+static bool Rewired_Player_GetId(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = (a[0].tag == VT_OBJECT) ? a[0].data.obj : 0;
+    return RetI32(ret, o ? o->Fields()[0].data.i32 : 0);
+}
+static bool GogGalaxyManager_IsInitialized(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
+    // No Galaxy runtime is present on Xbox 360; online/achievement backends
+    // are a later platform task.
+    return RetBool(ret, false);
+}
+static bool JsonUtility_ToJson(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    if (ret) *ret = in.NewStringAscii("{}");
+    return true;
+}
+static bool JsonUtility_FromJson(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    u32 t = in.GenericArgType(0);
+    if (ret) *ret = t ? in.NewObjectValue(t) : Value::Null();
+    return true;
+}
+static bool String_Replace(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {    if (a[0].tag != VT_STRING) {
+        if (ret) *ret = Value::Null();
+        return true;
+    }
+    u32 n = StringLength(a[0]);
+    const u16* src = StringChars(a[0]);
+    if (a[1].tag == VT_STRING && a[2].tag == VT_STRING) {
+        u32 m = StringLength(a[1]);
+        u32 r = StringLength(a[2]);
+        const u16* old = StringChars(a[1]);
+        const u16* rep = StringChars(a[2]);
+        if (m == 0) {
+            if (ret) *ret = a[0];
+            return true;
+        }
+        Buffer<u16> out;
+        u32 i = 0;
+        while (i < n) {
+            bool match = (i + m <= n);
+            if (match) {
+                for (u32 j = 0; j < m; ++j) {
+                    if (src[i + j] != old[j]) { match = false; break; }
+                }
+            }
+            if (match) {
+                for (u32 j = 0; j < r; ++j) out.PushBack(rep[j]);
+                i += m;
+            } else {
+                out.PushBack(src[i]);
+                ++i;
+            }
+        }
+        if (ret) *ret = in.NewStringUtf16(out.Size() ? out.Data() : 0, out.Size());
+        return true;
+    }
+    if (a[1].tag == VT_I4 && a[2].tag == VT_I4) {
+        u16 oldc = (u16)a[1].data.i32;
+        u16 newc = (u16)a[2].data.i32;
+        u16* out = (u16*)MemAlloc((n + 1) * 2);
+        if (!out) return false;
+        for (u32 i = 0; i < n; ++i) out[i] = (src[i] == oldc) ? newc : src[i];
+        if (ret) *ret = in.NewStringUtf16(out, n);
+        MemFree(out);
+        return true;
+    }
+    if (ret) *ret = a[0];
+    return true;
+}
+
+struct PrefEntry {
+    char key[128];
+    char value[512];
+    bool used;
+};
+static PrefEntry g_prefs[32];
+
+static s32 PrefFind(const char* key) {
+    if (!key) return -1;
+    for (u32 i = 0; i < 32; ++i) {
+        if (g_prefs[i].used && strcmp(g_prefs[i].key, key) == 0) return (s32)i;
+    }
+    return -1;
+}
+static void PrefStore(const char* key, const char* value) {
+    if (!key) return;
+    s32 slot = PrefFind(key);
+    if (slot < 0) {
+        for (u32 i = 0; i < 32; ++i) {
+            if (!g_prefs[i].used) { slot = (s32)i; break; }
+        }
+    }
+    if (slot < 0) return;
+    PrefEntry& e = g_prefs[slot];
+    strncpy(e.key, key, sizeof(e.key) - 1);
+    e.key[sizeof(e.key) - 1] = 0;
+    strncpy(e.value, value ? value : "", sizeof(e.value) - 1);
+    e.value[sizeof(e.value) - 1] = 0;
+    e.used = true;
+}
+static bool PlayerPrefs_HasKey(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    const char* k = in.StringUtf8(a[0]);
+    char buf[128];
+    strncpy(buf, k ? k : "", sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    return RetBool(ret, PrefFind(buf) >= 0);
+}
+static bool PlayerPrefs_GetString(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    const char* k = in.StringUtf8(a[0]);
+    char buf[128];
+    strncpy(buf, k ? k : "", sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    s32 i = PrefFind(buf);
+    if (i >= 0) {
+        if (ret) *ret = in.NewStringUtf8(g_prefs[i].value);
+    } else if (argc >= 2) {
+        if (ret) *ret = a[1];
+    } else {
+        if (ret) *ret = in.NewStringAscii("");
+    }
+    return true;
+}
+static bool PlayerPrefs_SetString(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    const char* k = in.StringUtf8(a[0]);
+    char keybuf[128];
+    strncpy(keybuf, k ? k : "", sizeof(keybuf) - 1);
+    keybuf[sizeof(keybuf) - 1] = 0;
+    PrefStore(keybuf, in.StringUtf8(a[1]));
+    return RetVoid(ret);
+}
+static bool PlayerPrefs_GetInt(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    const char* k = in.StringUtf8(a[0]);
+    char buf[128];
+    strncpy(buf, k ? k : "", sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    s32 i = PrefFind(buf);
+    if (i >= 0) return RetI32(ret, atoi(g_prefs[i].value));
+    return RetI32(ret, argc >= 2 ? Interpreter::ToI32(a[1]) : 0);
+}
+static bool PlayerPrefs_SetInt(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    const char* k = in.StringUtf8(a[0]);
+    char keybuf[128];
+    strncpy(keybuf, k ? k : "", sizeof(keybuf) - 1);
+    keybuf[sizeof(keybuf) - 1] = 0;
+    char val[64];
+    sprintf(val, "%d", Interpreter::ToI32(a[1]));
+    PrefStore(keybuf, val);
+    return RetVoid(ret);
+}
+static bool PlayerPrefs_GetFloat(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    const char* k = in.StringUtf8(a[0]);
+    char buf[128];
+    strncpy(buf, k ? k : "", sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    s32 i = PrefFind(buf);
+    if (i >= 0) return RetF32(ret, (f32)atof(g_prefs[i].value));
+    return RetF32(ret, argc >= 2 ? Interpreter::ToF32(a[1]) : 0.0f);
+}
+static bool PlayerPrefs_SetFloat(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    const char* k = in.StringUtf8(a[0]);
+    char keybuf[128];
+    strncpy(keybuf, k ? k : "", sizeof(keybuf) - 1);
+    keybuf[sizeof(keybuf) - 1] = 0;
+    char val[64];
+    sprintf(val, "%.9g", Interpreter::ToF32(a[1]));
+    PrefStore(keybuf, val);
+    return RetVoid(ret);
+}
+static bool PlayerPrefs_DeleteKey(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    const char* k = in.StringUtf8(a[0]);
+    char buf[128];
+    strncpy(buf, k ? k : "", sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    s32 i = PrefFind(buf);
+    if (i >= 0) g_prefs[i].used = false;
+    return RetVoid(ret);
+}
+static bool PlayerPrefs_DeleteAll(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
+    for (u32 i = 0; i < 32; ++i) g_prefs[i].used = false;
+    return RetVoid(ret);
+}
+
 static const NativeEntry kEntries[] = {
     { "UnityEngine.Vector2", ".ctor", Vec2_Ctor },
     { "UnityEngine.Vector2", "get_x", Vec2_GetX },
@@ -1223,10 +1446,87 @@ static const NativeEntry kEntries[] = {
     { "Rewired.Player", "GetButton", Rewired_GetButton },
     { "Rewired.Player", "GetButtonDown", Rewired_GetButtonDown },
     { "Rewired.Player", "GetButtonUp", Rewired_GetButtonUp },
+    { "Rewired.Player", "get_id", Rewired_Player_GetId },
+    { "Rewired.ReInput", "get_isReady", Rewired_ReInput_IsReady },
+    { "Rewired.ReInput", "get_players", Rewired_ReInput_Players },
+    { "Rewired.ReInput/PlayerHelper", "GetPlayer", Rewired_PlayerHelper_GetPlayer },
+    { "Rewired.ReInput", "add_ControllerConnectedEvent", Native_Void },
+    { "Rewired.ReInput", "remove_ControllerConnectedEvent", Native_Void },
+    { "Rewired.ReInput", "add_ControllerDisconnectedEvent", Native_Void },
+    { "Rewired.ReInput", "remove_ControllerDisconnectedEvent", Native_Void },
+    { "Rewired.ReInput", "add_ControllerPreDisconnectEvent", Native_Void },
+    { "Rewired.ReInput", "remove_ControllerPreDisconnectEvent", Native_Void },
+    { "Galaxy.Api.IAuthListener", ".ctor", Native_Void },
+    { "GogGalaxyManager", "IsInitialized", GogGalaxyManager_IsInitialized },
+    { "Galaxy.Api.GogGalaxyManager", "IsInitialized", GogGalaxyManager_IsInitialized },
+    { "UnityEngine.JsonUtility", "ToJson", JsonUtility_ToJson },
+    { "UnityEngine.JsonUtility", "FromJson", JsonUtility_FromJson },
+    { "System.String", "Replace", String_Replace },
+    { "UnityEngine.PlayerPrefs", "HasKey", PlayerPrefs_HasKey },
+    { "UnityEngine.PlayerPrefs", "GetString", PlayerPrefs_GetString },
+    { "UnityEngine.PlayerPrefs", "SetString", PlayerPrefs_SetString },
+    { "UnityEngine.PlayerPrefs", "GetInt", PlayerPrefs_GetInt },
+    { "UnityEngine.PlayerPrefs", "SetInt", PlayerPrefs_SetInt },
+    { "UnityEngine.PlayerPrefs", "GetFloat", PlayerPrefs_GetFloat },
+    { "UnityEngine.PlayerPrefs", "SetFloat", PlayerPrefs_SetFloat },
+    { "UnityEngine.PlayerPrefs", "DeleteKey", PlayerPrefs_DeleteKey },
+    { "UnityEngine.PlayerPrefs", "DeleteAll", PlayerPrefs_DeleteAll },
+    { "UnityEngine.PlayerPrefs", "Save", Native_Void },
 };
 
 bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value* args, Value* ret) {
     if (ret) *ret = Value::Void();
+    {
+        const TypeInfo& mt = metadata_.Type(member.decl_id);
+        const char* tn = mt.full_name ? mt.full_name : "";
+        if (strncmp(tn, "System.Nullable`1", 16) == 0) {
+            if (strcmp(member.name, ".ctor") == 0) {
+                Object* o = AllocObjectWithSlots(member.decl_id, 2);
+                if (!o) return false;
+                Value v = (arg_count >= 2) ? args[1] : (arg_count ? args[0] : Value::Null());
+                o->Fields()[0] = v;
+                o->Fields()[1] = Value::I4(v.tag != VT_NULL ? 1 : 0);
+                if (ret) *ret = Value::StructRef(o);
+                return true;
+            }
+            if (strcmp(member.name, "get_HasValue") == 0) {
+                Object* o = (arg_count && args[0].tag == VT_STRUCT) ? args[0].data.obj : 0;
+                if (ret) *ret = Value::Bool(o && o->Fields()[1].data.i32 != 0);
+                return true;
+            }
+            if (strcmp(member.name, "get_Value") == 0 || strcmp(member.name, "GetValueOrDefault") == 0) {
+                Object* o = (arg_count && args[0].tag == VT_STRUCT) ? args[0].data.obj : 0;
+                if (ret) *ret = o ? o->Fields()[0] : Value::Null();
+                return true;
+            }
+        }
+        if (strncmp(tn, "AbstractLevelState`2", 20) == 0 && strcmp(member.name, ".ctor") == 0) {
+            return RetVoid(ret);
+        }
+        if (strncmp(tn, "AbstractLevelProperties`3", 24) == 0 && strcmp(member.name, ".ctor") == 0) {
+            u32 def = mt.generic_type_id ? mt.generic_type_id : member.decl_id;
+            if (arg_count >= 2) {
+                u32 f = metadata_.FindField(def, "TotalHealth");
+                if (f) SetField(f, args[0], args[1]);
+                f = metadata_.FindField(def, "<CurrentHealth>k__BackingField");
+                if (f) SetField(f, args[0], args[1]);
+            }
+            if (arg_count >= 3) {
+                u32 f = metadata_.FindField(def, "goalTimes");
+                if (f) SetField(f, args[0], args[2]);
+            }
+            if (arg_count >= 4) {
+                u32 f = metadata_.FindField(def, "states");
+                if (f) SetField(f, args[0], args[3]);
+            }
+            return RetVoid(ret);
+        }
+        if ((strncmp(tn, "AbstractLevelProperties`3", 24) == 0 ||
+             strncmp(tn, "AbstractLevelState`2", 20) == 0) &&
+            (strncmp(member.name, "add_", 4) == 0 || strncmp(member.name, "remove_", 7) == 0)) {
+            return RetVoid(ret);
+        }
+    }
     if (arg_count >= 1 && args[0].tag == VT_DELEGATE && args[0].data.del &&
         strcmp(member.name, "Invoke") == 0) {
         return InvokeDelegate(args[0].data.del, arg_count, args, ret);
@@ -1252,6 +1552,7 @@ bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value
         if (strcmp(n, ".ctor") == 0) return List_Ctor(*this, member, arg_count, args, ret);
         if (strcmp(n, "Add") == 0) return List_Add(*this, member, arg_count, args, ret);
         if (strcmp(n, "get_Count") == 0) return List_GetCount(*this, member, arg_count, args, ret);
+        if (strcmp(n, "ToArray") == 0) return List_ToArray(*this, member, arg_count, args, ret);
         if (strcmp(n, "get_Item") == 0) return List_GetItem(*this, member, arg_count, args, ret);
         if (strcmp(n, "set_Item") == 0) return List_SetItem(*this, member, arg_count, args, ret);
         if (strcmp(n, "Clear") == 0) return List_Clear(*this, member, arg_count, args, ret);
