@@ -909,7 +909,6 @@ static u32 InvokeCollisionOnObject(Interpreter& interp, MetadataPackage& pkg, Sc
     if (oi >= scene.ObjectCount()) return 0;
     const SceneObject& o = scene.Object(oi);
     u32 invoked = 0;
-    static u32 s_collision_logs = 0;
     for (u32 c = 0; c < o.component_count; ++c) {
         u32 ci = o.component_start + c;
         if (ci >= scene.ComponentCount()) break;
@@ -919,13 +918,6 @@ static u32 InvokeCollisionOnObject(Interpreter& interp, MetadataPackage& pkg, Sc
         if (self.tag != VT_OBJECT || !self.data.obj) continue;
         u32 m = FindMethodInHierarchy(pkg, self.data.obj->type_id, "OnTriggerEnter2D");
         if (!m) continue;
-        if (s_collision_logs < 24) {
-            u32 other_oi = OwnerObjectForComponent(scene, other_ci);
-            const char* other_name = (other_oi < scene.ObjectCount())
-                ? scene.Object(other_oi).name : "?";
-            LogInfo("collision", "%s [%s] <- %s", o.name, sc.controller, other_name);
-            ++s_collision_logs;
-        }
         Value args[2];
         args[0] = self;
         args[1] = interp.ManagedComponent(other_ci);
@@ -1517,6 +1509,14 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
                     const RuntimeCollider& ca = colliders[a];
                     const RuntimeCollider& cb = colliders[b];
                     if (ca.oi == cb.oi) continue;
+                    bool a_proj = ControllerHas(scene, ca.oi, "Projectile");
+                    bool b_proj = ControllerHas(scene, cb.oi, "Projectile");
+                    // Approximate the original collision layers: player
+                    // projectiles do not collide with each other or with the
+                    // player's own body colliders.
+                    if (a_proj && b_proj) continue;
+                    if (a_proj && ControllerHas(scene, cb.oi, "LevelPlayerController")) continue;
+                    if (b_proj && ControllerHas(scene, ca.oi, "LevelPlayerController")) continue;
                     if (ca.maxx < cb.minx || cb.maxx < ca.minx ||
                         ca.maxy < cb.miny || cb.maxy < ca.miny) continue;
                     u64 key = ColliderPairKey(ca.oi, cb.oi);
