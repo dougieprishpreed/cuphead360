@@ -19,7 +19,10 @@ the runtime now includes:
   `AbstractCollidableObject` / `CollisionChild` graph,
 - enum boxing/comparison, dictionary key/value enumerators, HashSet, String.Split
   and a broad set of Unity/BCL shims,
-- hierarchy parent resolution by object id.
+- hierarchy parent resolution by object id,
+- original Unity GameObject tags in `CHSC` and tag-based collision routing,
+- default-state Animator playback from the extracted `anim.chs` (84-106
+  controllers per prepared scene).
 
 Remaining gaps are still the reason this is **not** a fully playable alpha:
 UI/audio are still stubs, the original Animator state machine and animation

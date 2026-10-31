@@ -1,3 +1,26 @@
+## GameObject tags and collision routing
+
+The extractor now reads Unity `m_TagString` for scene and prefab objects and
+writes a parallel tag-offset table into `CHSC` (header word 24). The runtime
+binds those tags to `GameObject.tag` / `Component.CompareTag`, so the original
+`AbstractCollidableObject.checkCollision` routes walls, ground, enemies, player
+and projectile hits by their real Unity tags instead of name heuristics.
+
+Re-extracted tutorial and platforming 1-1F scenes after this change. Windows
+results:
+
+```
+tutorial --level PASS
+tutorial --levelplay 120 frames: start=-410,-270 max_x=1327.6 collisions=204 PASS
+tutorial instances: objects=1844 projectiles=24
+platforming --level PASS
+platforming --levelplay 100 frames: start=-520,-93 max_x=-209.7 collisions=104 PASS
+```
+
+The projectile count includes the 24 projectile templates emitted with the
+player prefab graph; end-to-end projectile damage/despawn and enemy behavior
+are still not validated.
+
 ## Animator default-state playback
 
 `--levelplay` now loads the extracted `anim.chs` alongside the scene and
