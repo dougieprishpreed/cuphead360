@@ -828,14 +828,24 @@ static u32 OwnerObjectForComponent(const Scene& scene, u32 ci) {
     return 0xFFFFFFFFu;
 }
 
+static u32 FindSceneObjectIndexById(const Scene& scene, u32 id) {
+    for (u32 i = 0; i < scene.ObjectCount(); ++i) {
+        if (scene.Object(i).id == id) return i;
+    }
+    return 0xFFFFFFFFu;
+}
+
 static bool SceneObjectActiveInHierarchy(const Scene& scene, u32 oi) {
     u32 cur = oi;
     u32 guard = 0;
     while (cur < scene.ObjectCount() && guard++ < 256) {
         const SceneObject& o = scene.Object(cur);
         if (!(o.flags & 1u)) return false;
-        if (o.parent == 0xFFFFFFFFu || o.parent == cur) break;
-        cur = o.parent;
+        u32 pid = o.parent;
+        if (pid == 0 || pid == 0xFFFFFFFFu || pid == o.id) break;
+        u32 pi = FindSceneObjectIndexById(scene, pid);
+        if (pi == 0xFFFFFFFFu || pi == cur) break;
+        cur = pi;
     }
     return oi < scene.ObjectCount();
 }
@@ -1025,15 +1035,8 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         // Prefer a player that is active in the hierarchy; the extracted
         // player prefab template is inactive and sits at the prefab position.
         u32 oi = interp.ManagedObjectIndexFor(v);
-        bool active = oi < scene.ObjectCount();
-        u32 cur = oi;
-        u32 guard = 0;
-        while (active && cur < scene.ObjectCount() && guard++ < 256) {
-            const SceneObject& o = scene.Object(cur);
-            if (!(o.flags & 1u)) { active = false; break; }
-            if (o.parent == 0xFFFFFFFFu || o.parent == cur) break;
-            cur = o.parent;
-        }
+        bool active = oi < scene.ObjectCount() &&
+                      SceneObjectActiveInHierarchy(scene, oi);
         if (active) {
             player = v;
             player_ci = ci;
@@ -1106,15 +1109,17 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     u32 cuphead_sr_ci = 0xFFFFFFFFu;
     for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
         const SceneObject& o = scene.Object(oi);
-        u32 cur = o.parent;
         bool under_player = (oi == player_oi);
+        u32 cur = oi;
         u32 guard = 0;
-        while (cur && guard++ < 256) {
-            if (cur == player_oi) { under_player = true; break; }
-            if (cur >= scene.ObjectCount()) break;
-            u32 next = scene.Object(cur).parent;
-            if (next == cur) break;
-            cur = next;
+        while (!under_player && cur < scene.ObjectCount() && guard++ < 256) {
+            const SceneObject& co = scene.Object(cur);
+            u32 pid = co.parent;
+            if (pid == 0 || pid == 0xFFFFFFFFu || pid == co.id) break;
+            u32 pi = FindSceneObjectIndexById(scene, pid);
+            if (pi == 0xFFFFFFFFu || pi == cur) break;
+            if (pi == player_oi) { under_player = true; break; }
+            cur = pi;
         }
         if (!under_player) continue;
         if (strcmp(o.name, "Cuphead") != 0 && oi != player_oi) continue;

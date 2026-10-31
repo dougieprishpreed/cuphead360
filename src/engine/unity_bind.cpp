@@ -819,8 +819,11 @@ static bool GameObject_GetActiveInHierarchy(Interpreter& in, const MemberRefInfo
         while (cur < scene->ObjectCount() && guard++ < 256) {
             const SceneObject& o = scene->Object(cur);
             if (!(o.flags & 1u)) return RetBoolV(ret, false);
-            if (o.parent == 0xFFFFFFFFu || o.parent == cur) break;
-            cur = o.parent;
+            u32 pid = o.parent;
+            if (pid == 0 || pid == 0xFFFFFFFFu || pid == o.id) break;
+            u32 pi = FindObjectIndexById(*scene, pid);
+            if (pi == 0xFFFFFFFFu || pi == cur) break;
+            cur = pi;
         }
         return RetBoolV(ret, true);
     }
@@ -1791,8 +1794,9 @@ bool Interpreter::CloneGameObject(u32 template_oi, Value* out_go) {
     if (!subtree.PushBack(template_oi)) return false;
     for (u32 i = 0; i < subtree.Size(); ++i) {
         u32 cur = subtree[i];
+        u32 cur_id = scene->Object(cur).id;
         for (u32 oi = 0; oi < scene->ObjectCount(); ++oi) {
-            if (oi == template_oi || scene->Object(oi).parent != cur) continue;
+            if (oi == template_oi || scene->Object(oi).parent != cur_id) continue;
             bool seen = false;
             for (u32 j = 0; j < subtree.Size(); ++j) {
                 if (subtree[j] == oi) { seen = true; break; }
@@ -1825,8 +1829,10 @@ bool Interpreter::CloneGameObject(u32 template_oi, Value* out_go) {
         o.component_start = scene->ComponentCount();
         o.component_count = 0;
         if (orig != template_oi) {
-            if (src.parent < obj_map.Size() && obj_map[src.parent] != kInvalid) {
-                o.parent = obj_map[src.parent];
+            u32 src_parent = FindObjectIndexById(*scene, src.parent);
+            if (src_parent != kInvalid && src_parent < obj_map.Size() &&
+                obj_map[src_parent] != kInvalid) {
+                o.parent = scene->Object(obj_map[src_parent]).id;
             }
         }
         u32 new_oi = scene->AddRuntimeObject(o);
@@ -2119,7 +2125,7 @@ static bool Object_Instantiate(Interpreter& in, const MemberRefInfo&, u32 argc, 
                     no.position[0] = p->x; no.position[1] = p->y; no.position[2] = p->z;
                 } else if (a[1].tag == VT_OBJECT) {
                     u32 poi = in.ManagedObjectIndexFor(a[1]);
-                    if (poi < scene->ObjectCount()) no.parent = poi;
+                    if (poi < scene->ObjectCount()) no.parent = scene->Object(poi).id;
                 } else if (a[1].tag == VT_VEC2 && a[1].data.ptr) {
                     const Vec2* p = (const Vec2*)a[1].data.ptr;
                     no.position[0] = p->x; no.position[1] = p->y;
