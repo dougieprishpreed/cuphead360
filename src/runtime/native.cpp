@@ -736,6 +736,47 @@ static bool List_Enumerator_Dispose(Interpreter&, const MemberRefInfo&, u32, Val
     return true;
 }
 
+static bool HashSet_Ctor(Interpreter& in, const MemberRefInfo& member, u32 argc, Value* a, Value* ret) {
+    return List_Ctor(in, member, argc, a, ret);
+}
+
+static bool HashSet_Add(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    ListObject* set = AsList(a[0]);
+    if (!set) return false;
+    for (u32 i = 0; i < set->count; ++i) {
+        if (ValueEqual(in, set->items[i], a[1])) return RetBool(ret, false);
+    }
+    if (!List_Ensure(in, set, set->count + 1)) return false;
+    set->items[set->count++] = in.CopyValue(a[1]);
+    return RetBool(ret, true);
+}
+
+static bool HashSet_Contains(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    ListObject* set = AsList(a[0]);
+    if (!set) return RetBool(ret, false);
+    for (u32 i = 0; i < set->count; ++i) {
+        if (ValueEqual(in, set->items[i], a[1])) return RetBool(ret, true);
+    }
+    return RetBool(ret, false);
+}
+
+static bool HashSet_Remove(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    ListObject* set = AsList(a[0]);
+    if (!set) return RetBool(ret, false);
+    for (u32 i = 0; i < set->count; ++i) {
+        if (ValueEqual(in, set->items[i], a[1])) {
+            for (u32 j = i; j + 1 < set->count; ++j) set->items[j] = set->items[j + 1];
+            --set->count;
+            return RetBool(ret, true);
+        }
+    }
+    return RetBool(ret, false);
+}
+
+static bool IsHashSetName(const char* name) {
+    return name && strncmp(name, "System.Collections.Generic.HashSet`1", 36) == 0;
+}
+
 static bool IsListName(const char* name) {
     return name && strncmp(name, "System.Collections.Generic.List`1", 33) == 0;
 }
@@ -1763,6 +1804,22 @@ bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value
                 return DictCollection_GetCount(*this, arg_count ? args[0] : Value::Null(), ret);
             }
         }
+    }
+    if (IsHashSetName(t.full_name)) {
+        const char* n = member.name;
+        if (strcmp(n, ".ctor") == 0) return HashSet_Ctor(*this, member, arg_count, args, ret);
+        if (strcmp(n, "Add") == 0) return HashSet_Add(*this, member, arg_count, args, ret);
+        if (strcmp(n, "Contains") == 0) return HashSet_Contains(*this, member, arg_count, args, ret);
+        if (strcmp(n, "Remove") == 0) return HashSet_Remove(*this, member, arg_count, args, ret);
+        if (strcmp(n, "get_Count") == 0) return List_GetCount(*this, member, arg_count, args, ret);
+        if (strcmp(n, "Clear") == 0) return List_Clear(*this, member, arg_count, args, ret);
+        if (strcmp(n, "GetEnumerator") == 0) return List_GetEnumerator(*this, member, arg_count, args, ret);
+    }
+    if (strstr(t.full_name, "HashSet`1") && strstr(t.full_name, "Enumerator")) {
+        const char* n = member.name;
+        if (strcmp(n, "MoveNext") == 0) return List_Enumerator_MoveNext(*this, member, arg_count, args, ret);
+        if (strcmp(n, "get_Current") == 0) return List_Enumerator_Current(*this, member, arg_count, args, ret);
+        if (strcmp(n, "Dispose") == 0) return List_Enumerator_Dispose(*this, member, arg_count, args, ret);
     }
     if (IsListName(t.full_name)) {
         const char* n = member.name;
