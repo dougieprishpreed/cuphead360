@@ -2861,6 +2861,8 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
             if (strcmp(n, "set_speed") == 0) return Animator_SetSpeed(in, member, argc, args, ret);
             if (strcmp(n, "get_speed") == 0) return Animator_GetSpeed(in, member, argc, args, ret);
             if (strcmp(n, "GetInteger") == 0) return RetI32V(ret, 0);
+            if (strcmp(n, "GetBool") == 0) return RetBoolV(ret, false);
+            if (strcmp(n, "GetFloat") == 0) return RetF32V(ret, 0.0f);
         }
         if (strcmp(n, "Play") == 0 || strcmp(n, "SetTrigger") == 0 || strcmp(n, "SetBool") == 0 ||
             strcmp(n, "SetInteger") == 0 || strcmp(n, "SetFloat") == 0) {

@@ -1106,6 +1106,35 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     InputInit();
     SoftRenderer renderer(1280, 720);
 
+    AnimationSet animations;
+    AnimationPlayer anim_player;
+    {
+        char anim_path[1024];
+        anim_path[0] = 0;
+        const char* scene_path = config.scene_path;
+        if (scene_path) {
+            u32 n = (u32)strlen(scene_path);
+            if (n < sizeof(anim_path) - 16) {
+                memcpy(anim_path, scene_path, n + 1);
+                for (s32 k = (s32)n - 1; k >= 0; --k) {
+                    if (anim_path[k] == '\\' || anim_path[k] == '/') {
+                        anim_path[k + 1] = 0;
+                        break;
+                    }
+                }
+                strcat(anim_path, "anim.chs");
+                if (animations.Load(anim_path)) {
+                    anim_player.Init(scene, animations);
+                    LogInfo("levelplay", "animation controllers=%u clips=%u frames=%u",
+                            animations.ControllerCount(), animations.ClipCount(),
+                            animations.FrameCount());
+                } else {
+                    LogWarn("levelplay", "animation load failed: %s", animations.LastError());
+                }
+            }
+        }
+    }
+
     u32 cuphead_sr_ci = 0xFFFFFFFFu;
     for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
         const SceneObject& o = scene.Object(oi);
@@ -1415,6 +1444,9 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
             extra_update_seen[ci] = 1;
         }
         extra_update_failed.Resize(extra_update_cis.Size());
+        // Advance the extracted Animator default states before the native
+        // player sprite bridge applies its locomotion frames.
+        if (animations.Loaded()) anim_player.Update(scene, animations, config.fixed_dt);
         // Dispatch Unity-style trigger enter events for overlapping 2D
         // colliders. Cuphead's AbstractCollidableObject hierarchy uses
         // OnTriggerEnter2D to route damage, pickups and projectile hits.

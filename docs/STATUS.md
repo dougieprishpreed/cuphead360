@@ -6,7 +6,28 @@ playable alpha release candidate with no content or behavior gaps versus the
 Windows version. This document records exactly what is implemented, what has
 been validated, and what remains.
 
-## 2026-10-31 Xbox revalidation
+## 2026-10-31 milestone: runtime, clone and collision
+
+Windows and Xbox 360 builds pass. The original tutorial and platforming 1-1F
+startup flows pass, the level-play harness drives the real player motor, and
+the runtime now includes:
+
+- true `Object.Instantiate` cloning for prefab hierarchies (player prefab
+  creation still reuses the extracted template),
+- active runtime component discovery with original `Start`/`Update` ticks,
+- 2D trigger collision dispatch into the original
+  `AbstractCollidableObject` / `CollisionChild` graph,
+- enum boxing/comparison, dictionary key/value enumerators, HashSet, String.Split
+  and a broad set of Unity/BCL shims,
+- hierarchy parent resolution by object id.
+
+Remaining gaps are still the reason this is **not** a fully playable alpha:
+UI/audio are still stubs, the original Animator state machine and animation
+events are not implemented, enemies/bosses/damage/parry/super/coins/death are
+not validated end-to-end, the player prefab clone path is disabled, only a
+small number of scenes have been prepared, physics is an AABB approximation,
+and no DLC/menus/saves/localization/cutscenes are present. The repository is a
+verified port foundation, not the requested complete game.
 
 The rebuilt XEX was re-run under Xenia Canary on the native tutorial play slice.
 It loaded 186 objects / 277 components, initialized D3D9, advanced through

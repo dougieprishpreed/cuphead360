@@ -1,3 +1,12 @@
+## Animator default-state playback
+
+`--levelplay` now loads the extracted `anim.chs` alongside the scene and
+advances the default Animator state of every extracted controller before the
+native player sprite bridge runs. On the tutorial scene this loads 84
+controllers / 304 clips / 6687 frames and drives 91 animator instances over 216
+sprite targets. Animator script parameters/transitions and animation events are
+still not implemented; only default states play.
+
 ## Xbox 360 / Xenia revalidation (2026-10-31)
 
 Rebuilt with `scripts\build_xbox360.bat Release`, copied the fresh
