@@ -1,0 +1,17 @@
+[INFO] [combat] enemy damage frame=12 result=0.00
+[INFO] [combat] enemy damage frame=40 result=0.00
+[INFO] [combat] enemy damage frame=68 result=0.00
+[INFO] [combat] tutorial target seen=1 active=0
+[INFO] [probe] health PlayerStatsManager.<HealthMax>k__BackingField ci=918 value=3 active=1
+[INFO] [probe] health PlayerStatsManager.<Health>k__BackingField ci=918 value=3 active=1
+[INFO] [levelplay] start=3000.0,81.0 max_x=3008.2 max_y=99.7 min_y=79.3 collisions=169 result=PASS
+--- after runtime fixes ---
+[INFO] [combat] diag player oi=962 components=16 receiver=PlayerDamageReceiver ci=917 enabled=0 flags=1 type=1 timer=-1.000 state=0 state_ok=1 getter=1 lookup=nonnull CanTakeDamage=1 health=3 damageSubscribers=4 dealer_type=DamageDealer damageTypes.Player=1 timers=0 rate=0.200
+[INFO] [combat] damage callback method=15825 target=LevelPlayerMotor health=-1
+[INFO] [combat] damage callback method=15969 target=LevelPlayerWeaponManager health=-1
+[INFO] [combat] damage callback method=17091 target=PlayerStatsManager health=2
+[INFO] [combat] damage callback method=15621 target=LevelPlayerAnimationController health=-1
+[INFO] [combat] enemy damage frame=12 result=1.00
+[INFO] [combat] diag player oi=962 components=16 receiver=PlayerDamageReceiver ci=917 enabled=0 flags=1 type=1 timer=2.000 state=1 state_ok=1 getter=1 lookup=nonnull CanTakeDamage=0 health=2 damageSubscribers=4 dealer_type=DamageDealer damageTypes.Player=1 timers=1 rate=0.200
+[INFO] [probe] health PlayerStatsManager.<HealthMax>k__BackingField ci=918 value=3 active=1
+[INFO] [probe] health PlayerStatsManager.<Health>k__BackingField ci=918 value=2 active=1

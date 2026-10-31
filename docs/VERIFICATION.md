@@ -1,4 +1,105 @@
-## M1 combat probe (2026-10-31)
+## 2026-10-31 player-damage engine checkpoint (scope corrected)
+
+This is a checkpoint for the port runtime, not normal tutorial gameplay and
+not M1 completion. `TutorialLevel` has no authored attack which damages the
+player; `--combat-test` intentionally calls the original
+`DamageDealer.NewEnemy()` and `DamageDealer.DealDamage(player)` methods to
+exercise the game's damage, receiver, stats, hit, and death code.
+
+Windows build and run:
+
+```text
+scripts\build_win32.bat Release
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_level\scene.chs --levelplay --combat-test ^
+  --frames 272 --headless --screenshot work\m1_combat_checkpoint ^
+  --probe-fields --log work\m1_checkpoint_combat.log
+```
+
+Observed process exit code:
+
+```text
+EXIT=0
+```
+
+Key output:
+
+```text
+[combat] probe begin playerHealth=3 targetHealth=20 targetCi=182
+[combat] hit1-first invoke=1 returned=1.00 health=2
+[combat] hit1-repeat-same-dealer invoke=1 returned=0.00 health=2
+[combat] hit1-iframes-fresh-dealer invoke=1 returned=1.00 health=2
+[combat] hit2-after-iframes invoke=1 returned=1.00 health=1
+[combat] hit3-lethal invoke=1 returned=1.00 health=0
+[combat] target health initial=20 final=-4 trackedInactive=1
+[combat] sequence firstHit=1 sameDealerBlock=1 freshDealerIFrameBlock=1 postIFrameHit=1 lethal=1 finalHealth=0
+PASS
+[combat] single-player retry=UNPROVEN requestPropagated=0
+[probe] health PlayerStatsManager.<Health>k__BackingField ci=918 value=0 active=0
+[levelplay] ... result=PASS
+```
+
+Historical receiver diagnosis excerpts are preserved in
+[`evidence/m1-player-damage-diagnosis.txt`](evidence/m1-player-damage-diagnosis.txt).
+They show a non-null `PlayerDamageReceiver`, `CanTakeDamage=1`,
+`DamageTypes.Player=true`, and initialized dealer timers. The excerpt's
+`enabled=0 flags=1` fields are inconsistent with the current helper's enabled-bit
+calculation; do not use that historical line as a current enabled-state oracle.
+The investigation changed activity/enabled handling and float comparisons.
+The lead's unresolved review findings are in
+[`PAUSED_HANDOFF.md`](PAUSED_HANDOFF.md).
+
+HUD evidence was captured from the same run:
+
+- [`health3`](evidence/m1-hud.health3.png)
+- [`health2`](evidence/m1-hud.health2.png)
+- [`health1`](evidence/m1-hud.health1.png)
+- [`health0`](evidence/m1-hud.health0.png)
+
+The compact combat transcript is
+[`evidence/m1-checkpoint-combat.txt`](evidence/m1-checkpoint-combat.txt).
+The captures validate changing HUD rectangles, but also show major scene
+rendering artifacts, including atlas-like character art in the death capture.
+They do not validate visual gameplay parity.
+
+Normal tutorial regression after the final stabilization:
+
+```text
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_level\scene.chs --levelplay --frames 60 ^
+  --headless --log work\checkpoint_tutorial_play_fixed2.log
+
+[levelplay] start=-410.0,-270.0 max_x=80.0 ... result=PASS
+```
+
+Tutorial `--level` passed before the final offline-achievement no-op. The Xbox
+360 Release build also passes:
+
+```text
+scripts\build_xbox360.bat Release
+Xbox 360 build OK: build\xbox360\default.xex
+```
+
+Original single-player retry is not verified. The probe invokes the original
+`LevelGameOverGUI.Retry()` and reaches `SceneLoader.ReloadLevel()`, but the
+current incomplete transition stack leaves `SceneLoader.SceneName` unset. The
+checkpoint deliberately reports `UNPROVEN`; it does not reset health or use
+player revive as a substitute. This must be completed through the normal
+opening-flow scene loader and boss accept/reject work.
+
+Audio remains a muted headless-stub path. Manual shoot input is now wired to
+the existing Rewired action through keyboard `J` and Xbox right trigger, but
+has not been interactively play-tested.
+
+Not run before the requested checkpoint pause:
+
+- full platforming 1-1F `--level` / `--levelplay` regression;
+- Train, Frogs, Flower and Veggies boot/play regressions;
+- real-hardware Xbox execution;
+- normal new-game, house, map, dialogue, Root Pack, retry, victory, and map
+  return flows.
+
+## Historical enemy-only combat probe (superseded)
 
 Implemented and tested the enemy-side combat loop on the Windows build:
 
@@ -46,11 +147,9 @@ Observed:
 [levelplay] start=-410.0,-270.0 max_x=938.7 ... result=PASS
 ```
 
-Caveats: the synthetic enemy-damage attempt returns `0.0` and player health
-remains `3`; invulnerability/death/respawn, HUD rendering, audio and real
-Rewired shoot input are still not validated. This proves the enemy
-`DamageDealer` -> `DamageReceiver` target path and target destruction, not
-the complete M1 loop.
+Caveat at the time: the synthetic enemy-damage attempt returned `0.0` and
+player health remained `3`. This historical result was superseded by the
+player-damage engine checkpoint above and did not demonstrate retry.
 
 ## Train boss scene boot (2026-10-31)
 

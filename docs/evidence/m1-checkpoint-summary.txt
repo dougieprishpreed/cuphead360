@@ -1,0 +1,13 @@
+Windows Release build: PASS
+Xbox 360 Release/XEX build: PASS
+Synthetic tutorial combat checkpoint: PASS; exit 0
+Target boxHealth: 20 -> -4; tracked target inactive: yes
+Player Health: 3 -> 2 -> 1 -> 0
+Same dealer cooldown block: PASS
+Fresh dealer player i-frame block: PASS
+Death callback reached: PASS
+HUD captures: health 3,2,1,0
+Original single-player retry: UNPROVEN (SceneLoader.SceneName unset)
+Normal tutorial --levelplay 60: PASS start=-410,-270 max_x=80
+Audio: muted headless stub
+Full boss/platforming regression campaign: NOT RUN due checkpoint pause

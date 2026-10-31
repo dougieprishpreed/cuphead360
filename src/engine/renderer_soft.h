@@ -25,9 +25,11 @@ public:
 
     void Clear(f32 r, f32 g, f32 b, f32 a);
     void DrawScene(const Scene& scene);
+    void DrawHealthHud(s32 health, s32 health_max);
     bool SaveBmp(const char* path) const;
 
 private:
+    void FillRect(s32 x, s32 y, s32 w, s32 h, u32 rgba);
     void DrawSprite(const SceneSprite& sprite, const SceneTexture& texture,
                     f32 x, f32 y, f32 w, f32 h, const f32 color[4],
                     bool flip_x, bool flip_y);

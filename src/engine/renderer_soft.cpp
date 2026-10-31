@@ -33,6 +33,35 @@ void SoftRenderer::Clear(f32 r, f32 g, f32 b, f32 a) {
     for (u32 i = 0; i < width_ * height_; ++i) pixels_[i] = color;
 }
 
+void SoftRenderer::FillRect(s32 x, s32 y, s32 w, s32 h, u32 rgba) {
+    if (!pixels_ || w <= 0 || h <= 0) return;
+    s32 right = x + w;
+    s32 bottom = y + h;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (right > (s32)width_) right = (s32)width_;
+    if (bottom > (s32)height_) bottom = (s32)height_;
+    for (s32 py = y; py < bottom; ++py) {
+        u32* row = pixels_ + py * width_;
+        for (s32 px = x; px < right; ++px) row[px] = rgba;
+    }
+}
+
+void SoftRenderer::DrawHealthHud(s32 health, s32 health_max) {
+    if (health_max <= 0 || health_max > 9) health_max = 3;
+    if (health < 0) health = 0;
+    const s32 x = 24, y = 24, slot_w = 44, slot_h = 24, gap = 8;
+    FillRect(x - 4, y - 4, health_max * (slot_w + gap) + 4, slot_h + 8,
+             PackRGBA(0.04f, 0.04f, 0.05f, 0.82f));
+    for (s32 i = 0; i < health_max; ++i) {
+        s32 sx = x + i * (slot_w + gap);
+        FillRect(sx, y, slot_w, slot_h, PackRGBA(0.95f, 0.93f, 0.88f, 1.0f));
+        FillRect(sx + 3, y + 3, slot_w - 6, slot_h - 6,
+                 i < health ? PackRGBA(0.88f, 0.08f, 0.06f, 1.0f)
+                            : PackRGBA(0.18f, 0.06f, 0.06f, 1.0f));
+    }
+}
+
 static bool CompareDraw(const SoftRenderer::DrawItem& a, const SoftRenderer::DrawItem& b) {
     if (a.layer != b.layer) return a.layer < b.layer;
     if (a.order != b.order) return a.order < b.order;

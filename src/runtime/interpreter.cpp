@@ -79,6 +79,35 @@ static s64 NumI64(const Value& v) {
     }
 }
 
+static bool NumericCompare(u32 op, const Value& a, const Value& b) {
+    if (a.tag == VT_R4 || a.tag == VT_R8 || b.tag == VT_R4 || b.tag == VT_R8) {
+        f64 x = NumF64(a), y = NumF64(b);
+        switch (op) {
+            case 0x2E: case 0x3B: return x == y;
+            case 0x2F: case 0x3C: case 0x34: case 0x41: return x >= y;
+            case 0x30: case 0x3D: case 0x35: case 0x42: return x > y;
+            case 0x31: case 0x3E: case 0x36: case 0x43: return x <= y;
+            case 0x32: case 0x3F: case 0x37: case 0x44: return x < y;
+            case 0x33: case 0x40: return x != y;
+            default: return false;
+        }
+    }
+    s64 x = NumI64(a), y = NumI64(b);
+    switch (op) {
+        case 0x2E: case 0x3B: return x == y;
+        case 0x2F: case 0x3C: return x >= y;
+        case 0x30: case 0x3D: return x > y;
+        case 0x31: case 0x3E: return x <= y;
+        case 0x32: case 0x3F: return x < y;
+        case 0x33: case 0x40: return x != y;
+        case 0x34: case 0x41: return (u64)x >= (u64)y;
+        case 0x35: case 0x42: return (u64)x > (u64)y;
+        case 0x36: case 0x43: return (u64)x <= (u64)y;
+        case 0x37: case 0x44: return (u64)x < (u64)y;
+        default: return false;
+    }
+}
+
 static Value ConvertTag(const Value& v, u32 tag) {
     switch (tag) {
         case VT_BOOL: return Value::Bool(NumI64(v) != 0);
@@ -597,6 +626,18 @@ bool Interpreter::InvokeDelegate(DelegateObject* d, u32 arg_count, Value* args, 
         }
         Value r = Value::Void();
         if (!Invoke(target_method, call_args, argc, &r)) return false;
+        if (strcmp(m.name, "OnDamageTaken") == 0) {
+            const char* target_name = "<none>";
+            s32 health = -1;
+            if (cur->target.tag == VT_OBJECT && cur->target.data.obj) {
+                u32 target_type = cur->target.data.obj->type_id;
+                target_name = metadata_.Type(target_type).full_name;
+                u32 health_field = metadata_.FindField(target_type, "<Health>k__BackingField");
+                if (health_field) health = ToI32(GetField(health_field, cur->target));
+            }
+            LogInfo("combat", "damage callback method=%u target=%s health=%d",
+                    target_method, target_name, health);
+        }
         if (first && ret) *ret = r;
         first = false;
     }
@@ -747,6 +788,11 @@ bool Interpreter::GetExternalField(const MemberRefInfo& member, const Value& ins
     Value obj = DerefValue(instance);
     const TypeInfo& t = metadata_.Type(member.decl_id);
     const char* n = member.name;
+    if (strcmp(t.full_name, "Rewired.Player") == 0 && strcmp(n, "controllers") == 0) {
+        u32 helper = metadata_.FindType("Rewired.Player/ControllerHelper");
+        if (out) *out = helper ? NewObjectValue(helper) : Value::Null();
+        return helper != 0;
+    }
     if (strcmp(t.full_name, "UnityEngine.Vector2") == 0 && obj.tag == VT_VEC2 && obj.data.ptr) {
         const Vec2* v = (const Vec2*)obj.data.ptr;
         if (strcmp(n, "x") == 0) { if (out) *out = Value::R4(v->x); return true; }
@@ -1259,20 +1305,7 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
             case 0x36: case 0x37: {
                 s8 off = (s8)code[pc++];
                 Value b, a; POP2(b, a);
-                s64 x = NumI64(a), y = NumI64(b);
-                bool take = false;
-                switch (op) {
-                    case 0x2E: take = x == y; break;
-                    case 0x2F: take = x >= y; break;
-                    case 0x30: take = x > y; break;
-                    case 0x31: take = x <= y; break;
-                    case 0x32: take = x < y; break;
-                    case 0x33: take = x != y; break;
-                    case 0x34: take = (u64)x >= (u64)y; break;
-                    case 0x35: take = (u64)x > (u64)y; break;
-                    case 0x36: take = (u64)x <= (u64)y; break;
-                    case 0x37: take = (u64)x < (u64)y; break;
-                }
+                bool take = NumericCompare(op, a, b);
                 if (take) BRANCH(off);
                 break;
             }
@@ -1284,20 +1317,7 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
             case 0x43: case 0x44: {
                 s32 off = ReadS32LE(code + pc); pc += 4;
                 Value b, a; POP2(b, a);
-                s64 x = NumI64(a), y = NumI64(b);
-                bool take = false;
-                switch (op) {
-                    case 0x3B: take = x == y; break;
-                    case 0x3C: take = x >= y; break;
-                    case 0x3D: take = x > y; break;
-                    case 0x3E: take = x <= y; break;
-                    case 0x3F: take = x < y; break;
-                    case 0x40: take = x != y; break;
-                    case 0x41: take = (u64)x >= (u64)y; break;
-                    case 0x42: take = (u64)x > (u64)y; break;
-                    case 0x43: take = (u64)x <= (u64)y; break;
-                    case 0x44: take = (u64)x < (u64)y; break;
-                }
+                bool take = NumericCompare(op, a, b);
                 if (take) BRANCH(off);
                 break;
             }

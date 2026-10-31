@@ -23,6 +23,7 @@ InputState InputRead() {
         s.axis_y = (f32)xs.Gamepad.sThumbLY / 32767.0f;
         s.jump_held = (xs.Gamepad.wButtons & XINPUT_GAMEPAD_A) != 0;
         s.jump_pressed = s.jump_held && !g_prev.jump_held;
+        s.shoot_held = xs.Gamepad.bRightTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD;
         s.dash_pressed = (xs.Gamepad.wButtons & XINPUT_GAMEPAD_X) != 0 && !g_prev.dash_pressed;
         s.start_pressed = (xs.Gamepad.wButtons & XINPUT_GAMEPAD_START) != 0;
         if (xs.Gamepad.wButtons & XINPUT_GAMEPAD_BACK) s.quit_pressed = true;
@@ -34,6 +35,7 @@ InputState InputRead() {
     if (GetAsyncKeyState('S') & 0x8000) s.axis_y -= 1.0f;
     s.jump_held = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
     s.jump_pressed = s.jump_held && !g_prev.jump_held;
+    s.shoot_held = (GetAsyncKeyState('J') & 0x8000) != 0;
     bool dash = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
     s.dash_pressed = dash && !g_prev.dash_pressed;
     s.start_pressed = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;

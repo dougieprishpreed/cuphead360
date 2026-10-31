@@ -37,8 +37,16 @@ static bool Mathf_Lerp(Interpreter&, const MemberRefInfo&, u32, Value* a, Value*
 static bool Mathf_LerpUnclamped(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
     return RetF32(ret, a[0].data.f32 + (a[1].data.f32 - a[0].data.f32) * a[2].data.f32);
 }
-static bool Mathf_Clamp(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
-    return RetF32(ret, Clampf(a[0].data.f32, a[1].data.f32, a[2].data.f32));
+static bool Mathf_Clamp(Interpreter& in, const MemberRefInfo& member, u32, Value* a, Value* ret) {
+    const MethodSigInfo& ms = in.Metadata().MethodSig(member.sig_index);
+    u32 kind = in.Metadata().Sig(ms.return_sig).kind;
+    if (kind == SIG_I4) {
+        s32 v = Interpreter::ToI32(a[0]), lo = Interpreter::ToI32(a[1]);
+        s32 hi = Interpreter::ToI32(a[2]);
+        return RetI32(ret, v < lo ? lo : (v > hi ? hi : v));
+    }
+    return RetF32(ret, Clampf(Interpreter::ToF32(a[0]), Interpreter::ToF32(a[1]),
+                              Interpreter::ToF32(a[2])));
 }
 static bool Mathf_Clamp01(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
     return RetF32(ret, Clamp01f(a[0].data.f32));
@@ -1173,6 +1181,18 @@ static bool Type_GetTypeFromHandle(Interpreter& in, const MemberRefInfo&, u32, V
     return RetI32(ret, (s32)tid);
 }
 
+static bool Object_GetType(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 tid = 0;
+    if ((a[0].tag == VT_OBJECT || a[0].tag == VT_STRUCT) && a[0].data.obj) {
+        tid = a[0].data.obj->type_id;
+    } else if (a[0].tag == VT_STRING) {
+        tid = in.StringTypeId();
+    } else if (a[0].tag == VT_ARRAY && a[0].data.array) {
+        tid = a[0].data.array->element_type;
+    }
+    return RetI32(ret, (s32)tid);
+}
+
 static bool Type_GetName(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     u32 tid = (u32)Interpreter::ToI32(a[0]);
     const char* name = (tid && tid <= in.Metadata().TypeCount())
@@ -1249,6 +1269,40 @@ static bool Enum_GetValues(Interpreter& in, const MemberRefInfo&, u32, Value* a,
     }
     if (ret) *ret = arr;
     return true;
+}
+
+static bool EnumUtils_TryParse(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    u32 tid = in.GenericArgType(0);
+    if (!tid || tid > in.Metadata().TypeCount() || argc < 2 ||
+        a[0].tag != VT_STRING) return RetBool(ret, false);
+    const TypeInfo& t = in.Metadata().Type(tid);
+    if (!t.is_enum) return RetBool(ret, false);
+    const char* text = in.StringUtf8(a[0]);
+    s64 first_value = 0;
+    s64 selected_value = 0;
+    bool have_first = false;
+    bool matched = false;
+    for (u32 i = 0; i < t.field_count; ++i) {
+        u32 fid = t.field_start + i;
+        const FieldInfo& f = in.Metadata().Field(fid);
+        if (!(f.flags & FIELD_FLAG_LITERAL) || strcmp(f.name, "value__") == 0) continue;
+        s64 value = 0;
+        if (!in.Metadata().FieldConstant(fid, &value)) continue;
+        if (!have_first) { first_value = value; have_first = true; }
+        if (strcmp(f.name, text ? text : "") == 0) {
+            selected_value = value;
+            matched = true;
+            break;
+        }
+    }
+    if (!matched && !have_first) return RetBool(ret, false);
+    Value enum_value = in.NewObjectValue(tid);
+    if ((enum_value.tag == VT_OBJECT || enum_value.tag == VT_STRUCT) && enum_value.data.obj &&
+        enum_value.data.obj->slots > 0) {
+        enum_value.data.obj->Fields()[0] = Value::I4((s32)(matched ? selected_value : first_value));
+    }
+    if (a[1].tag == VT_BYREF && a[1].data.ref) *a[1].data.ref = enum_value;
+    return RetBool(ret, matched);
 }
 
 static bool Interlocked_CompareExchange(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
@@ -1411,6 +1465,32 @@ static bool Rewired_PlayerHelper_GetPlayer(Interpreter& in, const MemberRefInfo&
 static bool Rewired_Player_GetId(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     Object* o = (a[0].tag == VT_OBJECT) ? a[0].data.obj : 0;
     return RetI32(ret, o ? o->Fields()[0].data.i32 : 0);
+}
+static bool Rewired_GetEmptyJoysticks(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    u32 list_type = in.Metadata().FindType("System.Collections.Generic.List`1<Rewired.Joystick>");
+    u32 joystick_type = in.Metadata().FindType("Rewired.Joystick");
+    ListObject* list = (ListObject*)in.TrackAllocation(MemAlloc(sizeof(ListObject)));
+    if (!list) return false;
+    memset(list, 0, sizeof(ListObject));
+    list->type_id = list_type;
+    list->element_type = joystick_type;
+    if (ret) *ret = Value::ObjectRef((Object*)list);
+    return true;
+}
+static bool PlayerEvent_Shared(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    u32 concrete = in.GenericArgType(0);
+    Value event = concrete ? in.NewObjectValue(concrete) : Value::Null();
+    if (event.tag == VT_OBJECT && event.data.obj && argc >= 2) {
+        u32 cur = concrete;
+        u32 player_field = 0;
+        for (u32 guard = 0; cur && guard < 64 && !player_field; ++guard) {
+            player_field = in.Metadata().FindField(cur, "<playerId>k__BackingField");
+            if (!player_field) cur = in.Metadata().Type(cur).base_id;
+        }
+        if (player_field) in.SetField(player_field, event, a[1]);
+    }
+    if (ret) *ret = event;
+    return true;
 }
 static bool GogGalaxyManager_IsInitialized(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
     // No Galaxy runtime is present on Xbox 360; online/achievement backends
@@ -1715,11 +1795,13 @@ static const NativeEntry kEntries[] = {
     { "System.Delegate", "Remove", Delegate_Remove },
     { "System.MulticastDelegate", "CombineImpl", Delegate_Combine },
     { "System.Type", "GetTypeFromHandle", Type_GetTypeFromHandle },
+    { "System.Object", "GetType", Object_GetType },
     { "System.Type", "get_Name", Type_GetName },
     { "System.Type", "get_FullName", Type_GetName },
     { "System.Type", "get_IsEnum", Type_GetIsEnum },
     { "System.Type", "get_IsValueType", Type_GetIsValueType },
     { "System.Enum", "GetValues", Enum_GetValues },
+    { "EnumUtils", "TryParse", EnumUtils_TryParse },
     { "System.Enum", "ToString", Object_ToString },
     { "System.Threading.Interlocked", "CompareExchange", Interlocked_CompareExchange },
     { "System.Runtime.CompilerServices.RuntimeHelpers", "InitializeArray", RuntimeHelpers_InitializeArray },
@@ -1750,8 +1832,11 @@ static const NativeEntry kEntries[] = {
     { "Rewired.Player", "GetButtonDown", Rewired_GetButtonDown },
     { "Rewired.Player", "GetButtonUp", Rewired_GetButtonUp },
     { "Rewired.Player", "get_id", Rewired_Player_GetId },
+    { "Rewired.Player/ControllerHelper", "get_Joysticks", Rewired_GetEmptyJoysticks },
     { "Rewired.ReInput", "get_isReady", Rewired_ReInput_IsReady },
     { "Rewired.ReInput", "get_players", Rewired_ReInput_Players },
+    { "Rewired.ReInput/ControllerHelper", "get_Joysticks", Rewired_GetEmptyJoysticks },
+    { "PlayerEvent`1", "Shared", PlayerEvent_Shared },
     { "Rewired.ReInput/PlayerHelper", "GetPlayer", Rewired_PlayerHelper_GetPlayer },
     { "Rewired.ReInput", "add_ControllerConnectedEvent", Native_Void },
     { "Rewired.ReInput", "remove_ControllerConnectedEvent", Native_Void },
@@ -1762,6 +1847,8 @@ static const NativeEntry kEntries[] = {
     { "Galaxy.Api.IAuthListener", ".ctor", Native_Void },
     { "GogGalaxyManager", "IsInitialized", GogGalaxyManager_IsInitialized },
     { "Galaxy.Api.GogGalaxyManager", "IsInitialized", GogGalaxyManager_IsInitialized },
+    { "OnlineInterface", "UnlockAchievement", Native_Void },
+    { "OnlineInterfaceGog", "UnlockAchievement", Native_Void },
     { "UnityEngine.JsonUtility", "ToJson", JsonUtility_ToJson },
     { "UnityEngine.JsonUtility", "FromJson", JsonUtility_FromJson },
     { "System.String", "Replace", String_Replace },
@@ -1915,6 +2002,17 @@ bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value
         if (strcmp(n, "MoveNext") == 0) return List_Enumerator_MoveNext(*this, member, arg_count, args, ret);
         if (strcmp(n, "get_Current") == 0) return List_Enumerator_Current(*this, member, arg_count, args, ret);
         if (strcmp(n, "Dispose") == 0) return List_Enumerator_Dispose(*this, member, arg_count, args, ret);
+    }
+    if (strstr(t.full_name, "IEnumerable`1") && strcmp(member.name, "GetEnumerator") == 0) {
+        return List_GetEnumerator(*this, member, arg_count, args, ret);
+    }
+    if (strcmp(t.full_name, "System.Collections.IEnumerator") == 0) {
+        if (strcmp(member.name, "MoveNext") == 0) return List_Enumerator_MoveNext(*this, member, arg_count, args, ret);
+        if (strcmp(member.name, "get_Current") == 0) return List_Enumerator_Current(*this, member, arg_count, args, ret);
+        if (strcmp(member.name, "Dispose") == 0) return List_Enumerator_Dispose(*this, member, arg_count, args, ret);
+    }
+    if (strstr(t.full_name, "PlayerEvent`1<") && strcmp(member.name, "Shared") == 0) {
+        return PlayerEvent_Shared(*this, member, arg_count, args, ret);
     }
     if (IsListName(t.full_name)) {
         const char* n = member.name;

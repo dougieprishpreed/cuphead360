@@ -1,0 +1,154 @@
+[INFO] [levelplay] animation controllers=87 clips=310 frames=6784
+[INFO] [levelplay] player=Player sprite=927 frames idle=5 run=16 jump=34 dash=12
+[INFO] [levelplay] additional update scripts=27
+[INFO] [levelplay] player LevelInit invoked
+[INFO] [levelplay] player LevelStart invoked
+[INFO] [combat] probe begin playerHealth=3 targetHealth=20 targetCi=182
+[INFO] [combat] audio=muted xaudioOutput=disabled evidence=headless-stub
+[INFO] [levelplay] update AnimationHelper ci=25 fixed=0 update=2901
+[INFO] [levelplay] update TutorialPlayerDeathEffect ci=26 fixed=0 update=12478
+[INFO] [levelplay] update HitFlash ci=184 fixed=0 update=4050
+[INFO] [levelplay] update TutorialLevelDoor ci=214 fixed=4490 update=0
+[INFO] [levelplay] update AnimationHelper ci=260 fixed=0 update=2901
+[INFO] [levelplay] update LevelCoin ci=261 fixed=0 update=4939
+[INFO] [levelplay] update CupheadLevelCamera ci=295 fixed=0 update=3345
+[INFO] [levelplay] update LevelPlayerAnimationController ci=914 fixed=0 update=15585
+[INFO] [levelplay] update LevelPlayerWeaponManager ci=915 fixed=15964 update=0
+[INFO] [levelplay] update LevelPlayerShadow ci=916 fixed=0 update=15931
+[INFO] [levelplay] update PlayerDamageReceiver ci=917 fixed=0 update=16933
+[INFO] [levelplay] update PlayerStatsManager ci=918 fixed=17083 update=0
+[INFO] [levelplay] update LevelPlayerColliderManager ci=919 fixed=15687 update=0
+[INFO] [levelplay] update PlayerCameraController ci=920 fixed=0 update=16926
+[INFO] [levelplay] update AnimationHelper ci=923 fixed=0 update=2901
+[INFO] [levelplay] update Vibrator ci=2194 fixed=0 update=4470
+[INFO] [levelplay] update WeaponPeashot ci=2323 fixed=0 update=16191
+[INFO] [levelplay] update WeaponSpread ci=2324 fixed=0 update=16191
+[INFO] [levelplay] update WeaponArc ci=2325 fixed=0 update=16191
+[INFO] [levelplay] update WeaponHoming ci=2326 fixed=16413 update=16191
+[INFO] [levelplay] update WeaponExploder ci=2327 fixed=0 update=16191
+[INFO] [levelplay] update WeaponBoomerang ci=2328 fixed=0 update=16191
+[INFO] [levelplay] update WeaponCharge ci=2329 fixed=16322 update=16191
+[INFO] [levelplay] update WeaponBouncer ci=2330 fixed=0 update=16191
+[INFO] [levelplay] update WeaponWideShot ci=2331 fixed=0 update=16191
+[INFO] [levelplay] update WeaponUpshot ci=2332 fixed=0 update=16191
+[INFO] [levelplay] update WeaponCrackshot ci=2333 fixed=0 update=16191
+[INFO] [levelplay] frame=0 pos=3008.17,81.00
+[INFO] [combat] hud screenshot health=3 path=work\m1_combat_checkpoint.health3.bmp
+[INFO] [levelplay] dynamic projectile ci=2590 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=2665 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [combat] diag player oi=962 components=16 receiver=PlayerDamageReceiver ci=917 enabled=1 flags=1 type=1 timer=-1.000 state=0 state_ok=1 getter=1 lookup=nonnull CanTakeDamage=1 health=3 damageSubscribers=4 dealer_type=DamageDealer damageTypes.Player=1 timers=0 rate=0.200
+[INFO] [combat] player GameObject.GetComponent<DamageReceiver> oi=962 found=1 ci=917 type=PlayerDamageReceiver
+[INFO] [combat] damage callback method=15825 target=LevelPlayerMotor health=-1
+[INFO] [combat] damage callback method=15969 target=LevelPlayerWeaponManager health=-1
+[INFO] [combat] damage callback method=17091 target=PlayerStatsManager health=2
+[INFO] [combat] damage callback method=15621 target=LevelPlayerAnimationController health=-1
+[INFO] [combat] hit1-first invoke=1 returned=1.00 health=2
+[INFO] [combat] hud screenshot health=2 path=work\m1_combat_checkpoint.health2.bmp
+[INFO] [combat] diag player oi=962 components=16 receiver=PlayerDamageReceiver ci=917 enabled=1 flags=1 type=1 timer=1.983 state=1 state_ok=1 getter=1 lookup=nonnull CanTakeDamage=0 health=2 damageSubscribers=4 dealer_type=DamageDealer damageTypes.Player=1 timers=1 rate=0.200
+[INFO] [combat] player GameObject.GetComponent<DamageReceiver> oi=962 found=1 ci=917 type=PlayerDamageReceiver
+[INFO] [combat] hit1-repeat-same-dealer invoke=1 returned=0.00 health=2
+[INFO] [combat] diag player oi=962 components=16 receiver=PlayerDamageReceiver ci=917 enabled=1 flags=1 type=1 timer=1.967 state=1 state_ok=1 getter=1 lookup=nonnull CanTakeDamage=0 health=2 damageSubscribers=4 dealer_type=DamageDealer damageTypes.Player=1 timers=0 rate=0.200
+[INFO] [combat] player GameObject.GetComponent<DamageReceiver> oi=962 found=1 ci=917 type=PlayerDamageReceiver
+[INFO] [combat] hit1-iframes-fresh-dealer invoke=1 returned=1.00 health=2
+[INFO] [levelplay] dynamic projectile ci=2744 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [combat] damage callback method=12462 target=TutorialLevelDamagableBox health=-1
+[INFO] [combat] damage callback method=12462 target=TutorialLevelDamagableBox health=-1
+[INFO] [combat] damage callback method=4051 target=HitFlash health=-1
+[INFO] [combat] damage callback method=4051 target=HitFlash health=-1
+[INFO] [combat] damage callback method=12462 target=TutorialLevelDamagableBox health=-1
+[INFO] [levelplay] dynamic projectile ci=2819 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [combat] damage callback method=12462 target=TutorialLevelDamagableBox health=-1
+[INFO] [combat] damage callback method=12462 target=TutorialLevelDamagableBox health=-1
+[INFO] [combat] damage callback method=4051 target=HitFlash health=-1
+[INFO] [combat] damage callback method=4051 target=HitFlash health=-1
+[INFO] [combat] damage callback method=12462 target=TutorialLevelDamagableBox health=-1
+[INFO] [levelplay] frame=30 pos=3000.00,97.20
+[INFO] [levelplay] dynamic projectile ci=2894 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=2969 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] screenshot=work\m1_combat_checkpoint.45.bmp
+[INFO] [levelplay] dynamic projectile ci=3044 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [combat] damage callback method=12462 target=TutorialLevelDamagableBox health=-1
+[INFO] [combat] damage callback method=12462 target=TutorialLevelDamagableBox health=-1
+[INFO] [combat] damage callback method=4051 target=HitFlash health=-1
+[INFO] [combat] damage callback method=4051 target=HitFlash health=-1
+[INFO] [combat] damage callback method=12462 target=TutorialLevelDamagableBox health=-1
+[INFO] [levelplay] dynamic projectile ci=3135 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] frame=60 pos=3008.17,97.20
+[INFO] [levelplay] dynamic projectile ci=3210 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=3285 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=3360 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [combat] damage callback method=4051 target=HitFlash health=-1
+[INFO] [combat] damage callback method=4051 target=HitFlash health=-1
+[INFO] [combat] damage callback method=12462 target=TutorialLevelDamagableBox health=-1
+[INFO] [levelplay] dynamic projectile ci=3435 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] frame=90 pos=3008.17,97.20
+[INFO] [levelplay] dynamic projectile ci=3510 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] screenshot=work\m1_combat_checkpoint.100.bmp
+[INFO] [levelplay] dynamic projectile ci=3585 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=3660 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [combat] damage callback method=4051 target=HitFlash health=-1
+[INFO] [combat] damage callback method=4051 target=HitFlash health=-1
+[INFO] [combat] damage callback method=12462 target=TutorialLevelDamagableBox health=-1
+[INFO] [levelplay] frame=120 pos=3008.17,97.20
+[INFO] [levelplay] dynamic projectile ci=3743 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=3818 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [combat] diag player oi=962 components=16 receiver=PlayerDamageReceiver ci=917 enabled=1 flags=1 type=1 timer=0.000 state=0 state_ok=1 getter=1 lookup=nonnull CanTakeDamage=1 health=2 damageSubscribers=4 dealer_type=DamageDealer damageTypes.Player=1 timers=0 rate=0.200
+[INFO] [combat] player GameObject.GetComponent<DamageReceiver> oi=962 found=1 ci=917 type=PlayerDamageReceiver
+[INFO] [combat] damage callback method=15825 target=LevelPlayerMotor health=-1
+[INFO] [combat] damage callback method=15969 target=LevelPlayerWeaponManager health=-1
+[INFO] [combat] damage callback method=17091 target=PlayerStatsManager health=1
+[INFO] [combat] damage callback method=15621 target=LevelPlayerAnimationController health=-1
+[INFO] [combat] hit2-after-iframes invoke=1 returned=1.00 health=1
+[INFO] [combat] hud screenshot health=1 path=work\m1_combat_checkpoint.health1.bmp
+[INFO] [levelplay] dynamic projectile ci=3897 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=3972 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] frame=150 pos=3000.00,97.20
+[INFO] [levelplay] dynamic projectile ci=4047 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=4122 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=4197 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=4272 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] frame=180 pos=3008.17,97.20
+[INFO] [levelplay] dynamic projectile ci=4347 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=4422 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] screenshot=work\m1_combat_checkpoint.200.bmp
+[INFO] [levelplay] dynamic projectile ci=4497 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=4572 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] frame=210 pos=3008.17,97.20
+[INFO] [levelplay] dynamic projectile ci=4647 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=4722 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=4797 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] frame=240 pos=3008.17,97.20
+[INFO] [levelplay] dynamic projectile ci=4872 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=4947 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [levelplay] dynamic projectile ci=5022 ctrl=BasicProjectile update=17228 fixed=17307
+[INFO] [combat] diag player oi=962 components=16 receiver=PlayerDamageReceiver ci=917 enabled=1 flags=1 type=1 timer=0.000 state=0 state_ok=1 getter=1 lookup=nonnull CanTakeDamage=1 health=1 damageSubscribers=4 dealer_type=DamageDealer damageTypes.Player=1 timers=0 rate=0.200
+[INFO] [combat] player GameObject.GetComponent<DamageReceiver> oi=962 found=1 ci=917 type=PlayerDamageReceiver
+[INFO] [combat] damage callback method=15825 target=LevelPlayerMotor health=-1
+[INFO] [combat] damage callback method=15969 target=LevelPlayerWeaponManager health=-1
+[INFO] [combat] damage callback method=17091 target=PlayerStatsManager health=0
+[INFO] [combat] damage callback method=15621 target=LevelPlayerAnimationController health=-1
+[INFO] [combat] hit3-lethal invoke=1 returned=1.00 health=0
+[INFO] [combat] hud screenshot health=0 path=work\m1_combat_checkpoint.health0.bmp
+[INFO] [levelplay] frame=270 pos=3000.00,81.00
+[INFO] [combat] tutorial target seen=1 active=0
+[INFO] [combat] target health initial=20 final=-4 trackedInactive=1
+[INFO] [combat] sequence firstHit=1 sameDealerBlock=1 freshDealerIFrameBlock=1 postIFrameHit=1 lethal=1 finalHealth=0 PASS
+[INFO] [combat] original retry route invoked=1 scene=<unset> loaderWasBusy=0 lastError=20560
+[INFO] [combat] single-player retry=UNPROVEN requestPropagated=0
+[INFO] [levelplay] instances objects=2514 projectiles=57
+[INFO] [probe] health TutorialLevelDamagableBox.boxHealth ci=182 value=-4.000 active=0
+[INFO] [probe] health LevelHUDPlayerHealth.lastHealth ci=308 value=0 active=1
+[INFO] [probe] health PlayerStatsManager.<HealthMax>k__BackingField ci=918 value=3 active=0
+[INFO] [probe] health PlayerStatsManager.<Health>k__BackingField ci=918 value=0 active=0
+[INFO] [probe] health TutorialLevelDamagableBox.boxHealth ci=1009 value=0.000 active=0
+[INFO] [probe] CupheadTime.globalSpeed=1.000
+[INFO] [probe] projectile-active 'Level_Weapon_Peashot_Basic' oi=1846 ci=2590 ctrl=BasicProjectile at=3720.7,145.0 speed=2250.0 move=0 rot=0.0
+[INFO] [probe] projectile-active 'Level_Weapon_Peashot_Basic' oi=1865 ci=2665 ctrl=BasicProjectile at=3720.7,165.0 speed=2250.0 move=0 rot=0.0
+[INFO] [probe] projectile-active 'Level_Weapon_Peashot_Basic' oi=1923 ci=2894 ctrl=BasicProjectile at=3720.7,161.2 speed=2250.0 move=0 rot=0.0
+[INFO] [probe] projectile-active 'Level_Weapon_Peashot_Basic' oi=2003 ci=3210 ctrl=BasicProjectile at=3720.7,161.2 speed=2250.0 move=0 rot=0.0
+[INFO] [probe] projectile-active 'Level_Weapon_Peashot_Basic' oi=2079 ci=3510 ctrl=BasicProjectile at=3720.7,161.2 speed=2250.0 move=0 rot=0.0
+[INFO] [probe] projectile-active 'Level_Weapon_Peashot_Basic' oi=2310 ci=4422 ctrl=BasicProjectile at=5933.2,161.2 speed=2250.0 move=1 rot=0.0
+[INFO] [probe] projectile-active 'Level_Weapon_Peashot_Basic' oi=2329 ci=4497 ctrl=BasicProjectile at=5633.2,181.2 speed=2250.0 move=1 rot=0.0
+[INFO] [probe] projectile-active 'Level_Weapon_Peashot_Basic' oi=2348 ci=4572 ctrl=BasicProjectile at=5333.2,201.2 speed=2250.0 move=1 rot=0.0
+[INFO] [probe] projectiles=57 active=14
+[INFO] [levelplay] start=3000.0,81.0 max_x=3008.2 max_y=97.2 min_y=81.0 collisions=539 result=PASS

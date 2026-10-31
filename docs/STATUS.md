@@ -6,7 +6,77 @@ playable alpha release candidate with no content or behavior gaps versus the
 Windows version. This document records exactly what is implemented, what has
 been validated, and what remains.
 
-## 2026-10-31 M1 combat checkpoint
+## 2026-10-31 player-damage engine checkpoint (scope corrected)
+
+Work is paused at the user's request. This is an experimental checkpoint;
+[`PAUSED_HANDOFF.md`](PAUSED_HANDOFF.md) records lead review findings, rendering
+defects and runtime changes requiring further audit. The new-session prompt is
+[`RESTART_PROMPT.md`](RESTART_PROMPT.md).
+
+The current milestone has changed to the normal opening flow described in
+[`OPENING_FLOW.md`](OPENING_FLOW.md): new-game entry, Elder Kettle/house,
+Isle I map movement, and an authored Root Pack encounter. That work has not
+started. This tutorial checkpoint is retained as an engine regression and is
+**not M1 completion**.
+
+The tutorial level authors a shootable target but no enemy or hazard that
+damages the player. `TutorialLevel.OnLevelStart()` is empty. The lethal player
+sequence below is therefore deliberately synthetic: the probe calls the real
+`DamageDealer.NewEnemy()` and `DealDamage(player)` entry points. It validates
+engine mechanics without claiming that normal tutorial gameplay contains those
+hits, and no gameplay behavior was changed to add hazards or death.
+
+Verified on Windows:
+
+- `WeaponPeashot` projectiles reach and destroy the authored tutorial target:
+  `TutorialLevelDamagableBox.boxHealth` changed from `20` to `-4`, and the
+  tracked target became inactive.
+- Original player damage now reaches `PlayerDamageReceiver.TakeDamage`.
+  `Health` changes `3 -> 2 -> 1 -> 0`; the receiver enters `Invulnerable` for
+  two seconds; a reused dealer's `0.2s` timer blocks before the receiver, while
+  a fresh dealer still reaches the receiver's independent i-frame guard.
+- At zero health, the original death callback deactivates the player and the
+  `PlayerStatsManager` component. A minimal software HUD, driven by
+  `PlayerStatsManager.Health`, renders and updates at health 3, 2, 1 and 0.
+- Keyboard `J` and Xbox right trigger now feed the existing Rewired shoot
+  action in manual play. Automated probes still synthesize input.
+- Pumped audio is not validated. The recorded checkpoint run is explicitly
+  muted and uses the current audio stub.
+
+Retry is **unproven**. Invoking the original `LevelGameOverGUI.Retry()` reaches
+`SceneLoader.ReloadLevel()`, but its scene request does not propagate through
+the current incomplete `SceneLoader`/transition stack and leaves
+`SceneLoader.SceneName` unset. The command therefore reports
+`single-player retry=UNPROVEN`. A recursive same-process fresh-scene assertion
+was removed because it could not establish the original `SceneLoader` request;
+no `Health = 3` reset was used as a retry substitute.
+
+This checkpoint also fixes runtime-wide issues exposed by the damage path:
+GameObject activity no longer clears Behaviour enabled bits, float conditional
+IL uses numeric comparison, integer `Mathf.Clamp` preserves its integer
+overload, Rewired controller iteration handles no attached vibration devices,
+and original generic death events can reach `EventManager`.
+
+Checkpoint checks:
+
+- Windows Release build: PASS.
+- Xbox 360 Release/XEX build: PASS.
+- Synthetic tutorial combat probe, 272 frames, exit 0: PASS for target
+  destruction, player damage, both i-frame layers, and death state.
+- Normal tutorial scene startup: PASS.
+- Tutorial `--levelplay --frames 60`: PASS,
+  `start=-410,-270 max_x=80`.
+- Full remaining boss/platforming regression campaign was stopped at the user's
+  pause request and must run before any opening-flow merge.
+
+Compact evidence is in [`evidence/`](evidence/) and the detailed checkpoint
+commands/results are in [`VERIFICATION.md`](VERIFICATION.md). The disk cleanup
+removed 22 obsolete extraction variants and 34,484 generated PNG sidecars,
+reclaiming about 4.11 GB decimal. The extractor still emits PNG previews by
+default; production work needs an optional preview mode and a shared immutable
+asset/atlas path before more content is extracted.
+
+## 2026-10-31 historical enemy-only checkpoint (superseded)
 
 M1 is **not complete**, but the enemy side of the tutorial combat loop now
 runs end-to-end through original code:
@@ -21,8 +91,8 @@ runs end-to-end through original code:
   target; `boxHealth` changed from `20.0` to `-4.0` on the active copy and
   `0.0` on the template copy, and both target objects became inactive after
   `Object.Destroy(gameObject)`.
-- `Object.Destroy` now deactivates the target object/components instead of
-  being a no-op. Effective tags are derived from `DamageReceiver.type`, so
+- `Object.Destroy` deactivates the target GameObject while preserving authored
+  component enabled bits. Effective tags are derived from `DamageReceiver.type`, so
   original `OnCollisionEnemy` routing works.
 - Transform hierarchy fixes now include `GetEnumerator`, `childCount`,
   `GetChild`, world-space `position` assignment, and persistent euler angles.

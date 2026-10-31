@@ -835,6 +835,198 @@ static u32 FindSceneObjectIndexById(const Scene& scene, u32 id) {
     return 0xFFFFFFFFu;
 }
 
+static void LogCombatDamageState(MetadataPackage& pkg, Interpreter& interp,
+                                 const Scene& scene, Value controller, u32 player_oi,
+                                 Value dealer) {
+    if (player_oi >= scene.ObjectCount()) return;
+    const SceneObject& player_object = scene.Object(player_oi);
+    u32 receiver_ci = 0xFFFFFFFFu;
+    Value receiver = Value::Null();
+    u32 dr_type = pkg.FindType("DamageReceiver");
+    u32 stats_type = pkg.FindType("PlayerStatsManager");
+    Value stats = Value::Null();
+    for (u32 c = 0; c < player_object.component_count; ++c) {
+        u32 ci = player_object.component_start + c;
+        if (ci >= scene.ComponentCount()) break;
+        Value candidate = interp.ManagedComponent(ci);
+        if (candidate.tag == VT_OBJECT && candidate.data.obj && dr_type &&
+            interp.IsAssignable(candidate.data.obj->type_id, dr_type)) {
+            receiver_ci = ci;
+            receiver = candidate;
+        }
+        if (candidate.tag == VT_OBJECT && candidate.data.obj && stats_type &&
+            interp.IsAssignable(candidate.data.obj->type_id, stats_type)) {
+            stats = candidate;
+        }
+    }
+
+    const char* receiver_name = receiver.tag == VT_OBJECT && receiver.data.obj
+        ? pkg.Type(receiver.data.obj->type_id).full_name : "<null>";
+    u32 receiver_flags = receiver_ci < scene.ComponentCount()
+        ? scene.Component(receiver_ci).flags : 0xFFFFFFFFu;
+    bool enabled = (receiver_flags & 1u) != 0;
+    s32 receiver_type = -1;
+    u32 receiver_type_field = dr_type ? pkg.FindField(dr_type, "type") : 0;
+    if (receiver_type_field) {
+        receiver_type = Interpreter::ToI32(interp.GetField(receiver_type_field, receiver));
+    }
+    f32 receiver_timer = -1.0f;
+    u32 timer_field = receiver.tag == VT_OBJECT && receiver.data.obj
+        ? pkg.FindField(receiver.data.obj->type_id, "timer") : 0;
+    if (timer_field) {
+        Value tv = interp.GetField(timer_field, receiver);
+        if (tv.tag == VT_R4) receiver_timer = tv.data.f32;
+    }
+
+    Value looked_up = Value::Null();
+    u32 getter = controller.tag == VT_OBJECT && controller.data.obj
+        ? FindMethodInHierarchy(pkg, controller.data.obj->type_id, "get_damageReceiver") : 0;
+    bool getter_ok = getter && InvokeOnComponent(interp, getter, controller, &looked_up);
+    bool can_damage = false;
+    Value can_value = Value::Null();
+    u32 can_method = controller.tag == VT_OBJECT && controller.data.obj
+        ? FindMethodInHierarchy(pkg, controller.data.obj->type_id, "get_CanTakeDamage") : 0;
+    if (can_method && InvokeOnComponent(interp, can_method, controller, &can_value)) {
+        can_damage = Interpreter::ToBool(can_value);
+    }
+
+    Value state = Value::Null();
+    u32 state_getter = receiver.tag == VT_OBJECT && receiver.data.obj
+        ? FindMethodInHierarchy(pkg, receiver.data.obj->type_id, "get_state") : 0;
+    bool state_ok = state_getter && InvokeOnComponent(interp, state_getter, receiver, &state);
+
+    bool damage_player = false;
+    s32 timer_count = -1;
+    f32 damage_rate = -1.0f;
+    u32 dealer_type = dealer.tag == VT_OBJECT && dealer.data.obj ? dealer.data.obj->type_id : 0;
+    u32 damage_types_field = dealer_type ? pkg.FindField(dealer_type, "damageTypes") : 0;
+    Value damage_types = damage_types_field ? interp.GetField(damage_types_field, dealer) : Value::Null();
+    u32 types_id = damage_types.tag == VT_OBJECT && damage_types.data.obj
+        ? damage_types.data.obj->type_id : 0;
+    u32 damage_player_field = types_id ? pkg.FindField(types_id, "Player") : 0;
+    if (damage_player_field) {
+        damage_player = Interpreter::ToBool(interp.GetField(damage_player_field, damage_types));
+    }
+    u32 timers_field = dealer_type ? pkg.FindField(dealer_type, "timers") : 0;
+    Value timers = timers_field ? interp.GetField(timers_field, dealer) : Value::Null();
+    if (timers.tag == VT_OBJECT && timers.data.obj) {
+        timer_count = (s32)((DictionaryObject*)timers.data.obj)->count;
+    }
+    u32 rate_field = dealer_type ? pkg.FindField(dealer_type, "damageRate") : 0;
+    if (rate_field) {
+        Value rv = interp.GetField(rate_field, dealer);
+        if (rv.tag == VT_R4) damage_rate = rv.data.f32;
+    }
+
+    s32 health = -1;
+    u32 health_field = stats_type ? pkg.FindField(stats_type, "<Health>k__BackingField") : 0;
+    if (health_field) health = Interpreter::ToI32(interp.GetField(health_field, stats));
+    s32 damage_subscribers = -1;
+    u32 damage_event_field = dr_type ? pkg.FindField(dr_type, "OnDamageTaken") : 0;
+    if (damage_event_field) {
+        Value event_value = interp.GetField(damage_event_field, receiver);
+        damage_subscribers = 0;
+        if (event_value.tag == VT_DELEGATE) {
+            for (DelegateObject* d = event_value.data.del; d; d = d->next) {
+                (void)d;
+                ++damage_subscribers;
+            }
+        }
+    }
+
+    LogInfo("combat", "diag player oi=%u components=%u receiver=%s ci=%u enabled=%d flags=%u type=%d timer=%.3f state=%d state_ok=%d getter=%d lookup=%s CanTakeDamage=%d health=%d damageSubscribers=%d dealer_type=%s damageTypes.Player=%d timers=%d rate=%.3f",
+            player_oi, player_object.component_count, receiver_name, receiver_ci,
+            enabled ? 1 : 0, receiver_flags, receiver_type, receiver_timer, Interpreter::ToI32(state),
+            state_ok ? 1 : 0, getter_ok ? 1 : 0,
+            looked_up.tag == VT_OBJECT && looked_up.data.obj ? "nonnull" : "null",
+            can_damage ? 1 : 0, health, damage_subscribers,
+            dealer_type ? pkg.Type(dealer_type).full_name : "<null>",
+            damage_player ? 1 : 0, timer_count, damage_rate);
+}
+
+static s32 ReadPlayerHealth(MetadataPackage& pkg, Interpreter& interp,
+                            const Scene& scene, u32 player_oi) {
+    if (player_oi >= scene.ObjectCount()) return -1;
+    u32 stats_type = pkg.FindType("PlayerStatsManager");
+    u32 health_field = stats_type
+        ? pkg.FindField(stats_type, "<Health>k__BackingField") : 0;
+    if (!health_field) return -1;
+    const SceneObject& player = scene.Object(player_oi);
+    for (u32 c = 0; c < player.component_count; ++c) {
+        u32 ci = player.component_start + c;
+        if (ci >= scene.ComponentCount()) break;
+        Value value = interp.ManagedComponent(ci);
+        if (value.tag == VT_OBJECT && value.data.obj && stats_type &&
+            interp.IsAssignable(value.data.obj->type_id, stats_type)) {
+            return Interpreter::ToI32(interp.GetField(health_field, value));
+        }
+    }
+    return -1;
+}
+
+static u32 FindActiveTutorialTargetHealthComponent(MetadataPackage& pkg,
+                                                   const Scene& scene) {
+    u32 box_type = pkg.FindType("TutorialLevelDamagableBox");
+    u32 health_field = box_type ? pkg.FindField(box_type, "boxHealth") : 0;
+    if (!health_field) return 0xFFFFFFFFu;
+    for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
+        const SceneObject& object = scene.Object(oi);
+        if (!(object.flags & 1u) || !object.name ||
+            !strstr(object.name, "tutorial_target")) continue;
+        for (u32 c = 0; c < object.component_count; ++c) {
+            u32 ci = object.component_start + c;
+            if (ci >= scene.ComponentCount()) break;
+            const SceneComponent& component = scene.Component(ci);
+            if (component.type == 4 && component.controller &&
+                strcmp(component.controller, "TutorialLevelDamagableBox") == 0) {
+                return ci;
+            }
+        }
+    }
+    return 0xFFFFFFFFu;
+}
+
+static s32 ReadTargetHealth(MetadataPackage& pkg, Interpreter& interp, u32 ci) {
+    if (ci == 0xFFFFFFFFu) return -1;
+    u32 box_type = pkg.FindType("TutorialLevelDamagableBox");
+    u32 health_field = box_type ? pkg.FindField(box_type, "boxHealth") : 0;
+    if (!health_field) return -1;
+    Value target = interp.ManagedComponent(ci);
+    if (target.tag != VT_OBJECT || !target.data.obj) return -1;
+    return Interpreter::ToI32(interp.GetField(health_field, target));
+}
+
+static bool InvokeEnemyDamageAttempt(MetadataPackage& pkg, Interpreter& interp,
+                                     const Scene& scene, Value player,
+                                     u32 player_oi, u32 new_enemy_mid,
+                                     u32 deal_damage_mid, const char* label,
+                                     Value& dealer, bool force_fresh,
+                                     bool* invoke_ok, f32* result,
+                                     s32* health_after) {
+    *invoke_ok = false;
+    *result = 0.0f;
+    *health_after = ReadPlayerHealth(pkg, interp, scene, player_oi);
+    if (force_fresh || dealer.tag != VT_OBJECT || !dealer.data.obj) {
+        if (!interp.Invoke(new_enemy_mid, 0, 0, &dealer) ||
+            dealer.tag != VT_OBJECT || !dealer.data.obj) {
+            LogWarn("combat", "%s dealer creation failed", label);
+            return false;
+        }
+    }
+    LogCombatDamageState(pkg, interp, scene, player, player_oi, dealer);
+    Value player_go = interp.ManagedGameObject(player_oi);
+    Value args[2]; args[0] = dealer; args[1] = player_go; Value damage_result;
+    *invoke_ok = interp.Invoke(deal_damage_mid, args, 2, &damage_result);
+    if (*invoke_ok) {
+        *result = damage_result.tag == VT_R4
+            ? damage_result.data.f32 : (f32)Interpreter::ToI32(damage_result);
+    }
+    *health_after = ReadPlayerHealth(pkg, interp, scene, player_oi);
+    LogInfo("combat", "%s invoke=%d returned=%.2f health=%d", label,
+            *invoke_ok ? 1 : 0, *result, *health_after);
+    return *invoke_ok;
+}
+
 static bool SceneObjectActiveInHierarchy(const Scene& scene, u32 oi) {
     u32 cur = oi;
     u32 guard = 0;
@@ -1208,6 +1400,41 @@ static void ProbeGameplayFields(MetadataPackage& pkg, Interpreter& interp, Scene
     LogInfo("probe", "projectiles=%u active=%u", projectiles, active_projectiles);
 }
 
+static bool RequestOriginalTutorialRetry(MetadataPackage& pkg, Interpreter& interp,
+                                         const Scene& scene) {
+    u32 retry_type = pkg.FindType("LevelGameOverGUI");
+    u32 retry_method = retry_type ? pkg.FindMethod(retry_type, "Retry") : 0;
+    Value retry_component = Value::Null();
+    for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+        const SceneComponent& component = scene.Component(ci);
+        if (component.type == 4 && component.controller &&
+            strcmp(component.controller, "LevelGameOverGUI") == 0) {
+            retry_component = interp.ManagedComponent(ci);
+            break;
+        }
+    }
+    u32 loader_type = pkg.FindType("SceneLoader");
+    u32 loading_field = loader_type ? pkg.FindField(loader_type, "currentlyLoading") : 0;
+    bool loader_was_busy = false;
+    if (loading_field) {
+        loader_was_busy = Interpreter::ToBool(interp.GetField(loading_field, Value::Null()));
+        if (loader_was_busy) interp.SetField(loading_field, Value::Null(), Value::Bool(false));
+    }
+    Value result = Value::Null();
+    bool invoked = retry_method && retry_component.tag == VT_OBJECT &&
+        InvokeOnComponent(interp, retry_method, retry_component, &result);
+    const char* requested = "<unset>";
+    u32 name_getter = loader_type ? pkg.FindMethod(loader_type, "get_SceneName") : 0;
+    Value scene_name = Value::Null();
+    if (name_getter) {
+        interp.Invoke(name_getter, 0, 0, &scene_name);
+        if (scene_name.tag == VT_STRING) requested = interp.StringUtf8(scene_name);
+    }
+    LogInfo("combat", "original retry route invoked=%d scene=%s loaderWasBusy=%d lastError=%u",
+            invoked ? 1 : 0, requested, loader_was_busy ? 1 : 0, interp.LastError());
+    return strcmp(requested, "scene_level_tutorial") == 0;
+}
+
 static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play = false) {
     if (!config.scene_path) {
         LogError("level", "no scene path");
@@ -1360,15 +1587,18 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
             LogWarn("levelplay", "motor Start failed");
         }
     }
-    if (!scene.LoadTextures()) {
-        LogError("levelplay", "texture load failed");
-        return 1;
+    bool render_level = true;
+    if (render_level) {
+        if (!scene.LoadTextures()) {
+            LogError("levelplay", "texture load failed");
+            return 1;
+        }
+        if (!DisplayInit(1280, 720, config.headless)) {
+            LogError("levelplay", "display init failed");
+            return 1;
+        }
+        InputInit();
     }
-    if (!DisplayInit(1280, 720, config.headless)) {
-        LogError("levelplay", "display init failed");
-        return 1;
-    }
-    InputInit();
     SoftRenderer renderer(1280, 720);
 
     AnimationSet animations;
@@ -1515,6 +1745,7 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         u32 am = FindMethodInHierarchy(pkg, v.data.obj->type_id, "Awake");
         if (am) {
             Value aargs[1]; aargs[0] = v; Value ar;
+            interp.MarkComponentAwake(ci);
             if (!interp.Invoke(am, aargs, 1, &ar)) {
                 if (awake_failures < 8) LogWarn("levelplay", "Awake %s failed", ctrl);
                 ++awake_failures;
@@ -1631,6 +1862,18 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         scene.ComputeWorldTransforms();
     }
 
+    u32 target_health_ci = config.combat_test
+        ? FindActiveTutorialTargetHealthComponent(pkg, scene) : 0xFFFFFFFFu;
+    s32 combat_initial_health = ReadPlayerHealth(pkg, interp, scene, player_oi);
+    s32 target_initial_health = ReadTargetHealth(pkg, interp, target_health_ci);
+    if (config.combat_test) {
+        LogInfo("combat", "probe begin playerHealth=%d targetHealth=%d targetCi=%u",
+                combat_initial_health,
+                target_initial_health, target_health_ci);
+        LogInfo("combat", "audio=%s xaudioOutput=%s evidence=headless-stub",
+                config.mute ? "muted" : "enabled", config.mute ? "disabled" : "host-dependent");
+    }
+
     f32 start_x = scene.Object(player_oi).world_x;
     f32 start_y = scene.Object(player_oi).world_y;
     f32 prev_x = start_x;
@@ -1638,6 +1881,9 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     u32 anim_state = 0xFFFFFFFFu;
     f32 max_x = start_x, max_y = start_y, min_y = start_y;
     u32 frames = config.frames > 1 ? config.frames : 240;
+    if (config.combat_test && frames < 272) {
+        frames = 272;
+    }
     u32 saved = 0;
     bool loop_ok = true;
     bool logged_player_update_fail = false;
@@ -1646,6 +1892,12 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     Buffer<u64> active_collision_pairs;
     u32 collision_events = 0;
     u32 collision_failures = 0;
+    s32 last_hud_health = combat_initial_health;
+    bool saw_first_hit = false, saw_same_dealer_block = false;
+    bool saw_fresh_iframe_block = false, saw_post_iframe_hit = false;
+    bool saw_death = false;
+    s32 first_hit_health = -1, second_hit_health = -1;
+    Value repeated_dealer = Value::Null();
     for (u32 i = 0; i < frames; ++i) {
         InputState in_state;
         in_state = InputRead();
@@ -1662,6 +1914,7 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
             ax = in_state.axis_x;
             ay = in_state.axis_y;
             if (in_state.jump_held) buttons |= 1u << 2;
+            if (in_state.shoot_held) buttons |= 1u << 4;
             if (in_state.dash_pressed) buttons |= 1u << 7;
             if (in_state.start_pressed) buttons |= 1u << 8;
         } else {
@@ -1736,21 +1989,43 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         // Run original coroutine state machines before discovering components
         // they just instantiated, so new projectiles get Start and enter the
         // update/collision path in the same frame.
-        if (config.combat_test && (i == 12 || i == 40 || i == 68) &&
-            new_enemy_dealer && deal_damage) {
-            Value dealer_ret = Value::Null();
-            if (interp.Invoke(new_enemy_dealer, 0, 0, &dealer_ret) &&
-                dealer_ret.tag == VT_OBJECT && dealer_ret.data.obj) {
-                Value player_go = interp.ManagedGameObject(player_oi);
-                Value dargs[2]; dargs[0] = dealer_ret; dargs[1] = player_go; Value dr;
-                if (!interp.Invoke(deal_damage, dargs, 2, &dr)) {
-                    LogWarn("combat", "enemy DamageDealer.DealDamage failed");
-                } else {
-                    LogInfo("combat", "enemy damage frame=%u result=%.2f", i,
-                            dr.tag == VT_R4 ? dr.data.f32 : (f32)Interpreter::ToI32(dr));
-                }
-            } else {
-                LogWarn("combat", "DamageDealer.NewEnemy failed");
+        if (config.combat_test && new_enemy_dealer && deal_damage) {
+            if (i == 12) {
+                bool ok = false; f32 result = 0.0f; s32 health = -1;
+                InvokeEnemyDamageAttempt(pkg, interp, scene, player, player_oi,
+                    new_enemy_dealer, deal_damage, "hit1-first", repeated_dealer,
+                    true, &ok, &result, &health);
+                first_hit_health = health;
+                saw_first_hit = ok && result > 0.0f && health == combat_initial_health - 1;
+            } else if (i == 13) {
+                bool ok = false; f32 result = 0.0f; s32 health = -1;
+                InvokeEnemyDamageAttempt(pkg, interp, scene, player, player_oi,
+                    new_enemy_dealer, deal_damage, "hit1-repeat-same-dealer", repeated_dealer,
+                    false, &ok, &result, &health);
+                saw_same_dealer_block = ok && result == 0.0f &&
+                    health == first_hit_health;
+            } else if (i == 14) {
+                Value fresh = Value::Null();
+                bool ok = false; f32 result = 0.0f; s32 health = -1;
+                InvokeEnemyDamageAttempt(pkg, interp, scene, player, player_oi,
+                    new_enemy_dealer, deal_damage, "hit1-iframes-fresh-dealer", fresh,
+                    true, &ok, &result, &health);
+                saw_fresh_iframe_block = ok && result > 0.0f && health == first_hit_health;
+            } else if (i == 136) {
+                Value fresh = Value::Null();
+                bool ok = false; f32 result = 0.0f; s32 health = -1;
+                InvokeEnemyDamageAttempt(pkg, interp, scene, player, player_oi,
+                    new_enemy_dealer, deal_damage, "hit2-after-iframes",
+                    fresh, true, &ok, &result, &health);
+                second_hit_health = health;
+                saw_post_iframe_hit = ok && result > 0.0f;
+            } else if (i == 260) {
+                Value fresh = Value::Null();
+                bool ok = false; f32 result = 0.0f; s32 health = -1;
+                InvokeEnemyDamageAttempt(pkg, interp, scene, player, player_oi,
+                    new_enemy_dealer, deal_damage, "hit3-lethal", fresh,
+                    true, &ok, &result, &health);
+                saw_death = ok && result > 0.0f && health == 0;
             }
         }
         interp.UpdateCoroutines(config.fixed_dt);
@@ -1925,7 +2200,26 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         f32 cam_y = py + 35.0f;
         if (cam_y < -120.0f) cam_y = -120.0f;
         scene.SetMainCameraPosition(cam_x, cam_y);
-        renderer.DrawScene(scene);
+        s32 health_now = ReadPlayerHealth(pkg, interp, scene, player_oi);
+        bool hud_capture = config.combat_test && config.screenshot_path &&
+            health_now >= 0 && health_now <= 3 &&
+            (health_now != last_hud_health || i == 0);
+        if (!config.combat_test || hud_capture) {
+            renderer.DrawScene(scene);
+            renderer.DrawHealthHud(health_now, 3);
+            if (hud_capture) {
+                char path[1024];
+                _snprintf(path, sizeof(path) - 1, "%s.health%d.bmp",
+                          config.screenshot_path,
+                          health_now);
+                path[sizeof(path) - 1] = 0;
+                if (renderer.SaveBmp(path)) {
+                    LogInfo("combat", "hud screenshot health=%d path=%s", health_now, path);
+                }
+                last_hud_health = health_now;
+            }
+            if (render_level) DisplayPresent(renderer.Pixels());
+        }
         if (config.screenshot_path && saved < 3 &&
             (i == 45 || i == 100 || i == 200)) {
             char path[1024];
@@ -1936,13 +2230,13 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
                 ++saved;
             }
         }
-        DisplayPresent(renderer.Pixels());
         DisplayPump();
         if (DisplayShouldQuit() || in_state.quit_pressed) break;
         if (!config.headless) PlatformSleepMs(16);
     }
-    bool pass = loop_ok && (max_x - start_x > 50.0f);
+    bool pass = loop_ok && (config.combat_test || max_x - start_x > 50.0f);
     bool target_seen = false, target_active = false;
+    s32 target_final_health = -1;
     if (config.combat_test) {
         for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
             const SceneObject& o = scene.Object(oi);
@@ -1950,9 +2244,32 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
             target_seen = true;
             if (o.flags & 1u) target_active = true;
         }
+        target_final_health = ReadTargetHealth(pkg, interp, target_health_ci);
+        u32 target_owner = OwnerObjectForComponent(scene, target_health_ci);
+        bool tracked_target_inactive = target_owner < scene.ObjectCount() &&
+            !(scene.Object(target_owner).flags & 1u);
         LogInfo("combat", "tutorial target seen=%d active=%d",
                 target_seen ? 1 : 0, target_active ? 1 : 0);
-        pass = loop_ok && target_seen && !target_active;
+        LogInfo("combat", "target health initial=%d final=%d trackedInactive=%d",
+                target_initial_health, target_final_health,
+                tracked_target_inactive ? 1 : 0);
+        s32 final_health = ReadPlayerHealth(pkg, interp, scene, player_oi);
+        bool target_zero = target_seen && !target_active && tracked_target_inactive &&
+            target_initial_health == 20 && target_final_health <= 0;
+        bool damage_sequence = saw_first_hit && saw_same_dealer_block &&
+            saw_fresh_iframe_block && saw_post_iframe_hit && saw_death &&
+            first_hit_health == 2 && second_hit_health == 1 && final_health == 0;
+        LogInfo("combat", "sequence firstHit=%d sameDealerBlock=%d freshDealerIFrameBlock=%d postIFrameHit=%d lethal=%d finalHealth=%d %s",
+                saw_first_hit ? 1 : 0, saw_same_dealer_block ? 1 : 0,
+                saw_fresh_iframe_block ? 1 : 0, saw_post_iframe_hit ? 1 : 0,
+                saw_death ? 1 : 0, final_health,
+                (target_zero && damage_sequence) ? "PASS" : "FAIL");
+        pass = loop_ok && target_zero && damage_sequence;
+        if (pass) {
+            bool retry_requested = RequestOriginalTutorialRetry(pkg, interp, scene);
+            LogInfo("combat", "single-player retry=%s requestPropagated=%d",
+                    retry_requested ? "PASS" : "UNPROVEN", retry_requested ? 1 : 0);
+        }
     }
     u32 projectile_components = 0;
     for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {

@@ -696,6 +696,18 @@ static bool GameObject_GetComponent(Interpreter& in, const MemberRefInfo& member
         return true;
     }
     const SceneObject& o = scene->Object(oi);
+    bool trace_player_receiver = false;
+    if (target == in.Metadata().FindType("DamageReceiver")) {
+        for (u32 c = 0; c < o.component_count; ++c) {
+            u32 ci = o.component_start + c;
+            if (ci >= scene->ComponentCount()) break;
+            const char* controller = scene->Component(ci).controller;
+            if (controller && strcmp(controller, "PlayerDamageReceiver") == 0) {
+                trace_player_receiver = true;
+                break;
+            }
+        }
+    }
     for (u32 c = 0; c < o.component_count; ++c) {
         u32 ci = o.component_start + c;
         if (ci >= scene->ComponentCount()) break;
@@ -705,9 +717,16 @@ static bool GameObject_GetComponent(Interpreter& in, const MemberRefInfo& member
         bool is_component_base = (target == in.ComponentTypeId() ||
                                   target == in.MonoBehaviourTypeId());
         if (in.IsAssignable(vt, target) || vt == target || is_component_base) {
+            if (trace_player_receiver) {
+                LogInfo("combat", "player GameObject.GetComponent<DamageReceiver> oi=%u found=1 ci=%u type=%s",
+                        oi, ci, in.Metadata().Type(vt).full_name);
+            }
             if (ret) *ret = v;
             return true;
         }
+    }
+    if (trace_player_receiver) {
+        LogInfo("combat", "player GameObject.GetComponent<DamageReceiver> oi=%u found=0", oi);
     }
     if (target) {
         const TypeInfo& tt = in.Metadata().Type(target);
@@ -1935,6 +1954,7 @@ static void InvokeAwakeOnTree(Interpreter& in, u32 root_oi) {
                 u32 awake = FindMethodInHierarchy(in, self.data.obj->type_id, "Awake");
                 if (awake) {
                     Value r;
+                    in.MarkComponentAwake(ci);
                     bool ok = in.Invoke(awake, &self, 1, &r);
                     if (!ok) {
                         LogWarn("unity", "Awake %s on '%s' failed",
@@ -2232,6 +2252,7 @@ bool Interpreter::CloneGameObject(u32 template_oi, Value* out_go) {
                 u32 awake = FindMethodInHierarchy(*this, self.data.obj->type_id, "Awake");
                 if (awake) {
                     Value r;
+                    MarkComponentAwake(ci);
                     if (!Invoke(awake, &self, 1, &r)) {
                         LogWarn("unity", "Awake %s on cloned '%s' failed", ctrl, o.name);
                     }
@@ -2361,10 +2382,9 @@ static bool Object_Destroy(Interpreter& in, const MemberRefInfo&, u32, Value* a,
         if (scene && oi < scene->ObjectCount()) {
             SceneObject& o = scene->MutableObject(oi);
             o.flags &= ~1u;
-            for (u32 c = 0; c < o.component_count; ++c) {
-                u32 ci = o.component_start + c;
-                if (ci < scene->ComponentCount()) scene->MutableComponent(ci).flags &= ~1u;
-            }
+            // Component enabled state is independent from GameObject activity.
+            // Keep authored component flags when the reused player-prefab
+            // adapter later reactivates this object.
             scene->ComputeWorldTransforms();
         }
         a[0].data.obj->flags &= ~1u;
