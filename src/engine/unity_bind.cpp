@@ -35,6 +35,45 @@ static Value ManagedTransformForObject(Interpreter& in, const Value& go) {
     return in.ManagedTransform(oi);
 }
 
+static Value ResolveScenePointer(Interpreter& in, const ScriptValue& sv) {
+    Scene* scene = in.BoundScene();
+    if (!scene || sv.kind != 7) return Value::Null();
+    u32 target_id = sv.data0;
+    // Component references use the serialized component path id.
+    if (sv.data1 == 2) {
+        for (u32 ci = 0; ci < scene->ComponentCount(); ++ci) {
+            if (scene->Component(ci).source_id == target_id) {
+                return in.ManagedComponent(ci);
+            }
+        }
+        // The path id can also be a GameObject; try the component type on it.
+        u32 oi = 0xFFFFFFFFu;
+        for (u32 i = 0; i < scene->ObjectCount(); ++i) {
+            if (scene->Object(i).id == target_id) { oi = i; break; }
+        }
+        if (oi != 0xFFFFFFFFu) {
+            const SceneObject& o = scene->Object(oi);
+            for (u32 c = 0; c < o.component_count; ++c) {
+                u32 ci = o.component_start + c;
+                Value v = in.ManagedComponent(ci);
+                if (v.tag == VT_OBJECT && v.data.obj) {
+                    if (v.data.obj->type_id == sv.data2 || in.IsAssignable(v.data.obj->type_id, sv.data2)) {
+                        return v;
+                    }
+                }
+            }
+        }
+        return Value::Null();
+    }
+    u32 oi = 0xFFFFFFFFu;
+    for (u32 i = 0; i < scene->ObjectCount(); ++i) {
+        if (scene->Object(i).id == target_id) { oi = i; break; }
+    }
+    if (oi == 0xFFFFFFFFu) return Value::Null();
+    if (sv.data1 == 1) return in.ManagedTransform(oi);
+    return in.ManagedGameObject(oi);
+}
+
 static u32 FindObjectIndexById(const Scene& scene, u32 id) {
     for (u32 i = 0; i < scene.ObjectCount(); ++i) {
         if (scene.Object(i).id == id) return i;
@@ -116,30 +155,6 @@ bool Interpreter::BindScene(Scene& scene) {
                     if (!script) return false;
                     AddManagedBinding(script, oi, ci);
                     managed_components_[ci] = Value::ObjectRef(script);
-                    u32 vstart = sc.sprite_id;
-                    u32 vcount = (u32)sc.sorting_layer;
-                    for (u32 vi = 0; vi < vcount && vstart + vi < scene.ScriptValueCount(); ++vi) {
-                        const ScriptValue& sv = scene.ScriptValueAt(vstart + vi);
-                        Value val = Value::Null();
-                        if (sv.kind == 1) val = Value::I4((s32)sv.data0);
-                        else if (sv.kind == 2) {
-                            f32 f;
-                            memcpy(&f, &sv.data0, 4);
-                            val = Value::R4(f);
-                        } else if (sv.kind == 3) val = Value::Bool(sv.data0 != 0);
-                        else if (sv.kind == 4) {
-                            f32 x, y;
-                            memcpy(&x, &sv.data0, 4); memcpy(&y, &sv.data1, 4);
-                            val = NewVec2(x, y);
-                        } else if (sv.kind == 5) {
-                            f32 x, y, z;
-                            memcpy(&x, &sv.data0, 4); memcpy(&y, &sv.data1, 4); memcpy(&z, &sv.data2, 4);
-                            val = NewVec3(x, y, z);
-                        } else {
-                            continue;
-                        }
-                        SetField(sv.field_id, Value::ObjectRef(script), val);
-                    }
                 }
                 continue;
             }
@@ -155,6 +170,86 @@ bool Interpreter::BindScene(Scene& scene) {
             managed_components_[ci] = Value::ObjectRef(comp);
         }
     }
+    // Apply script field values only after every component has a managed
+    // object; serialized PPtrs can target components that appear later in
+    // the scene's component table.
+    for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+        const SceneComponent& sc = scene.Component(ci);
+        if (sc.type != 4) continue;
+        Value script_value = managed_components_[ci];
+        if (script_value.tag != VT_OBJECT || !script_value.data.obj) continue;
+        Object* script = script_value.data.obj;
+        u32 vstart = sc.sprite_id;
+        u32 vcount = (u32)sc.sorting_layer;
+        for (u32 vi = 0; vi < vcount && vstart + vi < scene.ScriptValueCount(); ++vi) {
+            const ScriptValue& sv = scene.ScriptValueAt(vstart + vi);
+            Value val = Value::Null();
+            if (sv.kind == 1) val = Value::I4((s32)sv.data0);
+            else if (sv.kind == 2) {
+                f32 f; memcpy(&f, &sv.data0, 4); val = Value::R4(f);
+            } else if (sv.kind == 3) val = Value::Bool(sv.data0 != 0);
+            else if (sv.kind == 4) {
+                f32 x, y; memcpy(&x, &sv.data0, 4); memcpy(&y, &sv.data1, 4);
+                val = NewVec2(x, y);
+            } else if (sv.kind == 5) {
+                f32 x, y, z; memcpy(&x, &sv.data0, 4); memcpy(&y, &sv.data1, 4); memcpy(&z, &sv.data2, 4);
+                val = NewVec3(x, y, z);
+            } else if (sv.kind == 6) {
+                const u8* str = scene.ScriptStrings();
+                if (str && sv.data0 + sv.data1 <= scene.ScriptStringsSize()) {
+                    char* tmp = (char*)MemAlloc(sv.data1 + 1);
+                    if (!tmp) return false;
+                    memcpy(tmp, str + sv.data0, sv.data1);
+                    tmp[sv.data1] = 0;
+                    val = NewStringUtf8(tmp);
+                    MemFree(tmp);
+                }
+            } else if (sv.kind == 7) {
+                val = ResolveScenePointer(*this, sv);
+            } else if (sv.kind == 8) {
+                val = Value::Null();
+            } else if (sv.kind == 9) {
+                const FieldInfo& f = metadata_.Field(sv.field_id);
+                const SigInfo& fs = metadata_.Sig(f.type_sig);
+                u32 elem = 0;
+                if (fs.kind == SIG_SZARRAY || fs.kind == SIG_ARRAY) {
+                    elem = metadata_.Type(fs.type_id).element_id;
+                } else if (fs.kind == SIG_GENERICINST) {
+                    const TypeInfo& gt = metadata_.Type(fs.type_id);
+                    if (gt.generic_arg_count) elem = metadata_.GenericArg(gt.generic_arg_start);
+                } else {
+                    elem = sv.data2;
+                }
+                val = NewArrayValue(elem, sv.data0);
+            } else {
+                continue;
+            }
+
+            if (sv.parent_field == 0) {
+                SetField(sv.field_id, Value::ObjectRef(script), val);
+            } else if (sv.parent_field == sv.field_id) {
+                Value arr = GetField(sv.field_id, Value::ObjectRef(script));
+                if (arr.tag == VT_ARRAY && arr.data.array && sv.index < arr.data.array->length) {
+                    arr.data.array->Elements()[sv.index] = CopyValue(val);
+                }
+            } else {
+                Value parent = GetField(sv.parent_field, Value::ObjectRef(script));
+                if (parent.tag == VT_NULL || !parent.data.obj) {
+                    const FieldInfo& pf = metadata_.Field(sv.parent_field);
+                    const SigInfo& ps = metadata_.Sig(pf.type_sig);
+                    if (ps.type_id) {
+                        const TypeInfo& pt = metadata_.Type(ps.type_id);
+                        parent = pt.is_value_type ? NewStructValue(ps.type_id) : NewObjectValue(ps.type_id);
+                        SetField(sv.parent_field, Value::ObjectRef(script), parent);
+                    }
+                }
+                if (parent.tag == VT_OBJECT || parent.tag == VT_STRUCT) {
+                    SetField(sv.field_id, parent, val);
+                }
+            }
+        }
+    }
+
     LogInfo("unity", "bound %u gameobjects, %u components", scene.ObjectCount(), scene.ComponentCount());
     return true;
 }
@@ -393,6 +488,8 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         }
         if (strcmp(n, "GetComponent") == 0) return GameObject_GetComponent(in, member, argc, args, ret);
         if (strcmp(n, "SetActive") == 0) return GameObject_SetActive(in, member, argc, args, ret);
+        if (strcmp(n, "set_layer") == 0) return RetVoid(ret);
+        if (strcmp(n, "get_layer") == 0) return RetI32V(ret, 0);
         if (strcmp(n, "get_activeSelf") == 0) return GameObject_GetActiveSelf(in, member, argc, args, ret);
         if (strcmp(n, "get_name") == 0) return Object_GetName(in, member, argc, args, ret);
         if (strcmp(n, "set_name") == 0) return RetVoid(ret);
@@ -445,6 +542,13 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
     }
     if (strcmp(type, "UnityEngine.Vector2") == 0) {
         if (strcmp(n, "op_Implicit") == 0) return Vector2_ImplicitV3(in, member, argc, args, ret);
+    }
+    if (strcmp(type, "UnityEngine.LayerMask") == 0) {
+        if (strcmp(n, "NameToLayer") == 0) return RetI32V(ret, 0);
+        if (strcmp(n, "LayerToName") == 0) {
+            if (ret) *ret = in.NewStringAscii("Default");
+            return true;
+        }
     }
     LogError("unity", "unimplemented Unity method %s::%s (argc=%u)", type, n, argc);
     return false;

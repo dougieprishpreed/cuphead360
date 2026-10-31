@@ -30,6 +30,7 @@ struct SceneComponent {
     u32 sprite_id;       // 1-based into sprites
     u32 controller_off;
     const char* controller;
+    u32 source_id;
     s32 sorting_order;
     s32 sorting_layer;
     f32 color[4];
@@ -61,10 +62,13 @@ struct SceneTexture {
 
 struct ScriptValue {
     u32 field_id;
+    u32 parent_field;
+    u32 index;
     u32 kind;
     u32 data0;
     u32 data1;
     u32 data2;
+    u32 reserved;
 };
 
 struct SceneCamera {
@@ -106,6 +110,8 @@ public:
 
     const char* LastError() const { return last_error_; }
     const char* Directory() const { return directory_; }
+    const u8* ScriptStrings() const { return script_strings_; }
+    u32 ScriptStringsSize() const { return script_strings_size_; }
 
 private:
     bool Fail(const char* message);
@@ -124,6 +130,8 @@ private:
     Buffer<SceneTexture> textures_;
     Buffer<SceneCamera> cameras_;
     Buffer<ScriptValue> script_values_;
+    const u8* script_strings_;
+    u32 script_strings_size_;
 };
 
 } // namespace ch360

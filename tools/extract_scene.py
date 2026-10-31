@@ -20,7 +20,7 @@ import zlib
 
 import UnityPy
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from metadata_lib import MetadataBuilder as CupheadMetadata, SIG_BOOL, SIG_I4, SIG_U4, SIG_R4, SIG_I8, SIG_U8, SIG_R8, SIG_VALUETYPE, SIG_CLASS, SIG_STRING
+from metadata_lib import MetadataBuilder as CupheadMetadata, SIG_BOOL, SIG_I4, SIG_U4, SIG_R4, SIG_I8, SIG_U8, SIG_R8, SIG_VALUETYPE, SIG_CLASS, SIG_OBJECT, SIG_STRING, SIG_SZARRAY, SIG_ARRAY, SIG_GENERICINST
 
 
 def scene_index(managed_dir: str) -> list[str]:
@@ -253,6 +253,7 @@ def write_scene_binary(scene: dict, out_dir: str, path: str) -> int:
     components = bytearray()
     go_records = bytearray()
     script_values = bytearray()
+    script_strings = bytearray()
     for g in scene["gameobjects"]:
         comp_start = len(components) // 48
         count = 0
@@ -282,7 +283,9 @@ def write_scene_binary(scene: dict, out_dir: str, path: str) -> int:
                 ctype = 4
                 flags = 1
                 controller_off = s(c.get("script", ""))
-                for v in c.get("values", []):
+                values = c.get("values", [])
+                value_start = len(script_values) // 32
+                for vi, v in enumerate(values):
                     k = int(v.get("kind", 0))
                     d0 = d1 = d2 = 0
                     if k in (1, 3):
@@ -296,14 +299,30 @@ def write_scene_binary(scene: dict, out_dir: str, path: str) -> int:
                         d0 = struct.unpack("<I", struct.pack("<f", float(v["value"][0])))[0]
                         d1 = struct.unpack("<I", struct.pack("<f", float(v["value"][1])))[0]
                         d2 = struct.unpack("<I", struct.pack("<f", float(v["value"][2])))[0]
+                    elif k == 6:
+                        text = str(v.get("value", "")).encode("utf-8")
+                        d0 = len(script_strings)
+                        d1 = len(text)
+                        script_strings.extend(text)
+                        while len(script_strings) & 3:
+                            script_strings.append(0)
+                    elif k == 7:
+                        d0 = int(v.get("object_id", 0)) & 0xFFFFFFFF
+                        d1 = int(v.get("target_kind", 0))
+                        d2 = int(v.get("target_type", 0))
+                    elif k == 9:
+                        d0 = int(v.get("count", 0))
+                        d1 = value_start + vi + 1
+                        d2 = 0
                     else:
                         continue
-                    script_values.extend(struct.pack("<6I", int(v.get("field_id", 0)), k, d0, d1, d2, 0))
-                if script_values:
-                    # The interpreter reads these two fields as the script
-                    # value range for type-4 components.
-                    sprite_id = (len(script_values) // 24) - (len(c.get("values", [])))
-                    layer = len(c.get("values", []))
+                    script_values.extend(struct.pack("<8I", int(v.get("field_id", 0)),
+                                                     int(v.get("parent", 0)),
+                                                     int(v.get("index", 0)),
+                                                     k, d0, d1, d2, 0))
+                if values:
+                    sprite_id = value_start
+                    layer = len(values)
             elif c["type"] == "Camera":
                 ctype = 3
                 flags |= 1 if c.get("enabled", True) else 0
@@ -314,7 +333,7 @@ def write_scene_binary(scene: dict, out_dir: str, path: str) -> int:
                 ctype, flags, sprite_id, controller_off,
                 order, layer,
                 float(color[0]), float(color[1]), float(color[2]), float(color[3]),
-                0, 0,
+                int(c.get("source_id", 0)) & 0xFFFFFFFF, 0,
             ))
             count += 1
         pos = tr.get("position", [0.0, 0.0, 0.0])
@@ -378,7 +397,7 @@ def write_scene_binary(scene: dict, out_dir: str, path: str) -> int:
     body = bytearray()
     hdr = [MAGIC_SCENE, 1, 0, len(go_records)//64, len(sprites)//64,
            len(textures)//24, len(cameras)//64, len(components)//48]
-    sections = [strings, go_records, sprites, textures, cameras, components, script_values]
+    sections = [strings, go_records, sprites, textures, cameras, components, script_values, script_strings]
     offsets = []
     sizes = []
     base = SCENE_HEADER_WORDS * 4
@@ -439,6 +458,132 @@ def serialized_fields(builder, full_name: str):
     return fields
 
 
+
+def _is_unity_object_type(builder, t):
+    cur = t
+    guard = 0
+    while cur is not None and guard < 32:
+        if cur.full_name in ("UnityEngine.Object", "UnityEngine.Component", "UnityEngine.MonoBehaviour",
+                             "UnityEngine.ScriptableObject", "UnityEngine.Behaviour"):
+            return True
+        if not cur.base_id:
+            break
+        cur = builder.types[cur.base_id]
+        guard += 1
+    return False
+
+
+def _pptr_target_kind(builder, sig):
+    if sig.kind not in (SIG_CLASS,):
+        return 0, 0
+    t = builder.types[sig.type_id] if sig.type_id else None
+    if t is None:
+        return 0, 0
+    if t.full_name == "UnityEngine.Transform":
+        return 1, 0
+    if t.full_name == "UnityEngine.GameObject":
+        return 0, 0
+    return 2, sig.type_id
+
+
+def parse_sig_value(builder, sig, raw, pos, values, field_id, parent, index):
+    kind = sig.kind
+    if kind == SIG_BOOL:
+        if pos + 4 > len(raw): return None
+        v = struct.unpack_from("<i", raw, pos)[0]; pos += 4
+        values.append({"field_id": field_id, "parent": parent, "index": index, "kind": 3, "value": 1 if v else 0})
+        return pos
+    if kind in (SIG_I4, SIG_U4):
+        if pos + 4 > len(raw): return None
+        v = struct.unpack_from("<i", raw, pos)[0]; pos += 4
+        values.append({"field_id": field_id, "parent": parent, "index": index, "kind": 1, "value": v})
+        return pos
+    if kind == SIG_R4:
+        if pos + 4 > len(raw): return None
+        v = struct.unpack_from("<f", raw, pos)[0]; pos += 4
+        values.append({"field_id": field_id, "parent": parent, "index": index, "kind": 2, "value": v})
+        return pos
+    if kind == SIG_STRING:
+        if pos + 4 > len(raw): return None
+        n = struct.unpack_from("<i", raw, pos)[0]; pos += 4
+        if n < 0 or pos + n > len(raw): return None
+        text = raw[pos:pos+n].decode("utf-8", "replace")
+        pos += n
+        while pos & 3: pos += 1
+        values.append({"field_id": field_id, "parent": parent, "index": index, "kind": 6, "value": text})
+        return pos
+    if kind in (SIG_CLASS, SIG_OBJECT):
+        if pos + 12 > len(raw): return None
+        fid = struct.unpack_from("<i", raw, pos)[0]
+        pid = struct.unpack_from("<q", raw, pos + 4)[0]
+        pos += 12
+        tk, tt = _pptr_target_kind(builder, sig)
+        if fid == 0 and pid != 0:
+            values.append({"field_id": field_id, "parent": parent, "index": index, "kind": 7,
+                           "object_id": pid & 0xFFFFFFFF, "target_kind": tk, "target_type": tt})
+        else:
+            values.append({"field_id": field_id, "parent": parent, "index": index, "kind": 8})
+        return pos
+    if kind == SIG_VALUETYPE:
+        t = builder.types[sig.type_id] if sig.type_id else None
+        tn = t.full_name if t else ""
+        if tn == "UnityEngine.Vector2":
+            if pos + 8 > len(raw): return None
+            x, y = struct.unpack_from("<ff", raw, pos); pos += 8
+            values.append({"field_id": field_id, "parent": parent, "index": index, "kind": 4, "value": [x, y]})
+            return pos
+        if tn == "UnityEngine.Vector3":
+            if pos + 12 > len(raw): return None
+            x, y, z = struct.unpack_from("<fff", raw, pos); pos += 12
+            values.append({"field_id": field_id, "parent": parent, "index": index, "kind": 5, "value": [x, y, z]})
+            return pos
+        if tn in ("UnityEngine.Vector4", "UnityEngine.Quaternion", "UnityEngine.Color", "UnityEngine.Rect"):
+            if pos + 16 > len(raw): return None
+            pos += 16
+            return pos
+        if tn == "UnityEngine.LayerMask":
+            if pos + 4 > len(raw): return None
+            v = struct.unpack_from("<i", raw, pos)[0]; pos += 4
+            values.append({"field_id": field_id, "parent": parent, "index": index, "kind": 1, "value": v})
+            return pos
+        # Game enum or serializable value type; treat enums as int and
+        # otherwise stop at an unsupported layout.
+        if t is not None and (t.is_enum or (t.field_count and any(builder.fields[fid].name == "value__" for fid in range(t.field_start, t.field_start + t.field_count)))):
+            if pos + 4 > len(raw): return None
+            v = struct.unpack_from("<i", raw, pos)[0]; pos += 4
+            values.append({"field_id": field_id, "parent": parent, "index": index, "kind": 1, "value": v})
+            return pos
+        return None
+    if kind in (SIG_SZARRAY, SIG_ARRAY):
+        if pos + 4 > len(raw): return None
+        n = struct.unpack_from("<i", raw, pos)[0]; pos += 4
+        if n < 0: n = 0
+        elem_sig = builder.sigs[sig.children[0]] if sig.children else None
+        if elem_sig is None: return None
+        values.append({"field_id": field_id, "parent": parent, "index": index, "kind": 9,
+                       "count": n, "elem_kind": sig.kind})
+        for i in range(n):
+            pos = parse_sig_value(builder, elem_sig, raw, pos, values, field_id, field_id, i)
+            if pos is None: return None
+        return pos
+    if kind == SIG_GENERICINST:
+        t = builder.types[sig.type_id] if sig.type_id else None
+        if t and t.full_name.startswith("System.Collections.Generic.List`1"):
+            if pos + 4 > len(raw): return None
+            n = struct.unpack_from("<i", raw, pos)[0]; pos += 4
+            if n < 0: n = 0
+            elem_sig = builder.sigs[sig.children[0]] if sig.children else None
+            if elem_sig is None: return None
+            values.append({"field_id": field_id, "parent": parent, "index": index, "kind": 9,
+                           "count": n, "elem_kind": sig.kind})
+            for i in range(n):
+                pos = parse_sig_value(builder, elem_sig, raw, pos, values, field_id, field_id, i)
+                if pos is None: return None
+            return pos
+        return None
+    return None
+
+
 def parse_script_values(builder, full_name: str, raw: bytes):
     fields = serialized_fields(builder, full_name)
     if fields is None:
@@ -447,42 +592,31 @@ def parse_script_values(builder, full_name: str, raw: bytes):
     values = []
     for f in fields:
         sig = f.sig
-        kind = sig.kind
-        if kind == SIG_BOOL:
-            if pos + 4 > len(raw): break
-            v = struct.unpack_from("<I", raw, pos)[0]; pos += 4
-            values.append({"field_id": f.id, "kind": 3, "value": 1 if v else 0})
-        elif kind in (SIG_I4, SIG_U4):
-            if pos + 4 > len(raw): break
-            v = struct.unpack_from("<i", raw, pos)[0]; pos += 4
-            values.append({"field_id": f.id, "kind": 1, "value": v})
-        elif kind == SIG_R4:
-            if pos + 4 > len(raw): break
-            v = struct.unpack_from("<f", raw, pos)[0]; pos += 4
-            values.append({"field_id": f.id, "kind": 2, "value": v})
-        elif kind == SIG_VALUETYPE:
-            tn = builder.types[sig.type_id].full_name if sig.type_id else ""
-            if tn == "UnityEngine.Vector2":
-                if pos + 8 > len(raw): break
-                x, y = struct.unpack_from("<ff", raw, pos); pos += 8
-                values.append({"field_id": f.id, "kind": 4, "value": [x, y]})
-            elif tn == "UnityEngine.Vector3":
-                if pos + 12 > len(raw): break
-                x, y, z = struct.unpack_from("<fff", raw, pos); pos += 12
-                values.append({"field_id": f.id, "kind": 5, "value": [x, y, z]})
-            else:
-                # Game enums and other 4-byte value types are serialized as
-                # an underlying int by Unity for these scripts.
-                if pos + 4 > len(raw): break
-                v = struct.unpack_from("<i", raw, pos)[0]; pos += 4
-                values.append({"field_id": f.id, "kind": 1, "value": v})
-        else:
-            # Strings, PPtrs, arrays and nested serializable classes are
-            # intentionally deferred; stop here so later fields are not
-            # decoded at the wrong offset.
+        t = builder.types[sig.type_id] if sig.type_id and sig.type_id < len(builder.types) else None
+        # Nested [Serializable] classes are stored inline with no header.
+        is_enum_type = bool(t is not None and (t.is_enum or (t.field_count and any(builder.fields[fid].name == "value__" for fid in range(t.field_start, t.field_start + t.field_count)))))
+        if sig.kind in (SIG_CLASS, SIG_VALUETYPE) and t is not None and not t.external:
+            if (not is_enum_type and
+                not _is_unity_object_type(builder, t) and
+                t.full_name not in ("UnityEngine.Vector2", "UnityEngine.Vector3", "UnityEngine.Vector4",
+                                   "UnityEngine.Quaternion", "UnityEngine.Color", "UnityEngine.Rect",
+                                   "UnityEngine.LayerMask", "System.String")):
+                nested = serialized_fields(builder, t.full_name)
+                if nested is None:
+                    break
+                ok = True
+                for nf in nested:
+                    pos = parse_sig_value(builder, nf.sig, raw, pos, values, nf.id, f.id, 0)
+                    if pos is None:
+                        ok = False
+                        break
+                if not ok:
+                    break
+                continue
+        pos = parse_sig_value(builder, sig, raw, pos, values, f.id, 0, 0)
+        if pos is None:
             break
     return values
-
 
 def decode_streamed_frames(clip):
     """Decodes Unity's StreamedClip frame/key records.
@@ -785,6 +919,7 @@ def main():
             spr = sprite_info(sprite, atlas_cache, out["sprites"], out["textures"]) if sprite else None
             c = {
                 "type": "SpriteRenderer",
+                "source_id": o.path_id,
                 "enabled": bool(sr.m_Enabled),
                 "sprite": spr["name"] if spr else "",
                 "color": [float(sr.m_Color.r), float(sr.m_Color.g), float(sr.m_Color.b), float(sr.m_Color.a)],
@@ -809,6 +944,7 @@ def main():
                 pass
             gos[go_id]["components"].append({
                 "type": "Animator",
+                "source_id": o.path_id,
                 "enabled": bool(an.m_Enabled),
                 "controller": ctrl_name,
             })
@@ -826,7 +962,7 @@ def main():
                 full = full.replace("+", "/")
                 if full:
                     vals = parse_script_values(field_builder, full, o.get_raw_data()) if field_builder else []
-                    comp = {"type": "MonoBehaviour", "script": full}
+                    comp = {"type": "MonoBehaviour", "source_id": o.path_id, "script": full}
                     if vals:
                         comp["values"] = vals
                     gos[go_id]["components"].append(comp)

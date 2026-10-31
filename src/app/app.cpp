@@ -253,6 +253,127 @@ static int RunUnityTest(MetadataPackage& pkg, const AppConfig& config) {
         }
     }
 
+    // Verify recovered strings, PPtrs, and arrays.
+    bool fields_ext_ok = true;
+    u32 das_type = pkg.FindType("DeferredAudioSource");
+    u32 das_field = pkg.FindField(das_type, "audioClipName");
+    if (das_type && das_field) {
+        bool found = false;
+        for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+            const SceneComponent& comp = scene.Component(ci);
+            if (comp.type != 4 || strcmp(comp.controller, "DeferredAudioSource") != 0) continue;
+            Value obj = interp.ManagedComponent(ci);
+            Value s = interp.GetField(das_field, obj);
+            bool str_ok = false;
+            if (s.tag == VT_STRING && s.data.str) {
+                const char* expect = "MUS_Tutorial";
+                u32 n = (u32)strlen(expect);
+                str_ok = s.data.str->length == n;
+                for (u32 i = 0; str_ok && i < n; ++i) {
+                    if (s.data.str->Chars()[i] != (u16)expect[i]) str_ok = false;
+                }
+            }
+            LogInfo("unity", "DeferredAudioSource string '%s' %s",
+                    str_ok ? "MUS_Tutorial" : "<mismatch>", str_ok ? "PASS" : "FAIL");
+            if (!str_ok) fields_ext_ok = false;
+            found = true;
+            break;
+        }
+        if (!found) fields_ext_ok = false;
+    } else {
+        fields_ext_ok = false;
+    }
+
+    u32 glyph_type = pkg.FindType("CupheadGlyph");
+    u32 glyph_array = pkg.FindField(glyph_type, "rectTransformTexts");
+    if (glyph_type && glyph_array) {
+        bool found = false;
+        for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+            const SceneComponent& comp = scene.Component(ci);
+            if (comp.type != 4 || strcmp(comp.controller, "CupheadGlyph") != 0) continue;
+            Value obj = interp.ManagedComponent(ci);
+            Value arr = interp.GetField(glyph_array, obj);
+            bool arr_ok = arr.tag == VT_ARRAY && arr.data.array && arr.data.array->length == 6;
+            LogInfo("unity", "CupheadGlyph array length=%u expect=6 %s",
+                    (arr.tag == VT_ARRAY && arr.data.array) ? arr.data.array->length : 0,
+                    arr_ok ? "PASS" : "FAIL");
+            if (!arr_ok) fields_ext_ok = false;
+            found = true;
+            break;
+        }
+        if (!found) fields_ext_ok = false;
+    } else {
+        fields_ext_ok = false;
+    }
+
+    u32 pde_type = pkg.FindType("PlayerDeathEffect");
+    u32 pde_field = pkg.FindField(pde_type, "cuphead");
+    if (pde_type && pde_field) {
+        bool found = false;
+        for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+            const SceneComponent& comp = scene.Component(ci);
+            if (comp.type != 4 || strcmp(comp.controller, "PlayerDeathEffect") != 0) continue;
+            Value obj = interp.ManagedComponent(ci);
+            Value p = interp.GetField(pde_field, obj);
+            bool ptr_ok = p.tag == VT_OBJECT && p.data.obj != 0;
+            LogInfo("unity", "PlayerDeathEffect PPtr %s", ptr_ok ? "PASS" : "FAIL");
+            if (!ptr_ok) fields_ext_ok = false;
+            found = true;
+            break;
+        }
+        if (!found) fields_ext_ok = false;
+    } else {
+        fields_ext_ok = false;
+    }
+    if (!fields_ext_ok) pass = false;
+
+    // Original lifecycle sequence on real scene scripts.
+    struct LifecycleCheck { const char* script; const char* method; };
+    static const LifecycleCheck lifecycle[] = {
+        { "LevelPlatform", "Awake" },
+        { "PlayerDeathEffect", "Start" },
+        { "AnimationHelper", "Update" },
+    };
+    for (u32 lc = 0; lc < CH360_ARRAY_COUNT(lifecycle); ++lc) {
+        u32 lt = pkg.FindType(lifecycle[lc].script);
+        u32 lm = pkg.FindMethod(lt, lifecycle[lc].method);
+        bool called = false;
+        if (lt && lm) {
+            for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+                const SceneComponent& comp = scene.Component(ci);
+                if (comp.type != 4 || strcmp(comp.controller, lifecycle[lc].script) != 0) continue;
+                Value obj = interp.ManagedComponent(ci);
+                Value args[1]; args[0] = obj; Value r;
+                called = interp.Invoke(lm, args, 1, &r);
+                break;
+            }
+        }
+        LogInfo("unity", "lifecycle %s.%s %s", lifecycle[lc].script, lifecycle[lc].method,
+                called ? "PASS" : "FAIL");
+        if (!called) pass = false;
+    }
+
+    // Verify nested serializable object recovery (Level.intro).
+    u32 level_type = pkg.FindType("TutorialLevel");
+    u32 intro_field = 7161;
+    u32 intro_child = 7246;
+    if (level_type && intro_field) {
+        for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+            const SceneComponent& comp = scene.Component(ci);
+            if (comp.type != 4 || strcmp(comp.controller, "TutorialLevel") != 0) continue;
+            Value obj = interp.ManagedComponent(ci);
+            Value intro = interp.GetField(intro_field, obj);
+            Value child = (intro.tag == VT_OBJECT || intro.tag == VT_STRUCT) ? interp.GetField(intro_child, intro) : Value::Null();
+            bool nested_ok = (intro.tag == VT_OBJECT || intro.tag == VT_STRUCT) && intro.data.obj != 0 &&
+                             child.tag == VT_BOOL && child.data.i32 != 0;
+            LogInfo("unity", "TutorialLevel nested intro=%s child=%d %s",
+                    (intro.data.obj ? "object" : "null"), child.data.i32,
+                    nested_ok ? "PASS" : "FAIL");
+            if (!nested_ok) pass = false;
+            break;
+        }
+    }
+
     // AbstractMonoBehaviour.Awake on a PlayerDebug instance (base-only Awake
     // sets useGUILayout; no scene references required).
     u32 dbg_type = pkg.FindType("PlayerDebug");

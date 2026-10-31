@@ -66,11 +66,19 @@ Xenia big-endian.
 The currently committed XEX source boots `scene` mode (animated tutorial
 viewer, 120 frames, `game:\frame.bmp`).
 
-Unity-bridge test scene with serialized fields:
-`work\extract_tutorial_fields2\scene.chs`; `--unity` verifies
-`TransformExtensions.ResetLocalTransforms`, `AnimationHelper.Update`,
-serialized `speed=1`/`layer=1`, and `AbstractMonoBehaviour.Awake` on both
-Windows and Xenia.
+Unity-bridge test scene with full serialized-field recovery:
+`work\extract_tutorial_full4\scene.chs`. `--unity` verifies
+`TransformExtensions.ResetLocalTransforms`, serialized
+`speed/layer`/string/PPtr/array/nested values, and the lifecycle sequence
+`LevelPlatform.Awake`, `PlayerDeathEffect.Start`, `AnimationHelper.Update`,
+plus `AbstractMonoBehaviour.Awake`, on both Windows and Xenia.
+
+Command:
+
+```
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_tutorial_full4\scene.chs --unity --log build\logs\unity.log
+```
 
 ## Current code map
 

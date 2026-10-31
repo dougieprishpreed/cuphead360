@@ -42,8 +42,12 @@ sizes). Sections: strings, GameObjects (64 bytes), sprites (64), textures
 (24), cameras (64), components (48), script values (24 bytes each).
 For type-4 (MonoBehaviour) components, the component's `sprite_id` field is
 the first script-value index and `sorting_layer` is the value count.
-Script values store a field id, a primitive kind, and up to three 32-bit
-payload words; primitive/enum/Vector2/Vector3 values are currently encoded.
+Script values store field id, parent field, array index, kind, and three
+payload words. Kinds: int, float, bool, Vector2, Vector3, string (offset into
+the script-string section), PPtr, null PPtr, and array. Nested serializable
+fields carry the parent field id; arrays carry the first element record
+index. The runtime binds script values in a second pass after all components
+exist.
 
 Raw texture files begin with `CHTX`, then width, height, format (`1` =
 RGBA8), then tightly packed top-down RGBA bytes.

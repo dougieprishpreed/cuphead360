@@ -45,19 +45,37 @@
 ## Serialized fields
 
 `tools/extract_scene.py` reads the MonoBehaviour header, resolves the script
-type, and walks the script's serialized fields in Unity order. Primitive,
-enum, Vector2, and Vector3 fields are encoded into the scene package and
-applied when the managed script object is created. `AnimationHelper`'s
-serialized `layer`/`speed` fields are verified on Windows and Xenia.
+type, and walks the script's serialized fields in Unity order. It supports
+primitive/enum values, Unity strings, GameObject/Transform/component PPtrs,
+primitive/PPtr arrays, and nested `[Serializable]` classes.
 
-The parser deliberately stops at the first string/PPtr/array/nested field so
-later fields are never decoded at the wrong offset. Those types are the next
-field-recovery milestone.
+Values are encoded into the scene package. Script PPtrs are resolved in a
+second bind pass, after every scene component has a managed object, so
+forward references work. Verified examples:
+
+- `AnimationHelper`: serialized `speed=1`, `layer=1`;
+- `DeferredAudioSource.audioClipName = "MUS_Tutorial"`;
+- `CupheadGlyph.rectTransformTexts` array length 6;
+- `PlayerDeathEffect.cuphead` PPtr resolves to a SpriteRenderer;
+- `TutorialLevel.intro` nested object with child value 1.
+
+Original lifecycle methods executed on real scene scripts:
+
+- `LevelPlatform.Awake`
+- `PlayerDeathEffect.Start`
+- `AnimationHelper.Update`
+
+All pass on Windows and on the Xbox 360 XEX under Xenia.
 
 ## Missing
 
-- String/PPtr/array and nested serializable field initialization. Scripts
-  that require scene references still see null/defaults for those fields.
+- Unity serializes some fields with version-specific layouts
+  (`AnimationCurve`, `LayerMask`, nested arrays, `List<T>` of serializable
+  classes). Those are rejected safely at the first unsupported field.
+- Fields inherited from complex base classes can stop parsing early; the
+  recovered prefix is still usable.
+- `Transform` PPtrs from serialized component path IDs are not yet mapped;
+  component and GameObject references are handled.
 - `GetComponent<T>` uses the MemberRef return type; generic MethodSpec
   resolution is not implemented yet.
 - Coroutines/scheduler, `Time`, colliders/physics, audio, `Animator` state

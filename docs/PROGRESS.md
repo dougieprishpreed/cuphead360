@@ -76,11 +76,17 @@ XDK built / Xenia tested / Hardware tested**
   `AbstractMonoBehaviour.Awake` lifecycle methods.
 - [x] Recover serialized MonoBehaviour primitive/enum/Vector2/Vector3 fields
   from scene data and initialize script object fields in the runtime.
-- [x] Verify `AnimationHelper` serialized `speed`/`layer` values on Windows
-  and on the Xbox 360 XEX in Xenia.
-- [x] All of the above PASS on Windows and on the Xbox 360 XEX in Xenia.
-- [ ] Recover string/PPtr/array/nested serialized fields (current parser
-  stops at the first unsupported field).
+- [x] Recover serialized strings (`DeferredAudioSource.audioClipName`),
+  GameObject/component PPtrs (`PlayerDeathEffect.cuphead`), arrays
+  (`CupheadGlyph.rectTransformTexts`, length 6), and nested serializable
+  objects (`TutorialLevel.intro`).
+- [x] Two-pass scene binding: all component objects exist before PPtr field
+  values are applied, so forward references resolve.
+- [x] Execute a complete original lifecycle sequence on real scene scripts:
+  `LevelPlatform.Awake`, `PlayerDeathEffect.Start`, and
+  `AnimationHelper.Update`.
+- [x] Verify all of the above on Windows and on the Xbox 360 XEX in Xenia.
+- [x] `AnimationHelper` serialized `speed`/`layer` values verified on both.
 
 ### Content pipeline and renderer
 

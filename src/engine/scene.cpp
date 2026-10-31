@@ -30,7 +30,7 @@ static void SplitDirectory(const char* path, char* out, u32 out_size) {
 
 Scene::Scene()
     : file_(0), file_size_(0), last_error_("not loaded"), strings_(0),
-      strings_size_(0) {
+      strings_size_(0), script_strings_(0), script_strings_size_(0) {
     directory_[0] = 0;
 }
 
@@ -81,6 +81,8 @@ void Scene::Unload() {
     file_size_ = 0;
     strings_ = 0;
     strings_size_ = 0;
+    script_strings_ = 0;
+    script_strings_size_ = 0;
     last_error_ = "not loaded";
 }
 
@@ -105,8 +107,10 @@ bool Scene::Load(const char* path) {
     u32 cameras_off = ReadU32LE(file_ + 48);
     u32 components_off = ReadU32LE(file_ + 52);
     u32 script_values_off = ReadU32LE(file_ + 56);
-    u32 strings_size = ReadU32LE(file_ + 60);
-    u32 script_values_size = ReadU32LE(file_ + 84);
+    u32 script_strings_off = ReadU32LE(file_ + 60);
+    u32 strings_size = ReadU32LE(file_ + 64);
+    u32 script_values_size = ReadU32LE(file_ + 88);
+    u32 script_strings_size = ReadU32LE(file_ + 92);
 
     if (strings_off > file_size_ || strings_size > file_size_ - strings_off) return Fail("bad string section");
     if (go_count != 0 && (gos_off > file_size_ || go_count > (file_size_ - gos_off) / 64)) return Fail("bad object section");
@@ -115,6 +119,7 @@ bool Scene::Load(const char* path) {
     if (camera_count != 0 && (cameras_off > file_size_ || camera_count > (file_size_ - cameras_off) / 64)) return Fail("bad camera section");
     if (component_count != 0 && (components_off > file_size_ || component_count > (file_size_ - components_off) / 48)) return Fail("bad component section");
     if (script_values_size != 0 && (script_values_off > file_size_ || script_values_size > file_size_ - script_values_off)) return Fail("bad script value section");
+    if (script_strings_size != 0 && (script_strings_off > file_size_ || script_strings_size > file_size_ - script_strings_off)) return Fail("bad script string section");
 
     strings_ = file_ + strings_off;
     strings_size_ = strings_size;
@@ -151,6 +156,7 @@ bool Scene::Load(const char* path) {
         c.sorting_order = ReadS32LE(p + 16);
         c.sorting_layer = ReadS32LE(p + 20);
         for (u32 j = 0; j < 4; ++j) c.color[j] = ReadF32LE(p + 24 + j * 4);
+        c.source_id = ReadU32LE(p + 40);
     }
 
     if (!sprites_.Resize(sprite_count)) return Fail("out of memory for sprites");
@@ -185,16 +191,21 @@ bool Scene::Load(const char* path) {
         t.data_size = 0;
     }
 
-    u32 sv_count = script_values_size / 24;
+    script_strings_ = script_strings_size ? file_ + script_strings_off : 0;
+    script_strings_size_ = script_strings_size;
+    u32 sv_count = script_values_size / 32;
     if (!script_values_.Resize(sv_count)) return Fail("out of memory for script values");
     for (u32 i = 0; i < sv_count; ++i) {
-        const u8* p = file_ + script_values_off + i * 24;
+        const u8* p = file_ + script_values_off + i * 32;
         ScriptValue& v = script_values_[i];
         v.field_id = ReadU32LE(p + 0);
-        v.kind = ReadU32LE(p + 4);
-        v.data0 = ReadU32LE(p + 8);
-        v.data1 = ReadU32LE(p + 12);
-        v.data2 = ReadU32LE(p + 16);
+        v.parent_field = ReadU32LE(p + 4);
+        v.index = ReadU32LE(p + 8);
+        v.kind = ReadU32LE(p + 12);
+        v.data0 = ReadU32LE(p + 16);
+        v.data1 = ReadU32LE(p + 20);
+        v.data2 = ReadU32LE(p + 24);
+        v.reserved = ReadU32LE(p + 28);
     }
 
     if (!cameras_.Resize(camera_count)) return Fail("out of memory for cameras");
