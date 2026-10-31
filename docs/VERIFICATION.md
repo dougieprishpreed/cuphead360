@@ -70,6 +70,20 @@ rendered the real tutorial scene, and wrote `game:\frame.bmp` under Xenia.
 The D3D9 host-window contents could not be captured through PrintWindow
 (black capture); the framebuffer screenshot is the validated render output.
 
+Rebuilt XEX with the expanded metadata format (MethodSpec MemberRefs, FieldRVA
+static-array data and enum constants) and the playable tutorial slice:
+
+```
+[INFO] [boot] platform=xbox360 _MSC_VER=1600
+[INFO] [boot] big_endian=1
+[INFO] [metadata] loaded game:\GameData\metadata.chm types=7417 ...
+[INFO] [unity] bound 186 gameobjects, 277 components
+[INFO] [play] result=PASS start=0.0,-180.0 max_x=900.0 max_y=21.7 min_y=-185.0 jumped=1 landed=1 dashes=2
+```
+
+The XEX wrote `game:\play.45.bmp`, `play.100.bmp`, `play.200.bmp`, and
+`play.final.bmp`. This verifies the expanded runtime on big-endian PowerPC.
+
 ## Playable tutorial slice
 
 Windows:
