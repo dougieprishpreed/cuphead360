@@ -292,6 +292,16 @@ u32 Scene::FindSpriteByName(const char* name) const {
     return 0;
 }
 
+u32 Scene::AddRuntimeObject(const SceneObject& object) {
+    if (!objects_.PushBack(object)) return 0xFFFFFFFFu;
+    return objects_.Size() - 1;
+}
+
+u32 Scene::AddRuntimeComponent(const SceneComponent& component) {
+    if (!components_.PushBack(component)) return 0xFFFFFFFFu;
+    return components_.Size() - 1;
+}
+
 void Scene::SetMainCameraPosition(f32 x, f32 y) {
     if (cameras_.Empty()) return;
     SceneCamera& cam = cameras_[0];

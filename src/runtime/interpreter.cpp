@@ -319,6 +319,8 @@ void Interpreter::Shutdown() {
         MemFree(objects_[i]);
     }
     objects_.Reset();
+    for (u32 i = 0; i < runtime_names_.Size(); ++i) MemFree(runtime_names_[i]);
+    runtime_names_.Reset();
     for (u32 i = 1; i <= metadata_.TypeCount(); ++i) {
         TypeRuntime& rt = runtime_types_[i];
         if (rt.static_values) MemFree(rt.static_values);
@@ -921,6 +923,7 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
     Value result = Value::Void();
     u8 last_op = 0;
     u32 last_pc = 0;
+    u32 pending_constrained_type = 0;
 
 #define PUSH(v) do { if (sp >= kMaxStack) { ok = Fail("evaluation stack overflow", method_id); goto done; } stack[sp++] = (v); } while (0)
 #define POP(dst) do { if (sp == 0) { ok = Fail("evaluation stack underflow", method_id); goto done; } (dst) = stack[--sp]; } while (0)
@@ -996,6 +999,26 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                 if (argc > kMaxCallArgs) { ok = Fail("too many call args", method_id); goto done; }
                 Value call_args[kMaxCallArgs];
                 for (u32 i = argc; i > 0; --i) POP(call_args[i - 1]);
+                if (virt && pending_constrained_type && argc > 0) {
+                    // constrained. T; callvirt ...
+                    // The CLR passes the address of the value. Materialize the
+                    // boxed value so virtual/native dispatch sees a real object.
+                    u32 ct = pending_constrained_type;
+                    const TypeInfo& cit = metadata_.Type(ct);
+                    Value recv = call_args[0];
+                    if (recv.tag == VT_BYREF && recv.data.ref) recv = *recv.data.ref;
+                    if (cit.is_enum && recv.tag != VT_OBJECT && recv.tag != VT_STRUCT) {
+                        Object* boxed = AllocObjectWithSlots(ct, 1);
+                        if (!boxed) { ok = Fail("constrained box failed", method_id); goto done; }
+                        boxed->Fields()[0] = Value::I4((s32)NumI64(recv));
+                        call_args[0] = Value::ObjectRef(boxed);
+                    } else if (cit.is_value_type && recv.tag == VT_BYREF && recv.data.ref) {
+                        call_args[0] = CopyValue(*recv.data.ref);
+                    } else {
+                        call_args[0] = recv;
+                    }
+                }
+                pending_constrained_type = 0;
                 Value call_ret = Value::Void();
                 u32 saved_arg_start = generic_arg_start_;
                 u32 saved_arg_count = generic_arg_count_;
@@ -1595,7 +1618,7 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                         }
                         break;
                     }
-                    case 0x16: { u32 tok = ReadU32LE(code + pc); pc += 4; (void)tok; break; }
+                    case 0x16: { u32 tok = ReadU32LE(code + pc); pc += 4; pending_constrained_type = metadata_.ResolveTypeToken(tok); break; }
                     case 0x17: case 0x18: { Value n; POP(n); Value addr; POP(addr); (void)n; (void)addr; break; }
                     case 0x19: pc += 1; break;
                     case 0x1A: ok = Fail("rethrow is not implemented yet", method_id); goto done;

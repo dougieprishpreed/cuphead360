@@ -4,6 +4,48 @@ All results below were produced locally against the user's GOG installation.
 They are development-verification results, not a claim that the full game is
 playable.
 
+## Latest Windows runtime pass (2026-10-31)
+
+```
+scripts\build_win32.bat Release
+
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_level\scene.chs --level --headless
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_level\scene.chs --levelplay --frames 120 --headless
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_level\scene.chs --stack --headless
+```
+
+Observed:
+```
+[INFO] [level] TutorialLevel.Awake PASS
+[INFO] [level] TutorialLevel.Start PASS
+[INFO] [level] result=PASS
+[INFO] [levelplay] player LevelInit invoked
+[INFO] [levelplay] player LevelStart invoked
+[INFO] [levelplay] start=-410.0,-270.0 max_x=1327.6 max_y=-159.7 min_y=-274.5 result=PASS
+[INFO] [stack] player LevelInit PASS
+[INFO] [stack] player LevelStart PASS
+[INFO] [stack] result=PASS
+```
+
+The latest runtime fixes in this pass:
+
+- `Enum.GetValues`/`EnumUtils.GetValues<T>()` + `constrained.` enum
+  `ToString` now agree, so weapon-prefab dictionaries populate instead of
+  silently remaining empty.
+- Dictionary keys compare boxed enum values numerically.
+- `GameObject.activeInHierarchy` walks the parent chain instead of failing.
+- The `--levelplay` harness invokes the original player `LevelInit` before
+  `LevelStart`, which creates weapon prefabs/loadouts.
+- The `--stack` harness repairs serialized `_basePlayer` references after
+  construction, so original child-component `LevelInit` paths run.
+
+The synthetic `--motor` harness still reports a failure in the motor's
+serialized component wiring; the real `--levelplay` path passes. `--play`
+requires a scene extracted with `--add-player`.
+
 ## Build
 
 ```

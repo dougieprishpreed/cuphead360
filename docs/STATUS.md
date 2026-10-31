@@ -6,6 +6,28 @@ playable alpha release candidate with no content or behavior gaps versus the
 Windows version. This document records exactly what is implemented, what has
 been validated, and what remains.
 
+## 2026-10-31 runtime update
+
+The original tutorial `LevelInit`/`LevelStart` path now runs through the real
+player component graph on Windows, including weapon-prefab construction. The
+weapon `Dictionary<Weapon,AbstractLevelWeapon>` is populated, and a dash no
+longer aborts on a missing weapon entry. Enum values now cross
+`Enum.GetValues`/`EnumUtils.GetValues<T>()`, `constrained.` `ToString`, boxed
+objects and dictionary keys consistently. `GameObject.activeInHierarchy` is
+implemented.
+
+Windows regressions after this change:
+- tutorial `--level` PASS
+- tutorial `--levelplay` PASS (`max_x=1327.6`)
+- `--stack` PASS
+- synthetic `--motor` still fails on serialized component wiring (not the
+  normal gameplay path)
+- native `--play` needs a scene extracted with `--add-player`
+
+Remaining major gaps are unchanged: real prefab cloning, weapons and damage,
+enemies/bosses, Animator behavior, audio, UI rendering, all other scenes and
+DLC.
+
 ## What works
 
 ### Build and platform

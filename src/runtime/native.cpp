@@ -138,6 +138,35 @@ static bool Object_ctor(Interpreter&, const MemberRefInfo&, u32, Value*, Value* 
 static bool Object_ToString(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     if (ret) {
         if (a[0].tag == VT_STRING) { *ret = a[0]; return true; }
+        if (a[0].tag == VT_OBJECT || a[0].tag == VT_STRUCT) {
+            Object* o = a[0].data.obj;
+            if (o) {
+                const TypeInfo& t = in.Metadata().Type(o->type_id);
+                if (t.is_enum) {
+                    s64 value = o->slots > 0 ? Interpreter::ToI64(o->Fields()[0]) : 0;
+                    for (u32 i = 0; i < t.field_count; ++i) {
+                        u32 fid = t.field_start + i;
+                        const FieldInfo& f = in.Metadata().Field(fid);
+                        if (!(f.flags & FIELD_FLAG_LITERAL) || strcmp(f.name, "value__") == 0) continue;
+                        s64 constant = 0;
+                        if (in.Metadata().FieldConstant(fid, &constant) && constant == value) {
+                            *ret = in.NewStringAscii(f.name);
+                            return true;
+                        }
+                    }
+                    char buf[32];
+                    sprintf(buf, "%d", (s32)value);
+                    *ret = in.NewStringAscii(buf);
+                    return true;
+                }
+            }
+        }
+        if (a[0].tag == VT_I4) {
+            char buf[32];
+            sprintf(buf, "%d", a[0].data.i32);
+            *ret = in.NewStringAscii(buf);
+            return true;
+        }
         *ret = in.NewStringAscii("Object");
     }
     return true;
@@ -463,9 +492,33 @@ static u32 ListElementType(Interpreter& in, const ListObject* list) {
     return t.generic_arg_count ? in.Metadata().GenericArg(t.generic_arg_start) : 0;
 }
 
-static bool ValueEqual(const Value& a, const Value& b) {
+static bool EnumValueNumber(Interpreter& in, const Value& v, s64* out) {
+    if (v.tag != VT_OBJECT && v.tag != VT_STRUCT) return false;
+    Object* o = v.data.obj;
+    if (!o) return false;
+    const TypeInfo& t = in.Metadata().Type(o->type_id);
+    if (!t.is_enum) return false;
+    *out = o->slots > 0 ? Interpreter::ToI64(o->Fields()[0]) : 0;
+    return true;
+}
+
+static bool ValueEqual(Interpreter& in, const Value& a, const Value& b) {
     if (a.tag == VT_STRING || b.tag == VT_STRING) return StringEquals(a, b);
     if (a.tag == VT_NULL || b.tag == VT_NULL) return a.data.obj == b.data.obj;
+    s64 ae = 0, be = 0;
+    bool a_enum = EnumValueNumber(in, a, &ae);
+    bool b_enum = EnumValueNumber(in, b, &be);
+    if (a_enum && b_enum) return ae == be;
+    if (a_enum && (b.tag == VT_I1 || b.tag == VT_U1 || b.tag == VT_I2 ||
+                   b.tag == VT_U2 || b.tag == VT_I4 || b.tag == VT_U4 ||
+                   b.tag == VT_I8 || b.tag == VT_U8)) {
+        return ae == Interpreter::ToI64(b);
+    }
+    if (b_enum && (a.tag == VT_I1 || a.tag == VT_U1 || a.tag == VT_I2 ||
+                   a.tag == VT_U2 || a.tag == VT_I4 || a.tag == VT_U4 ||
+                   a.tag == VT_I8 || a.tag == VT_U8)) {
+        return be == Interpreter::ToI64(a);
+    }
     if (a.tag == VT_OBJECT || a.tag == VT_ARRAY || a.tag == VT_STRUCT || a.tag == VT_DELEGATE) {
         return a.data.obj == b.data.obj;
     }
@@ -554,20 +607,20 @@ static bool List_Clear(Interpreter&, const MemberRefInfo&, u32, Value* a, Value*
     return true;
 }
 
-static bool List_Contains(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+static bool List_Contains(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     ListObject* list = AsList(a[0]);
     if (!list) return RetBool(ret, false);
     for (u32 i = 0; i < list->count; ++i) {
-        if (ValueEqual(list->items[i], a[1])) return RetBool(ret, true);
+        if (ValueEqual(in, list->items[i], a[1])) return RetBool(ret, true);
     }
     return RetBool(ret, false);
 }
 
-static bool List_IndexOf(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+static bool List_IndexOf(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     ListObject* list = AsList(a[0]);
     if (!list) return RetI32(ret, -1);
     for (u32 i = 0; i < list->count; ++i) {
-        if (ValueEqual(list->items[i], a[1])) return RetI32(ret, (s32)i);
+        if (ValueEqual(in, list->items[i], a[1])) return RetI32(ret, (s32)i);
     }
     return RetI32(ret, -1);
 }
@@ -586,7 +639,7 @@ static bool List_Remove(Interpreter& in, const MemberRefInfo&, u32, Value* a, Va
     ListObject* list = AsList(a[0]);
     if (!list) return RetBool(ret, false);
     for (u32 i = 0; i < list->count; ++i) {
-        if (ValueEqual(list->items[i], a[1])) {
+        if (ValueEqual(in, list->items[i], a[1])) {
             for (u32 j = i; j + 1 < list->count; ++j) list->items[j] = list->items[j + 1];
             --list->count;
             return RetBool(ret, true);
@@ -715,10 +768,10 @@ static bool Dict_Ensure(DictionaryObject* d, u32 capacity) {
     return true;
 }
 
-static s32 Dict_Find(DictionaryObject* d, const Value& key) {
+static s32 Dict_Find(Interpreter& in, DictionaryObject* d, const Value& key) {
     if (!d) return -1;
     for (u32 i = 0; i < d->capacity; ++i) {
-        if (d->entries[i].used && ValueEqual(d->entries[i].key, key)) return (s32)i;
+        if (d->entries[i].used && ValueEqual(in, d->entries[i].key, key)) return (s32)i;
     }
     return -1;
 }
@@ -738,7 +791,7 @@ static bool Dict_Ctor(Interpreter& in, const MemberRefInfo& member, u32 argc, Va
 
 static bool Dict_Add(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     DictionaryObject* d = AsDict(a[0]);
-    if (!d || Dict_Find(d, a[1]) >= 0 || !Dict_Ensure(d, d->count + 1)) return false;
+    if (!d || Dict_Find(in, d, a[1]) >= 0 || !Dict_Ensure(d, d->count + 1)) return false;
     for (u32 i = 0; i < d->capacity; ++i) {
         if (d->entries[i].used) continue;
         d->entries[i].key = in.CopyValue(a[1]);
@@ -754,7 +807,7 @@ static bool Dict_Add(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value
 static bool Dict_SetItem(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     DictionaryObject* d = AsDict(a[0]);
     if (!d || !Dict_Ensure(d, d->count + 1)) return false;
-    s32 at = Dict_Find(d, a[1]);
+    s32 at = Dict_Find(in, d, a[1]);
     if (at < 0) {
         for (u32 i = 0; i < d->capacity; ++i) {
             if (!d->entries[i].used) { at = (s32)i; break; }
@@ -769,17 +822,17 @@ static bool Dict_SetItem(Interpreter& in, const MemberRefInfo&, u32, Value* a, V
     return true;
 }
 
-static bool Dict_GetItem(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+static bool Dict_GetItem(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     DictionaryObject* d = AsDict(a[0]);
-    s32 at = Dict_Find(d, a[1]);
+    s32 at = Dict_Find(in, d, a[1]);
     if (at < 0) return false;
     if (ret) *ret = d->entries[at].value;
     return true;
 }
 
-static bool Dict_TryGetValue(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+static bool Dict_TryGetValue(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     DictionaryObject* d = AsDict(a[0]);
-    s32 at = Dict_Find(d, a[1]);
+    s32 at = Dict_Find(in, d, a[1]);
     bool found = at >= 0;
     if (a[2].tag == VT_BYREF && a[2].data.ref) {
         *a[2].data.ref = found ? d->entries[at].value : Value::Null();
@@ -787,15 +840,15 @@ static bool Dict_TryGetValue(Interpreter&, const MemberRefInfo&, u32, Value* a, 
     return RetBool(ret, found);
 }
 
-static bool Dict_ContainsKey(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
-    return RetBool(ret, Dict_Find(AsDict(a[0]), a[1]) >= 0);
+static bool Dict_ContainsKey(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    return RetBool(ret, Dict_Find(in, AsDict(a[0]), a[1]) >= 0);
 }
 
-static bool Dict_ContainsValue(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+static bool Dict_ContainsValue(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     DictionaryObject* d = AsDict(a[0]);
     if (!d) return RetBool(ret, false);
     for (u32 i = 0; i < d->capacity; ++i) {
-        if (d->entries[i].used && ValueEqual(d->entries[i].value, a[1])) return RetBool(ret, true);
+        if (d->entries[i].used && ValueEqual(in, d->entries[i].value, a[1])) return RetBool(ret, true);
     }
     return RetBool(ret, false);
 }
@@ -845,9 +898,9 @@ static bool Dict_Clear(Interpreter&, const MemberRefInfo&, u32, Value* a, Value*
     return true;
 }
 
-static bool Dict_Remove(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+static bool Dict_Remove(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     DictionaryObject* d = AsDict(a[0]);
-    s32 at = Dict_Find(d, a[1]);
+    s32 at = Dict_Find(in, d, a[1]);
     if (at >= 0) {
         d->entries[at].used = 0;
         d->entries[at].key = Value::Null();
@@ -899,7 +952,7 @@ bool Interpreter::DictionarySet(const Value& dict, const Value& key, const Value
         ? (DictionaryObject*)dict.data.obj : 0;
     if (!d) return false;
     if (!Dict_Ensure(d, d->count + 1)) return false;
-    s32 at = Dict_Find(d, key);
+    s32 at = Dict_Find(*this, d, key);
     if (at < 0) {
         for (u32 i = 0; i < d->capacity; ++i) {
             if (!d->entries[i].used) { at = (s32)i; break; }
@@ -1498,6 +1551,7 @@ static const NativeEntry kEntries[] = {
     { "System.Type", "get_IsEnum", Type_GetIsEnum },
     { "System.Type", "get_IsValueType", Type_GetIsValueType },
     { "System.Enum", "GetValues", Enum_GetValues },
+    { "System.Enum", "ToString", Object_ToString },
     { "System.Threading.Interlocked", "CompareExchange", Interlocked_CompareExchange },
     { "System.Runtime.CompilerServices.RuntimeHelpers", "InitializeArray", RuntimeHelpers_InitializeArray },
     { "System.Exception", ".ctor", Exception_Ctor },

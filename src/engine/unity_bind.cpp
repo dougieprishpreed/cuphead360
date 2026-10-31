@@ -476,20 +476,109 @@ static bool Object_GetName(Interpreter& in, const MemberRefInfo&, u32, Value* a,
     return true;
 }
 
-static bool GameObject_Ctor(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
-    Object* go = in.AllocObjectWithSlots(in.GameObjectTypeId(), 10);
-    Object* tr = in.AllocObjectWithSlots(in.TransformTypeId(), 10);
+bool Interpreter::AppendRuntimeGameObject(const Value& name, Value* out_go) {
+    Scene* scene = scene_;
+    if (!scene) return false;
+    u32 oi = scene->ObjectCount();
+    const char* text = StringUtf8(name);
+    if (!text || !text[0]) text = "GameObject";
+    u32 length = (u32)strlen(text);
+    char* copy = (char*)MemAlloc(length + 1);
+    if (!copy) return false;
+    memcpy(copy, text, length + 1);
+    runtime_names_.PushBack(copy);
+
+    SceneObject o;
+    memset(&o, 0, sizeof(o));
+    o.id = 7000000u + oi;
+    o.parent = 0;
+    o.name = copy;
+    o.flags = 1u;
+    o.rotation[3] = 1.0f;
+    o.scale[0] = o.scale[1] = o.scale[2] = 1.0f;
+    o.component_start = scene->ComponentCount();
+    o.component_count = 0;
+    if (scene->AddRuntimeObject(o) == 0xFFFFFFFFu) return false;
+    if (!managed_gameobjects_.Resize(oi + 1)) return false;
+    if (!managed_transforms_.Resize(oi + 1)) return false;
+
+    Object* go = AllocObjectWithSlots(gameobject_type_id_, 4);
+    Object* tr = AllocObjectWithSlots(transform_type_id_, 6);
     if (!go || !tr) return false;
-    go->Fields()[0] = Value::I4(-1);
+    go->Fields()[0] = Value::I4((s32)oi);
     go->Fields()[1] = Value::ObjectRef(tr);
-    go->Fields()[2] = (argc >= 2 && a[1].tag == VT_STRING) ? a[1] : Value::Null();
-    tr->Fields()[0] = Value::I4(-1);
+    go->Fields()[2] = name.tag == VT_STRING ? name : NewStringUtf8(copy);
+    go->flags = 1u;
+    tr->Fields()[0] = Value::I4((s32)oi);
     tr->Fields()[1] = Value::ObjectRef(go);
     tr->Fields()[2] = Value::Null();
-    tr->Fields()[3] = in.NewVec3(0.0f, 0.0f, 0.0f);
-    tr->Fields()[4] = in.NewVec3(1.0f, 1.0f, 1.0f);
-    tr->Fields()[5] = in.NewVec3(0.0f, 0.0f, 0.0f);
-    if (ret) *ret = Value::ObjectRef(go);
+    tr->Fields()[3] = NewVec3(0.0f, 0.0f, 0.0f);
+    tr->Fields()[4] = NewVec3(1.0f, 1.0f, 1.0f);
+    tr->Fields()[5] = NewVec3(0.0f, 0.0f, 0.0f);
+    tr->flags = 1u;
+    managed_gameobjects_[oi] = Value::ObjectRef(go);
+    managed_transforms_[oi] = Value::ObjectRef(tr);
+    AddManagedBinding(go, oi, 0xFFFFFFFFu);
+    AddManagedBinding(tr, oi, 0xFFFFFFFFu);
+    scene->ComputeWorldTransforms();
+    if (out_go) *out_go = Value::ObjectRef(go);
+    return true;
+}
+
+bool Interpreter::AppendRuntimeComponent(u32 object_index, u32 scene_type,
+                                         const char* controller,
+                                         u32* out_component_index,
+                                         Value* out_component) {
+    Scene* scene = scene_;
+    if (!scene || object_index >= scene->ObjectCount()) return false;
+    SceneComponent sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.type = scene_type;
+    sc.flags = 1u;
+    sc.controller = controller ? controller : "";
+    sc.source_id = 8000000u + scene->ComponentCount();
+    u32 ci = scene->AddRuntimeComponent(sc);
+    if (ci == 0xFFFFFFFFu) return false;
+    if (!managed_components_.Resize(ci + 1)) return false;
+    if (!awake_flags_.Resize(ci + 1)) return false;
+    awake_flags_[ci] = 0;
+
+    u32 type = component_type_id_;
+    u32 slots = 4;
+    if (scene_type == 1) type = sprite_renderer_type_id_;
+    else if (scene_type == 2) type = animator_type_id_;
+    else if (scene_type == 3) type = metadata_.FindType("UnityEngine.Camera");
+    else if (scene_type == 5) type = metadata_.FindType("UnityEngine.BoxCollider2D");
+    else if (scene_type == 6) type = metadata_.FindType("UnityEngine.CircleCollider2D");
+    else if (scene_type == 7) { type = metadata_.FindType("UnityEngine.Rigidbody2D"); slots = 10; }
+    else if (scene_type == 4) {
+        type = metadata_.FindType(controller);
+        if (type) {
+            slots = runtime_types_[type].total_slots;
+            if (slots < 2) slots = 2;
+        }
+    }
+    if (!type) return false;
+    Object* comp = AllocObjectWithSlots(type, slots);
+    if (!comp) return false;
+    comp->Fields()[0] = Value::I4((s32)object_index);
+    comp->Fields()[1] = Value::I4((s32)ci);
+    comp->flags = 1u;
+    AddManagedBinding(comp, object_index, ci);
+    managed_components_[ci] = Value::ObjectRef(comp);
+    SceneObject& owner = scene->MutableObject(object_index);
+    owner.component_count++;
+    scene->ComputeWorldTransforms();
+    if (out_component_index) *out_component_index = ci;
+    if (out_component) *out_component = Value::ObjectRef(comp);
+    return true;
+}
+
+static bool GameObject_Ctor(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    Value name = (argc >= 2 && a[1].tag == VT_STRING) ? a[1] : Value::Null();
+    Value go;
+    if (!in.AppendRuntimeGameObject(name, &go)) return false;
+    if (ret) *ret = go;
     return true;
 }
 
@@ -698,6 +787,22 @@ static bool GameObject_GetActiveSelf(Interpreter& in, const MemberRefInfo&, u32,
         return RetBoolV(ret, (scene->Object(oi).flags & 1u) != 0);
     }
     return RetBoolV(ret, (a[0].data.obj->flags & 1u) != 0);
+}
+static bool GameObject_GetActiveInHierarchy(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    if (scene && oi < scene->ObjectCount()) {
+        u32 cur = oi;
+        u32 guard = 0;
+        while (cur < scene->ObjectCount() && guard++ < 256) {
+            const SceneObject& o = scene->Object(cur);
+            if (!(o.flags & 1u)) return RetBoolV(ret, false);
+            if (o.parent == 0xFFFFFFFFu || o.parent == cur) break;
+            cur = o.parent;
+        }
+        return RetBoolV(ret, true);
+    }
+    return RetBoolV(ret, a[0].data.obj && (a[0].data.obj->flags & 1u) != 0);
 }
 
 static bool Behaviour_SetEnabled(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
@@ -1179,7 +1284,6 @@ static u32 Physics2D_CollectHits(Interpreter& in, f32 ox, f32 oy, f32 hw, f32 hh
     u32 count = 0;
     for (u32 oi = 0; oi < scene->ObjectCount(); ++oi) {
         const SceneObject& o = scene->Object(oi);
-        if (o.id >= 1000000u) continue;
         for (u32 c = 0; c < o.component_count; ++c) {
             u32 ci = o.component_start + c;
             if (ci >= scene->ComponentCount()) break;
@@ -2138,18 +2242,47 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
             u32 target = 0;
             if (argc >= 2 && args[1].tag == VT_I4) target = (u32)args[1].data.i32;
             if (!target) target = in.GenericArgType(0);
-            if (!target) {
+            Scene* scene = in.BoundScene();
+            u32 oi = ManagedObjectIndex(in, args[0]);
+            if (!target || !scene || oi >= scene->ObjectCount()) {
                 if (ret) *ret = Value::Null();
                 return true;
             }
-            Object* comp = in.AllocObjectWithSlots(target, 8);
-            if (comp) {
-                comp->Fields()[0] = Value::I4((s32)ManagedObjectIndex(in, args[0]));
-                comp->Fields()[1] = Value::I4(-1);
-                if (ret) *ret = Value::ObjectRef(comp);
-            } else if (ret) {
-                *ret = Value::Null();
+            const TypeInfo& tt = in.Metadata().Type(target);
+            const char* tn = tt.full_name ? tt.full_name : "";
+            u32 scene_type = 0;
+            const char* controller = "";
+            if (strcmp(tn, "UnityEngine.BoxCollider2D") == 0) scene_type = 5;
+            else if (strcmp(tn, "UnityEngine.CircleCollider2D") == 0) scene_type = 6;
+            else if (strcmp(tn, "UnityEngine.Rigidbody2D") == 0) scene_type = 7;
+            else if (strcmp(tn, "UnityEngine.SpriteRenderer") == 0) scene_type = 1;
+            else if (strcmp(tn, "UnityEngine.Animator") == 0) scene_type = 2;
+            else if (strcmp(tn, "UnityEngine.Camera") == 0) scene_type = 3;
+            else if (in.IsAssignable(target, in.MonoBehaviourTypeId())) {
+                scene_type = 4;
+                controller = tn;
             }
+            if (!scene_type) {
+                if (ret) *ret = Value::Null();
+                return true;
+            }
+            u32 ci = 0xFFFFFFFFu;
+            Value comp = Value::Null();
+            if (!in.AppendRuntimeComponent(oi, scene_type, controller, &ci, &comp)) {
+                if (ret) *ret = Value::Null();
+                return true;
+            }
+            if (scene_type == 4 && comp.tag == VT_OBJECT && comp.data.obj) {
+                u32 awake = FindMethodInHierarchy(in, comp.data.obj->type_id, "Awake");
+                if (awake) {
+                    Value aargs[1]; aargs[0] = comp; Value ar;
+                    if (!in.Invoke(awake, aargs, 1, &ar)) {
+                        LogWarn("unity", "AddComponent Awake %s failed", controller);
+                    }
+                }
+                in.MarkComponentAwake(ci);
+            }
+            if (ret) *ret = comp;
             return true;
         }
         if (strcmp(n, "Instantiate") == 0) return Object_Instantiate(in, member, argc, args, ret);
@@ -2186,6 +2319,7 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "set_layer") == 0) return RetVoid(ret);
         if (strcmp(n, "get_layer") == 0) return RetI32V(ret, 0);
         if (strcmp(n, "get_activeSelf") == 0) return GameObject_GetActiveSelf(in, member, argc, args, ret);
+        if (strcmp(n, "get_activeInHierarchy") == 0) return GameObject_GetActiveInHierarchy(in, member, argc, args, ret);
         if (strcmp(n, "get_name") == 0) return Object_GetName(in, member, argc, args, ret);
         if (strcmp(n, "set_name") == 0) return RetVoid(ret);
         if (strcmp(n, "set_enabled") == 0) return Behaviour_SetEnabled(in, member, argc, args, ret);

@@ -114,6 +114,8 @@ public:
     const char* Directory() const { return directory_; }
     u32 FindObjectByName(const char* name) const;
     u32 FindSpriteByName(const char* name) const;
+    u32 AddRuntimeObject(const SceneObject& object);
+    u32 AddRuntimeComponent(const SceneComponent& component);
     void SetMainCameraPosition(f32 x, f32 y);
     const u8* ScriptStrings() const { return script_strings_; }
     u32 ScriptStringsSize() const { return script_strings_size_; }
