@@ -1401,6 +1401,51 @@ static bool JsonUtility_FromJson(Interpreter& in, const MemberRefInfo&, u32, Val
     if (ret) *ret = t ? in.NewObjectValue(t) : Value::Null();
     return true;
 }
+static bool String_Split(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    if (a[0].tag != VT_STRING) {
+        if (ret) *ret = Value::Null();
+        return true;
+    }
+    const u16* src = StringChars(a[0]);
+    u32 n = StringLength(a[0]);
+    u16 sep = 0;
+    bool have_sep = false;
+    if (argc >= 2 && (a[1].tag == VT_CHAR || a[1].tag == VT_I4)) {
+        sep = (u16)Interpreter::ToI32(a[1]);
+        have_sep = true;
+    } else if (argc >= 2 && a[1].tag == VT_STRING && StringLength(a[1]) == 1) {
+        sep = StringChars(a[1])[0];
+        have_sep = true;
+    }
+    if (!have_sep) {
+        if (ret) *ret = in.NewArrayValue(in.StringTypeId(), 0);
+        return true;
+    }
+    bool remove_empty = argc >= 3 && Interpreter::ToI32(a[2]) == 1;
+    u32 pieces = 1;
+    for (u32 i = 0; i < n; ++i) if (src[i] == sep) ++pieces;
+    Value arr = in.NewArrayValue(in.StringTypeId(), pieces);
+    if (arr.tag != VT_ARRAY || !arr.data.array) {
+        if (ret) *ret = arr;
+        return true;
+    }
+    u32 out = 0, start = 0;
+    for (u32 i = 0; i <= n; ++i) {
+        if (i != n && src[i] != sep) continue;
+        u32 len = i - start;
+        if (!(remove_empty && len == 0) && out < arr.data.array->length) {
+            arr.data.array->Elements()[out++] = in.NewStringUtf16(src + start, len);
+        }
+        start = i + 1;
+    }
+    if (out < arr.data.array->length) {
+        // Compact the array length when empty pieces were removed.
+        arr.data.array->length = out;
+    }
+    if (ret) *ret = arr;
+    return true;
+}
+
 static bool String_Replace(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {    if (a[0].tag != VT_STRING) {
         if (ret) *ret = Value::Null();
         return true;
@@ -1693,6 +1738,7 @@ static const NativeEntry kEntries[] = {
     { "UnityEngine.JsonUtility", "ToJson", JsonUtility_ToJson },
     { "UnityEngine.JsonUtility", "FromJson", JsonUtility_FromJson },
     { "System.String", "Replace", String_Replace },
+    { "System.String", "Split", String_Split },
     { "UnityEngine.PlayerPrefs", "HasKey", PlayerPrefs_HasKey },
     { "UnityEngine.PlayerPrefs", "GetString", PlayerPrefs_GetString },
     { "UnityEngine.PlayerPrefs", "SetString", PlayerPrefs_SetString },
