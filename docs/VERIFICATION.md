@@ -174,6 +174,11 @@ This is not a validated visual slice.
   `start=-410.0,-270.0 max_x=804.9 max_y=-270.0 min_y=-274.5 result=PASS`.
   Screenshots: `work\extract_level\levelplay.45.bmp`,
   `levelplay.100.bmp`, `levelplay.200.bmp`.
+- The level-play harness now also runs a bounded scene-wide `Awake`/`Start`
+  lifecycle and ticks original non-UI gameplay scripts. Shooting spawns
+  projectiles whose original `Update` methods execute. `Object.Instantiate`
+  is still template reuse rather than true cloning, and damage/target
+  destruction are not yet validated.
 - Sprite world size now uses the cropped sprite rect instead of the atlas
   rect, fixing the oversized character art in both the native play slice and
   the original-level play harness.

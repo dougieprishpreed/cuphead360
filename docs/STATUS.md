@@ -84,6 +84,12 @@ been validated, and what remains.
   `LevelPlayerMotor` created by `Level.Start` with synthesized Rewired input,
   camera follow and software sprite rendering. Observed:
   `start=-410.0,-270.0 max_x=804.9 max_y=-270.0 min_y=-274.5 result=PASS`.
+- The harness also runs a bounded scene-wide `Awake`/`Start` pass and ticks
+  the serialized non-UI gameplay scripts (targets, coins, effects). Shooting
+  input is synthesized and original projectile `Update` methods execute.
+- `Object.Instantiate` still reuses the template scene object rather than
+  cloning it, so repeated projectiles/enemies are not independent yet. Real
+  damage resolution, target destruction and win/lose flow are not validated.
 - Screenshots: `work\extract_level\levelplay.45.bmp`,
   `levelplay.100.bmp`, `levelplay.200.bmp`.
 - This is a startup/movement slice, not a complete level. UI/audio component
