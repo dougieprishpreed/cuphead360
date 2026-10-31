@@ -1570,6 +1570,17 @@ static u32 FindMethodInHierarchy(Interpreter& in, u32 type_id, const char* name)
     return 0;
 }
 
+static u32 FindFieldInHierarchy(Interpreter& in, u32 type_id, const char* name) {
+    u32 cur = type_id;
+    u32 guard = 0;
+    while (cur && guard++ < 64) {
+        u32 f = in.Metadata().FindField(cur, name);
+        if (f) return f;
+        cur = in.Metadata().Type(cur).base_id;
+    }
+    return 0;
+}
+
 static const char* LastPathSegment(const char* path) {
     if (!path) return "";
     const char* slash = strrchr(path, '/');
@@ -1723,6 +1734,290 @@ static void InvokeAwakeOnTree(Interpreter& in, u32 root_oi) {
     }
 }
 
+bool Interpreter::CloneGameObject(u32 template_oi, Value* out_go) {
+    Scene* scene = scene_;
+    const u32 kInvalid = 0xFFFFFFFFu;
+    if (!scene || template_oi >= scene->ObjectCount()) return false;
+
+    // Collect the template hierarchy. Unity prefab assets are emitted as an
+    // inactive object tree, so Instantiate must clone every descendant.
+    Buffer<u32> subtree;
+    if (!subtree.PushBack(template_oi)) return false;
+    for (u32 i = 0; i < subtree.Size(); ++i) {
+        u32 cur = subtree[i];
+        for (u32 oi = 0; oi < scene->ObjectCount(); ++oi) {
+            if (oi == template_oi || scene->Object(oi).parent != cur) continue;
+            bool seen = false;
+            for (u32 j = 0; j < subtree.Size(); ++j) {
+                if (subtree[j] == oi) { seen = true; break; }
+            }
+            if (!seen && !subtree.PushBack(oi)) return false;
+        }
+    }
+
+    Buffer<u32> obj_map;
+    if (!obj_map.Resize(scene->ObjectCount())) return false;
+    for (u32 i = 0; i < obj_map.Size(); ++i) obj_map[i] = kInvalid;
+    Buffer<u32> comp_map;
+    if (!comp_map.Resize(scene->ComponentCount())) return false;
+    for (u32 i = 0; i < comp_map.Size(); ++i) comp_map[i] = kInvalid;
+
+    // Clone the object hierarchy and its GameObject/Transform wrappers.
+    for (u32 i = 0; i < subtree.Size(); ++i) {
+        u32 orig = subtree[i];
+        const SceneObject& src = scene->Object(orig);
+        SceneObject o = src;
+        const char* src_name = src.name ? src.name : "GameObject";
+        u32 n = (u32)strlen(src_name);
+        char* name = (char*)MemAlloc(n + 1);
+        if (!name) return false;
+        memcpy(name, src_name, n + 1);
+        runtime_names_.PushBack(name);
+        o.name = name;
+        o.id = 7000000u + scene->ObjectCount();
+        o.flags = 1u;
+        o.component_start = scene->ComponentCount();
+        o.component_count = 0;
+        if (orig != template_oi) {
+            if (src.parent < obj_map.Size() && obj_map[src.parent] != kInvalid) {
+                o.parent = obj_map[src.parent];
+            }
+        }
+        u32 new_oi = scene->AddRuntimeObject(o);
+        if (new_oi == kInvalid) return false;
+        obj_map[orig] = new_oi;
+        if (!managed_gameobjects_.Resize(new_oi + 1)) return false;
+        if (!managed_transforms_.Resize(new_oi + 1)) return false;
+
+        Object* go = AllocObjectWithSlots(gameobject_type_id_, 4);
+        Object* tr = AllocObjectWithSlots(transform_type_id_, 6);
+        if (!go || !tr) return false;
+        go->Fields()[0] = Value::I4((s32)new_oi);
+        go->Fields()[1] = Value::ObjectRef(tr);
+        go->Fields()[2] = NewStringUtf8(name);
+        go->flags = 1u;
+        tr->Fields()[0] = Value::I4((s32)new_oi);
+        tr->Fields()[1] = Value::ObjectRef(go);
+        tr->Fields()[2] = Value::Null();
+        tr->Fields()[3] = NewVec3(o.position[0], o.position[1], o.position[2]);
+        tr->Fields()[4] = NewVec3(o.scale[0], o.scale[1], o.scale[2]);
+        tr->Fields()[5] = NewVec3(0.0f, 0.0f, 0.0f);
+        tr->flags = 1u;
+        managed_gameobjects_[new_oi] = Value::ObjectRef(go);
+        managed_transforms_[new_oi] = Value::ObjectRef(tr);
+        AddManagedBinding(go, new_oi, kInvalid);
+        AddManagedBinding(tr, new_oi, kInvalid);
+    }
+
+    // Create every component first, then copy fields. A script may reference a
+    // sibling component that is cloned later in the table.
+    for (u32 i = 0; i < subtree.Size(); ++i) {
+        u32 orig = subtree[i];
+        u32 new_oi = obj_map[orig];
+        const SceneObject& src_obj = scene->Object(orig);
+        for (u32 c = 0; c < src_obj.component_count; ++c) {
+            u32 orig_ci = src_obj.component_start + c;
+            if (orig_ci >= scene->ComponentCount()) break;
+            SceneComponent nsc = scene->Component(orig_ci);
+            nsc.source_id = 8000000u + scene->ComponentCount();
+            nsc.flags |= 1u;
+            u32 new_ci = scene->AddRuntimeComponent(nsc);
+            if (new_ci == kInvalid) return false;
+            if (!managed_components_.Resize(new_ci + 1)) return false;
+            if (!awake_flags_.Resize(new_ci + 1)) return false;
+            awake_flags_[new_ci] = 0;
+
+            u32 type = component_type_id_;
+            u32 slots = 4;
+            if (nsc.type == 1) type = sprite_renderer_type_id_;
+            else if (nsc.type == 2) type = animator_type_id_;
+            else if (nsc.type == 3) type = metadata_.FindType("UnityEngine.Camera");
+            else if (nsc.type == 5) type = metadata_.FindType("UnityEngine.BoxCollider2D");
+            else if (nsc.type == 6) type = metadata_.FindType("UnityEngine.CircleCollider2D");
+            else if (nsc.type == 7) { type = metadata_.FindType("UnityEngine.Rigidbody2D"); slots = 10; }
+            else if (nsc.type == 4) {
+                type = metadata_.FindType(nsc.controller);
+                if (type) {
+                    slots = runtime_types_[type].total_slots;
+                    if (slots < 2) slots = 2;
+                }
+            }
+            if (!type) continue;
+            Object* comp = AllocObjectWithSlots(type, slots);
+            if (!comp) return false;
+            comp->Fields()[0] = Value::I4((s32)new_oi);
+            comp->Fields()[1] = Value::I4((s32)new_ci);
+            comp->flags = nsc.flags;
+            AddManagedBinding(comp, new_oi, new_ci);
+            managed_components_[new_ci] = Value::ObjectRef(comp);
+            comp_map[orig_ci] = new_ci;
+
+            SceneObject& owner = scene->MutableObject(new_oi);
+            if (owner.component_count == 0) owner.component_start = new_ci;
+            owner.component_count++;
+        }
+    }
+
+    // Copy serialized/managed fields and remap references inside the clone.
+    for (u32 i = 0; i < subtree.Size(); ++i) {
+        u32 orig = subtree[i];
+        u32 new_oi = obj_map[orig];
+        const SceneObject& src_obj = scene->Object(orig);
+        for (u32 c = 0; c < src_obj.component_count; ++c) {
+            u32 orig_ci = src_obj.component_start + c;
+            if (orig_ci >= scene->ComponentCount()) break;
+            u32 new_ci = comp_map[orig_ci];
+            if (new_ci == kInvalid) continue;
+            Value srcv = ManagedComponent(orig_ci);
+            Value dstv = ManagedComponent(new_ci);
+            if (srcv.tag != VT_OBJECT || !srcv.data.obj ||
+                dstv.tag != VT_OBJECT || !dstv.data.obj) continue;
+            Object* src_comp = srcv.data.obj;
+            Object* dst_comp = dstv.data.obj;
+            u32 copy_slots = src_comp->slots < dst_comp->slots ? src_comp->slots : dst_comp->slots;
+            for (u32 s = 2; s < copy_slots; ++s) {
+                Value nv = CopyValue(src_comp->Fields()[s]);
+                if (nv.tag == VT_OBJECT && nv.data.obj) {
+                    for (u32 b = 0; b < bindings_.Size(); ++b) {
+                        if (bindings_[b].obj != nv.data.obj) continue;
+                        u32 boi = bindings_[b].object_index;
+                        u32 bci = bindings_[b].component_index;
+                        if (bci == kInvalid && boi < obj_map.Size() && obj_map[boi] != kInvalid) {
+                            u32 nt = nv.data.obj->type_id;
+                            if (IsAssignable(nt, gameobject_type_id_)) {
+                                nv = managed_gameobjects_[obj_map[boi]];
+                            } else if (IsAssignable(nt, transform_type_id_)) {
+                                nv = managed_transforms_[obj_map[boi]];
+                            }
+                        } else if (bci != kInvalid && bci < comp_map.Size() &&
+                                   comp_map[bci] != kInvalid) {
+                            nv = managed_components_[comp_map[bci]];
+                        }
+                        break;
+                    }
+                }
+                dst_comp->Fields()[s] = nv;
+            }
+        }
+    }
+
+    // Repair serialized component references inside the cloned prefab tree.
+    {
+        u32 ctrl_type = metadata_.FindType("LevelPlayerController");
+        u32 ctrl_ci = kInvalid;
+        if (ctrl_type) {
+            for (u32 i = 0; i < subtree.Size() && ctrl_ci == kInvalid; ++i) {
+                u32 new_oi = obj_map[subtree[i]];
+                const SceneObject& o = scene->Object(new_oi);
+                for (u32 c = 0; c < o.component_count; ++c) {
+                    u32 ci = o.component_start + c;
+                    if (ci >= scene->ComponentCount()) break;
+                    Value cv = ManagedComponent(ci);
+                    if (cv.tag == VT_OBJECT && cv.data.obj &&
+                        IsAssignable(cv.data.obj->type_id, ctrl_type)) {
+                        ctrl_ci = ci;
+                        break;
+                    }
+                }
+            }
+        }
+        if (ctrl_ci != kInvalid) {
+            Value ctrl = ManagedComponent(ctrl_ci);
+            struct ComponentRef { const char* field; const char* type; };
+            static const ComponentRef kRefs[] = {
+                { "_motor", "LevelPlayerMotor" },
+                { "_animationController", "LevelPlayerAnimationController" },
+                { "_weaponManager", "LevelPlayerWeaponManager" },
+                { "_parryController", "LevelPlayerParryController" },
+                { "_colliderManager", "LevelPlayerColliderManager" },
+                { "_input", "PlayerInput" },
+                { "_stats", "PlayerStatsManager" },
+                { "_damageReceiver", "PlayerDamageReceiver" },
+                { "_cameraController", "PlayerCameraController" },
+                { "_collider", "UnityEngine.BoxCollider2D" },
+            };
+            for (u32 r = 0; r < CH360_ARRAY_COUNT(kRefs); ++r) {
+                u32 f = FindFieldInHierarchy(*this, ctrl_type, kRefs[r].field);
+                u32 want_type = metadata_.FindType(kRefs[r].type);
+                if (!f || !want_type) continue;
+                u32 found = kInvalid;
+                for (u32 i = 0; i < subtree.Size() && found == kInvalid; ++i) {
+                    u32 new_oi = obj_map[subtree[i]];
+                    const SceneObject& o = scene->Object(new_oi);
+                    for (u32 c = 0; c < o.component_count; ++c) {
+                        u32 ci = o.component_start + c;
+                        if (ci >= scene->ComponentCount()) break;
+                        Value cv = ManagedComponent(ci);
+                        if (cv.tag == VT_OBJECT && cv.data.obj &&
+                            IsAssignable(cv.data.obj->type_id, want_type)) {
+                            found = ci;
+                            break;
+                        }
+                    }
+                }
+                if (found != kInvalid) SetField(f, ctrl, ManagedComponent(found));
+            }
+            u32 apc_type = metadata_.FindType("AbstractPlayerComponent");
+            u32 alpc_type = metadata_.FindType("AbstractLevelPlayerComponent");
+            u32 base_field = apc_type ? metadata_.FindField(apc_type, "_basePlayer") : 0;
+            u32 player_field = alpc_type
+                ? metadata_.FindField(alpc_type, "<player>k__BackingField") : 0;
+            for (u32 i = 0; i < subtree.Size(); ++i) {
+                u32 new_oi = obj_map[subtree[i]];
+                const SceneObject& o = scene->Object(new_oi);
+                for (u32 c = 0; c < o.component_count; ++c) {
+                    u32 ci = o.component_start + c;
+                    if (ci >= scene->ComponentCount()) break;
+                    Value cv = ManagedComponent(ci);
+                    if (cv.tag != VT_OBJECT || !cv.data.obj) continue;
+                    u32 ct = cv.data.obj->type_id;
+                    if (base_field && apc_type && IsAssignable(ct, apc_type)) {
+                        SetField(base_field, cv, ctrl);
+                    }
+                    if (player_field && alpc_type && IsAssignable(ct, alpc_type)) {
+                        SetField(player_field, cv, ctrl);
+                    }
+                }
+            }
+        }
+    }
+
+    // Unity runs Awake on newly instantiated components before returning.
+    for (u32 i = 0; i < subtree.Size(); ++i) {
+        u32 new_oi = obj_map[subtree[i]];
+        const SceneObject& o = scene->Object(new_oi);
+        for (u32 c = 0; c < o.component_count; ++c) {
+            u32 ci = o.component_start + c;
+            if (ci >= scene->ComponentCount()) break;
+            if (scene->Component(ci).type != 4) { MarkComponentAwake(ci); continue; }
+            const char* ctrl = scene->Component(ci).controller;
+            if (strncmp(ctrl, "Rewired.UI.", 11) == 0 ||
+                strncmp(ctrl, "Rewired.Integration.", 20) == 0 ||
+                strncmp(ctrl, "UnityEngine.EventSystems.", 24) == 0 ||
+                strncmp(ctrl, "UnityEngine.UI.", 15) == 0 ||
+                strncmp(ctrl, "TMPro.", 6) == 0) {
+                MarkComponentAwake(ci);
+                continue;
+            }
+            Value self = ManagedComponent(ci);
+            if (self.tag == VT_OBJECT && self.data.obj) {
+                u32 awake = FindMethodInHierarchy(*this, self.data.obj->type_id, "Awake");
+                if (awake) {
+                    Value r;
+                    if (!Invoke(awake, &self, 1, &r)) {
+                        LogWarn("unity", "Awake %s on cloned '%s' failed", ctrl, o.name);
+                    }
+                }
+            }
+            MarkComponentAwake(ci);
+        }
+    }
+
+    scene->ComputeWorldTransforms();
+    if (out_go) *out_go = managed_gameobjects_[obj_map[template_oi]];
+    return true;
+}
+
 static bool Object_Instantiate(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
     if (argc < 1 || a[0].tag != VT_OBJECT || !a[0].data.obj) {
         if (ret) *ret = Value::Null();
@@ -1734,6 +2029,91 @@ static bool Object_Instantiate(Interpreter& in, const MemberRefInfo&, u32 argc, 
         if (ret) *ret = a[0];
         return true;
     }
+    u32 want = in.GenericArgType(0);
+    u32 orig_comp = in.ManagedComponentIndexFor(a[0]);
+    u32 orig_type = a[0].data.obj->type_id;
+    bool reuse_template = false;
+    {
+        u32 ctrl_type = in.Metadata().FindType("LevelPlayerController");
+        if (ctrl_type && want == ctrl_type) reuse_template = true;
+        if (ctrl_type && !reuse_template) {
+            // Until player-prefab cloning is fully validated, keep the
+            // original template player that Level.Start previously used.
+            for (u32 oi2 = oi; oi2 < scene->ObjectCount() && !reuse_template; ++oi2) {
+                const SceneObject& o2 = scene->Object(oi2);
+                for (u32 c = 0; c < o2.component_count; ++c) {
+                    u32 ci = o2.component_start + c;
+                    if (ci >= scene->ComponentCount()) break;
+                    Value v = in.ManagedComponent(ci);
+                    if (v.tag == VT_OBJECT && v.data.obj &&
+                        in.IsAssignable(v.data.obj->type_id, ctrl_type)) {
+                        reuse_template = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (reuse_template) {
+        SceneObject& o = scene->MutableObject(oi);
+        o.flags |= 1u;
+        a[0].data.obj->flags |= 1u;
+        InvokeAwakeOnTree(in, oi);
+        if (ret) *ret = a[0];
+        return true;
+    }
+    Value cloned;
+    if (in.CloneGameObject(oi, &cloned) && cloned.tag == VT_OBJECT && cloned.data.obj) {
+        u32 new_oi = in.ManagedObjectIndexFor(cloned);
+        if (new_oi < scene->ObjectCount()) {
+            SceneObject& no = scene->MutableObject(new_oi);
+            if (argc >= 2) {
+                if (a[1].tag == VT_VEC3 && a[1].data.ptr) {
+                    const Vec3* p = (const Vec3*)a[1].data.ptr;
+                    no.position[0] = p->x; no.position[1] = p->y; no.position[2] = p->z;
+                } else if (a[1].tag == VT_OBJECT) {
+                    u32 poi = in.ManagedObjectIndexFor(a[1]);
+                    if (poi < scene->ObjectCount()) no.parent = poi;
+                } else if (a[1].tag == VT_VEC2 && a[1].data.ptr) {
+                    const Vec2* p = (const Vec2*)a[1].data.ptr;
+                    no.position[0] = p->x; no.position[1] = p->y;
+                }
+            }
+            scene->ComputeWorldTransforms();
+
+            // Unity's generic Instantiate<T>(T) returns T. When the caller
+            // cloned a component (or used a component generic argument), return
+            // the corresponding component from the clone rather than the new
+            // GameObject. AbstractPlayerController.Create relies on this.
+            if (new_oi < scene->ObjectCount()) {
+                bool need_component = (want && want != in.GameObjectTypeId()) ||
+                    (!want && orig_comp != 0xFFFFFFFFu);
+                if (need_component) {
+                    for (u32 coi = new_oi; coi < scene->ObjectCount(); ++coi) {
+                        const SceneObject& co = scene->Object(coi);
+                        for (u32 c = 0; c < co.component_count; ++c) {
+                            u32 ci = co.component_start + c;
+                            if (ci >= scene->ComponentCount()) break;
+                            Value cv = in.ManagedComponent(ci);
+                            if (cv.tag != VT_OBJECT || !cv.data.obj) continue;
+                            u32 vt = cv.data.obj->type_id;
+                            bool match = want
+                                ? (vt == want || in.IsAssignable(vt, want))
+                                : (vt == orig_type);
+                            if (match) {
+                                if (ret) *ret = cv;
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (ret) *ret = cloned;
+        return true;
+    }
+    // Fallback for templates that could not be cloned (e.g. a scene object
+    // without a full managed binding): activate the template in place.
     SceneObject& o = scene->MutableObject(oi);
     o.flags |= 1u;
     a[0].data.obj->flags |= 1u;

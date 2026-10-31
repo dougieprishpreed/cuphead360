@@ -95,6 +95,7 @@ public:
     bool AppendRuntimeGameObject(const Value& name, Value* out_go);
     bool AppendRuntimeComponent(u32 object_index, u32 scene_type, const char* controller,
                                 u32* out_component_index, Value* out_component);
+    bool CloneGameObject(u32 template_object_index, Value* out_go);
     u32 GameObjectTypeId() const { return gameobject_type_id_; }
     u32 TransformTypeId() const { return transform_type_id_; }
     u32 ComponentTypeId() const { return component_type_id_; }

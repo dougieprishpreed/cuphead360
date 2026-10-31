@@ -947,6 +947,62 @@ static bool ArrayEnumerator_Current(Interpreter&, Object* e, Value* ret) {
     return true;
 }
 
+static Value DerefValue(const Value& v) {
+    if (v.tag == VT_BYREF && v.data.ref) return *v.data.ref;
+    return v;
+}
+
+static Object* CollectionObject(const Value& v) {
+    Value x = DerefValue(v);
+    if (x.tag == VT_ARRAY) return 0;
+    if ((x.tag == VT_OBJECT || x.tag == VT_STRUCT) && x.data.obj) {
+        Value inner = x.data.obj->Fields()[0];
+        if (inner.tag == VT_ARRAY) return x.data.obj;
+    }
+    return (x.tag == VT_OBJECT || x.tag == VT_STRUCT) ? x.data.obj : 0;
+}
+
+static bool DictCollection_GetEnumerator(Interpreter& in, const Value& recv, Value* ret) {
+    Value arr = DerefValue(recv);
+    if (arr.tag != VT_ARRAY) {
+        Object* o = CollectionObject(recv);
+        if (!o) return false;
+        arr = o->Fields()[0];
+    }
+    if (arr.tag != VT_ARRAY || !arr.data.array) return false;
+    u32 object_type = in.Metadata().FindType("System.Object");
+    Object* e = in.AllocObjectWithSlots(object_type, 2);
+    if (!e) return false;
+    e->Fields()[0] = arr;
+    e->Fields()[1] = Value::I4(-1);
+    if (ret) *ret = Value::ObjectRef(e);
+    return true;
+}
+
+static bool DictCollection_GetCount(Interpreter& in, const Value& recv, Value* ret) {
+    Value arr = DerefValue(recv);
+    if (arr.tag != VT_ARRAY) {
+        Object* o = CollectionObject(recv);
+        if (!o) return RetI32(ret, 0);
+        arr = o->Fields()[0];
+    }
+    (void)in;
+    return RetI32(ret, arr.tag == VT_ARRAY && arr.data.array ? (s32)arr.data.array->length : 0);
+}
+
+static bool DictEnumerator_MoveNext(Interpreter& in, const Value& recv, Value* ret) {
+    Object* e = CollectionObject(recv);
+    if (!e) return RetBool(ret, false);
+    return ArrayEnumerator_MoveNext(in, e, ret);
+}
+
+static bool DictEnumerator_Current(Interpreter& in, const Value& recv, Value* ret) {
+    Object* e = CollectionObject(recv);
+    if (!e) return false;
+    return ArrayEnumerator_Current(in, e, ret);
+}
+
+
 bool Interpreter::DictionarySet(const Value& dict, const Value& key, const Value& value) {
     DictionaryObject* d = (dict.tag == VT_OBJECT && dict.data.obj)
         ? (DictionaryObject*)dict.data.obj : 0;
@@ -1678,6 +1734,33 @@ bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value
             if (strcmp(n, "Reset") == 0) {
                 recv->Fields()[1] = Value::I4(-1);
                 return RetVoid(ret);
+            }
+        }
+    }
+    if (t.full_name && strstr(t.full_name, "Dictionary`2/")) {
+        const char* n = member.name;
+        bool is_enumerator = strstr(t.full_name, "Enumerator") != 0;
+        bool is_collection = strstr(t.full_name, "KeyCollection") != 0 ||
+                             strstr(t.full_name, "ValueCollection") != 0;
+        if (is_enumerator) {
+            if (strcmp(n, "MoveNext") == 0) {
+                return DictEnumerator_MoveNext(*this, arg_count ? args[0] : Value::Null(), ret);
+            }
+            if (strcmp(n, "get_Current") == 0) {
+                return DictEnumerator_Current(*this, arg_count ? args[0] : Value::Null(), ret);
+            }
+            if (strcmp(n, "Dispose") == 0) return RetVoid(ret);
+            if (strcmp(n, "Reset") == 0) {
+                Object* e = CollectionObject(arg_count ? args[0] : Value::Null());
+                if (e) e->Fields()[1] = Value::I4(-1);
+                return RetVoid(ret);
+            }
+        } else if (is_collection) {
+            if (strcmp(n, "GetEnumerator") == 0) {
+                return DictCollection_GetEnumerator(*this, arg_count ? args[0] : Value::Null(), ret);
+            }
+            if (strcmp(n, "get_Count") == 0) {
+                return DictCollection_GetCount(*this, arg_count ? args[0] : Value::Null(), ret);
             }
         }
     }

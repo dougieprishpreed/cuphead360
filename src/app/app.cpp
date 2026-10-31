@@ -820,6 +820,49 @@ static int RunStackTest(MetadataPackage& pkg, const AppConfig& config, bool driv
     return pass ? 0 : 1;
 }
 
+static u32 OwnerObjectForComponent(const Scene& scene, u32 ci) {
+    for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
+        const SceneObject& o = scene.Object(oi);
+        if (ci >= o.component_start && ci < o.component_start + o.component_count) return oi;
+    }
+    return 0xFFFFFFFFu;
+}
+
+static bool SceneObjectActiveInHierarchy(const Scene& scene, u32 oi) {
+    u32 cur = oi;
+    u32 guard = 0;
+    while (cur < scene.ObjectCount() && guard++ < 256) {
+        const SceneObject& o = scene.Object(cur);
+        if (!(o.flags & 1u)) return false;
+        if (o.parent == 0xFFFFFFFFu || o.parent == cur) break;
+        cur = o.parent;
+    }
+    return oi < scene.ObjectCount();
+}
+
+static bool NonGameplayScript(const char* ctrl) {
+    if (!ctrl) return true;
+    return strncmp(ctrl, "UnityEngine.UI.", 15) == 0 ||
+           strncmp(ctrl, "TMPro.", 6) == 0 ||
+           strncmp(ctrl, "Rewired.", 8) == 0 ||
+           strncmp(ctrl, "LevelHUD", 8) == 0 ||
+           strncmp(ctrl, "LevelGUI", 8) == 0 ||
+           strncmp(ctrl, "Options", 7) == 0 ||
+           strncmp(ctrl, "Localization", 12) == 0 ||
+           strncmp(ctrl, "UIText", 6) == 0 ||
+           strncmp(ctrl, "Audio", 5) == 0 ||
+           strncmp(ctrl, "Music", 5) == 0 ||
+           strncmp(ctrl, "AdjustTMP", 9) == 0 ||
+           strncmp(ctrl, "SpriteAtlas", 11) == 0 ||
+           strncmp(ctrl, "TextureLoader", 13) == 0 ||
+           strncmp(ctrl, "AssetBundle", 11) == 0 ||
+           strncmp(ctrl, "CupheadGlyph", 12) == 0 ||
+           strncmp(ctrl, "Blur", 4) == 0 ||
+           strncmp(ctrl, "Chromatic", 9) == 0 ||
+           strcmp(ctrl, "Cuphead") == 0 ||
+           strncmp(ctrl, "CameraAnimationController", 25) == 0;
+}
+
 static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play = false) {
     if (!config.scene_path) {
         LogError("level", "no scene path");
@@ -882,15 +925,38 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     u32 player_base = pkg.FindType("AbstractPlayerController");
     Value player = Value::Null();
     u32 player_ci = 0xFFFFFFFFu;
+    Value fallback = Value::Null();
+    u32 fallback_ci = 0xFFFFFFFFu;
     for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
         const SceneComponent& comp = scene.Component(ci);
         if (comp.type != 4) continue;
         Value v = interp.ManagedComponent(ci);
         if (v.tag != VT_OBJECT || !v.data.obj) continue;
-        if (strcmp(comp.controller, "LevelPlayerController") == 0 && !player.data.obj) {
+        if (strcmp(comp.controller, "LevelPlayerController") != 0) continue;
+        if (fallback_ci == 0xFFFFFFFFu) {
+            fallback = v;
+            fallback_ci = ci;
+        }
+        // Prefer a player that is active in the hierarchy; the extracted
+        // player prefab template is inactive and sits at the prefab position.
+        u32 oi = interp.ManagedObjectIndexFor(v);
+        bool active = oi < scene.ObjectCount();
+        u32 cur = oi;
+        u32 guard = 0;
+        while (active && cur < scene.ObjectCount() && guard++ < 256) {
+            const SceneObject& o = scene.Object(cur);
+            if (!(o.flags & 1u)) { active = false; break; }
+            if (o.parent == 0xFFFFFFFFu || o.parent == cur) break;
+            cur = o.parent;
+        }
+        if (active) {
             player = v;
             player_ci = ci;
         }
+    }
+    if (!player.data.obj && fallback.data.obj) {
+        player = fallback;
+        player_ci = fallback_ci;
     }
     if (!player.data.obj && player_base) {
         for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
@@ -959,13 +1025,11 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         bool under_player = (oi == player_oi);
         u32 guard = 0;
         while (cur && guard++ < 256) {
-            if (cur == po.id) { under_player = true; break; }
-            u32 pi = 0xFFFFFFFFu;
-            for (u32 k = 0; k < scene.ObjectCount(); ++k) {
-                if (scene.Object(k).id == cur) { pi = k; break; }
-            }
-            if (pi == 0xFFFFFFFFu) break;
-            cur = scene.Object(pi).parent;
+            if (cur == player_oi) { under_player = true; break; }
+            if (cur >= scene.ObjectCount()) break;
+            u32 next = scene.Object(cur).parent;
+            if (next == cur) break;
+            cur = next;
         }
         if (!under_player) continue;
         if (strcmp(o.name, "Cuphead") != 0 && oi != player_oi) continue;
@@ -999,38 +1063,29 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     // stacks are excluded because those are still scaffolded.
     Buffer<u32> extra_update_cis;
     Buffer<u32> extra_update_mids;
+    Buffer<u8> extra_update_seen;
+    extra_update_seen.Resize(scene.ComponentCount());
     for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
         const SceneComponent& sc = scene.Component(ci);
         if (sc.type != 4) continue;
         if (ci == player_ci || ci == motor_ci || ci == level_ci) continue;
-        const char* ctrl = sc.controller;
-        if (strncmp(ctrl, "UnityEngine.UI.", 15) == 0 ||
-            strncmp(ctrl, "TMPro.", 6) == 0 ||
-            strncmp(ctrl, "Rewired.", 8) == 0 ||
-            strncmp(ctrl, "LevelHUD", 8) == 0 ||
-            strncmp(ctrl, "LevelGUI", 8) == 0 ||
-            strncmp(ctrl, "Options", 7) == 0 ||
-            strncmp(ctrl, "Localization", 12) == 0 ||
-            strncmp(ctrl, "UIText", 6) == 0 ||
-            strncmp(ctrl, "Audio", 5) == 0 ||
-            strncmp(ctrl, "Music", 5) == 0 ||
-            strncmp(ctrl, "SpriteAtlas", 11) == 0 ||
-            strncmp(ctrl, "TextureLoader", 13) == 0 ||
-            strncmp(ctrl, "AssetBundle", 11) == 0 ||
-            strncmp(ctrl, "CupheadGlyph", 12) == 0 ||
-            strncmp(ctrl, "Blur", 4) == 0 ||
-            strncmp(ctrl, "Chromatic", 9) == 0 ||
-            strncmp(ctrl, "AdjustTMP", 9) == 0 ||
-            strcmp(ctrl, "Cuphead") == 0 ||
-            strncmp(ctrl, "CameraAnimationController", 25) == 0) {
-            continue;
+        if (NonGameplayScript(sc.controller)) continue;
+        u32 owner = 0xFFFFFFFFu;
+        for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
+            const SceneObject& o = scene.Object(oi);
+            if (ci >= o.component_start && ci < o.component_start + o.component_count) {
+                owner = oi;
+                break;
+            }
         }
+        if (owner == 0xFFFFFFFFu || !SceneObjectActiveInHierarchy(scene, owner)) continue;
         Value v = interp.ManagedComponent(ci);
         if (v.tag != VT_OBJECT || !v.data.obj) continue;
         u32 um = FindMethodInHierarchy(pkg, v.data.obj->type_id, "Update");
         if (!um) continue;
         extra_update_cis.PushBack(ci);
         extra_update_mids.PushBack(um);
+        extra_update_seen[ci] = 1;
     }
     Buffer<u8> extra_update_failed;
     extra_update_failed.Resize(extra_update_cis.Size());
@@ -1170,6 +1225,7 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     bool loop_ok = true;
     bool logged_player_update_fail = false;
     bool logged_level_update_fail = false;
+    u32 dynamic_start_failures = 0;
     for (u32 i = 0; i < frames; ++i) {
         InputState in_state;
         in_state = InputRead();
@@ -1233,6 +1289,39 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
                 ++extra_failures;
             }
         }
+        if (extra_update_seen.Size() < scene.ComponentCount()) {
+            u32 old_size = extra_update_seen.Size();
+            extra_update_seen.Resize(scene.ComponentCount());
+            for (u32 z = old_size; z < extra_update_seen.Size(); ++z) extra_update_seen[z] = 0;
+        }
+        for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+            if (extra_update_seen[ci]) continue;
+            const SceneComponent& sc = scene.Component(ci);
+            if (sc.type != 4) { extra_update_seen[ci] = 1; continue; }
+            if (ci == player_ci || ci == motor_ci || ci == level_ci) {
+                extra_update_seen[ci] = 1;
+                continue;
+            }
+            if (NonGameplayScript(sc.controller)) { extra_update_seen[ci] = 1; continue; }
+            u32 owner = OwnerObjectForComponent(scene, ci);
+            if (owner == 0xFFFFFFFFu || !SceneObjectActiveInHierarchy(scene, owner)) continue;
+            Value ev = interp.ManagedComponent(ci);
+            if (ev.tag != VT_OBJECT || !ev.data.obj) { extra_update_seen[ci] = 1; continue; }
+            u32 sm = FindMethodInHierarchy(pkg, ev.data.obj->type_id, "Start");
+            if (sm) {
+                Value sargs[1]; sargs[0] = ev; Value sr;
+                if (!interp.Invoke(sm, sargs, 1, &sr) && dynamic_start_failures < 8) {
+                    LogWarn("levelplay", "late Start %s failed", sc.controller);
+                    ++dynamic_start_failures;
+                }
+            }
+            u32 um = FindMethodInHierarchy(pkg, ev.data.obj->type_id, "Update");
+            if (!um) { extra_update_seen[ci] = 1; continue; }
+            extra_update_cis.PushBack(ci);
+            extra_update_mids.PushBack(um);
+            extra_update_seen[ci] = 1;
+        }
+        extra_update_failed.Resize(extra_update_cis.Size());
         f32 px = scene.Object(player_oi).world_x;
         f32 py = scene.Object(player_oi).world_y;
         if (px > max_x) max_x = px;

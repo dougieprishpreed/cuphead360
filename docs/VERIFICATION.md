@@ -1,4 +1,30 @@
-# Verification log
+## 2026-10-31 prefab-clone/dynamic-update increment
+
+`UnityEngine.Object.Instantiate` now clones the template hierarchy and its
+managed components, remaps internal GameObject/Transform/component references,
+repairs cloned `LevelPlayerController` and `_basePlayer` wiring, and runs
+`Awake`. Instance overloads apply position/parent arguments. Player-prefab
+creation still reuses the extracted template until player cloning is validated
+end-to-end; projectile/enemy prefabs use the clone path.
+
+The level-play harness now discovers active runtime-created components and
+starts/ticks their original `Start`/`Update` methods. Inactive extracted
+prefab templates are no longer ticked as gameplay.
+
+Dictionary `KeyCollection`/`ValueCollection` enumerators are implemented, so
+`PlayerManager.get_Count()` and projectile damage-multiplier lookups complete.
+
+Validation after this increment (Windows):
+- tutorial `--level` PASS
+- tutorial `--levelplay` PASS (`start=-410,-270 max_x=1327.6`)
+- tutorial `--stack` PASS
+- platforming `--level` PASS
+- platforming `--levelplay` PASS (`start=-520,-93 max_x=174.2 min_y=-95.5`)
+
+Cloned projectile components now reach `Awake`; their `BasicProjectile.Awake`
+still fails on collision/tag setup, so projectile damage/despawn is the next
+gameplay blocker.
+
 
 All results below were produced locally against the user's GOG installation.
 They are development-verification results, not a claim that the full game is
