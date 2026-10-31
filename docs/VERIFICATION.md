@@ -167,10 +167,12 @@ This is not a validated visual slice.
   frame 90 before the background harness ended, so full big-endian
   revalidation of the newest changes is still pending.
 - The original player motor moves and grounds on Windows
-  (`motor moved ... PASS`). Its rendered mode (`--motorplay`) passes its logic
-  checks, but the captured camera-follow frames were black because the
-  prefab scene's drawable content is oversized static player art rather than
-  the tutorial level.
+  (`motor moved ... PASS`). Its rendered mode (`--motorplay`) now draws
+  Cuphead in the tutorial scene with camera follow after loading textures
+  and honoring scene active flags. The player art is still oversized and
+  partly overlapping because the Animator state machine/sprite animation are
+  not implemented; it is a logic and rendering smoke test, not a polished
+  playable level.
 
 This verifies the runtime/metadata/scene/script foundation and the beginning
 of the original player lifecycle. It does **not** verify any complete level,

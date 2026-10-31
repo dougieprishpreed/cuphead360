@@ -123,10 +123,12 @@ build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
   --screenshot work\extract_prefab\motorplay --log build\logs\motorplay.log
 ```
 
-`--motorplay` logic passes but its camera-follow frames were black; the
-native `--play` tutorial slice is still the only visually validated playable
-slice. The dialogue database is an explicit empty scaffold; the real
-`resources.assets` MonoBehaviour 1175 still needs extraction.
+`--motorplay` logic and rendering now run: the camera-follow frame shows
+Cuphead in the tutorial scene. The art is still oversized/overlapping and
+unanimated (the Animator state machine is missing); the native `--play`
+tutorial slice remains the most visually validated playable slice. The
+dialogue database is an explicit empty scaffold; the real `resources.assets`
+MonoBehaviour 1175 still needs extraction.
 
 Command:
 

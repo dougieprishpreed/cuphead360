@@ -60,11 +60,10 @@ been validated, and what remains.
   `LevelPlayerMotor.FixedUpdate` with synthesized input. The motor moves the
   player and keeps it on the tutorial ground:
   `max_x=816.67 min_y=-213.29 PASS`.
-- `--motorplay` adds software rendering and camera follow; its logic passes,
-  but its camera-follow frames are black because the prefab scene's drawable
-  content is oversized static player art rather than the tutorial level. The
-  native `--play` tutorial slice remains the only visually validated playable
-  slice.
+- `--motorplay` adds software rendering and camera follow; after loading
+  textures and honoring scene active flags, its captured frame shows Cuphead
+  in the tutorial scene. The player art remains oversized/overlapping and
+  unanimated because the Animator state machine is not implemented.
 
 ### Runtime primitives
 

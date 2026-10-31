@@ -808,6 +808,23 @@ def append_prefab(env, out, atlas_cache, field_builder, root_go_id=5401):
     out["gameobjects"].extend(objects)
     return objects
 
+def deactivate_ghost_placeholders(out):
+    """Tutorial ghost/revive sprites start inactive in the original scripts.
+
+    The extraction sees their serialized active flag as true because the
+    controlling intro/death scripts have not run. Hide them for the playable
+    tutorial slice so the real player prefab is the visible character.
+    """
+    for g in out["gameobjects"]:
+        for c in g.get("components", []):
+            if c.get("type") != "SpriteRenderer":
+                continue
+            spr = str(c.get("sprite", ""))
+            if "ghost_0001" in spr or "revive_0025" in spr:
+                g["active"] = False
+                break
+
+
 def append_level_bounds(out):
     """Adds the runtime Level bounds colliders (ground/ceiling/walls) to the scene.
 
@@ -1230,6 +1247,7 @@ def main():
     if args.add_player_prefab:
         append_prefab(env, out, atlas_cache, field_builder)
     append_level_bounds(out)
+    deactivate_ghost_placeholders(out)
     if args.add_player:
         bundle = os.path.join(bundle_dir, "atlas_player")
         if os.path.exists(bundle):
