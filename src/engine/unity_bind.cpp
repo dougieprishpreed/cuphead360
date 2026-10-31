@@ -2574,6 +2574,11 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "get_fullScreen") == 0) return RetBoolV(ret, false);
         if (strcmp(n, "get_width") == 0) return RetI32V(ret, 1280);
         if (strcmp(n, "get_height") == 0) return RetI32V(ret, 720);
+        if (strcmp(n, "get_resolutions") == 0) {
+            u32 rt = in.Metadata().FindType("UnityEngine.Resolution");
+            if (ret) *ret = in.NewArrayValue(rt, 0);
+            return true;
+        }
         if (strcmp(n, "SetResolution") == 0) return RetVoid(ret);
     }
     if (strcmp(type, "UnityEngine.Resolution") == 0) {
@@ -2622,6 +2627,9 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         }
     }
     if (strncmp(type, "UnityEngine.UI.", 15) == 0) {
+        if (strcmp(n, ".ctor") == 0) return RetVoid(ret);
+        if (strcmp(n, "get_spacing") == 0) return RetF32V(ret, 0.0f);
+        if (strcmp(n, "set_spacing") == 0 || strcmp(n, "set_interactable") == 0) return RetVoid(ret);
         if (strcmp(n, "get_text") == 0) {
             if (ret) *ret = in.NewStringAscii("");
             return true;

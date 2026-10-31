@@ -43,6 +43,9 @@ static bool Mathf_Clamp(Interpreter&, const MemberRefInfo&, u32, Value* a, Value
 static bool Mathf_Clamp01(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
     return RetF32(ret, Clamp01f(a[0].data.f32));
 }
+static bool Mathf_Atan2(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    return RetF32(ret, atan2f(a[0].data.f32, a[1].data.f32));
+}
 static bool Mathf_Abs(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
     return RetF32(ret, fabsf(a[0].data.f32));
 }
@@ -1639,6 +1642,7 @@ static const NativeEntry kEntries[] = {
     { "UnityEngine.Mathf", "Clamp01", Mathf_Clamp01 },
     { "UnityEngine.Mathf", "Abs", Mathf_Abs },
     { "UnityEngine.Mathf", "Sin", Mathf_Sin },
+    { "UnityEngine.Mathf", "Atan2", Mathf_Atan2 },
     { "UnityEngine.Mathf", "Cos", Mathf_Cos },
     { "UnityEngine.Mathf", "Pow", Mathf_Pow },
     { "UnityEngine.Mathf", "Sqrt", Mathf_Sqrt },
