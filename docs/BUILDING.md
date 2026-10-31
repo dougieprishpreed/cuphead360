@@ -47,12 +47,19 @@ hardware procedures.
 
 ## Data preparation
 
-```
-python tools\prepare_game.py --input game --output build\xbox360\GameData
+The current tools prepare individual development packages:
+
+```text
+python tools\build_metadata.py game\Cuphead_Data\Managed\Assembly-CSharp.dll work\metadata\metadata.chm
+python tools\extract_scene.py --game game\Cuphead_Data --scene scene_level_tutorial --out work\extract_level --add-level-resources
 ```
 
-The preparation tool verifies the expected build, writes a manifest, and
-converts only the data the runtime needs. It never modifies `game/`.
+Reuse current prepared scenes when validating source changes; avoid redundant
+large extractions. These tools read the user's installation and write derived
+data outside `game/`. Production `tools/prepare_game.py` and a complete Xbox
+GameData packer do not exist yet. See ASSET_PIPELINE.md and PORT_REVIEW.md for
+format, renderer and memory limits. A built XEX does not demonstrate that its
+content can fit in console memory or run the opening flow.
 
 ## Reproducibility
 

@@ -1,35 +1,41 @@
 # Architecture
 
+The 2026-10-31 [fundamental review](PORT_REVIEW.md) distinguishes the current
+implementation from the target design below. The original-IL approach is
+retained for a bounded pilot; the playable opening flow and Xbox gameplay
+remain unproven. Consult STATUS.md and VERIFICATION.md for checkpoint evidence.
+
 ## Selected strategy
 
-**Metadata-driven IL execution runtime + native Unity-compatible layer +
-incremental native code generation for hot paths.**
+**Metadata-driven IL interpreter + a focused native Unity service layer.**
+Native code generation for measured hot paths is a future option.
 
 The original `Assembly-CSharp.dll` is the authoritative game logic. Instead of
 hand-recreating behaviour, the port loads the original metadata and IL and
-executes it with a custom CLR-compatible runtime written in portable C++03.
-Unity-facing APIs are implemented by a focused native engine. This is a
-hybrid of the two viable extremes:
+executes it with a custom managed runtime written in portable C++03. CLR and
+Unity compatibility are incomplete and require independent verification.
+The alternatives have concrete tradeoffs:
 
-- a full CIL-to-C++ translator would produce the best peak performance but
+- a full CIL-to-C++ translator could reduce interpreter overhead but
   requires solving control-flow reconstruction, exception regions, delegates,
   generics, and coroutine state machines before anything runs;
 - a pure clean-room reimplementation would be faster to start but would lose
   the exact original behaviour the project requires.
 
-Executing the original IL preserves semantics immediately and gives us a
-behavioural oracle for later optimisation. The interpreter is predecoded at
-load time (tokens resolved, branches resolved), and hot methods can later be
-translated to C++ without changing the object model or Unity layer.
+Original IL is the authority for game rules; its execution preserves behavior
+only where the runtime and engine services implement the required semantics.
+The interpreter currently decodes IL bytes during execution. Predecoding and
+hot-method translation are planned, not implemented. They would still require
+the same correct object model and Unity service contracts.
 
 ### Why not port Mono or use IL2CPP?
 
 - Cuphead's PC build is Mono-JIT, not IL2CPP. There is no generated C++.
 - IL2CPP output depends on Unity's proprietary `libil2cpp` and the native
   Unity engine, neither of which is available for Xenon.
-- Mono's runtime is a large POSIX-oriented codebase; porting it to the XDK
-  toolchain, Xenon threads, and the 512 MB console memory model would be a
-  larger and less controllable project than a game-specific runtime.
+- A Mono port would require XDK/PPC, threading and memory integration, while
+  leaving the Unity service layer to implement. Its cost has not been measured
+  against completing this runtime; reconsider if the bounded pilot fails.
 - XNA's managed runtime was evaluated and rejected: it cannot run the
   original Unity-facing assembly without a complete UnityEngine shim, its
   CLR/BCL surface is older than the game's, and the project requirement is a
@@ -37,21 +43,24 @@ translated to C++ without changing the object model or Unity layer.
 
 ### Why the interpreter is not the final performance story
 
-The runtime is designed so that execution can be accelerated without changing
-game code:
+Potential acceleration steps require profiling and correctness evidence:
 
-1. Predecoded instructions and resolved metadata remove parsing from the hot
-   loop.
+1. Predecode instructions and cache resolved native bindings to reduce repeated
+   decoding and string dispatch. Neither optimization is currently complete.
 2. The object model uses fixed field offsets and direct vtable slots.
-3. Methods identified by profiling as hot can be translated to C++ functions
-   that operate on the same `Value`/object representation.
-4. The native Unity layer (transform hierarchy, sprite batching, collision,
-   audio mixing) is already native; it dominates frame cost in a 2D game.
+3. Consider translation of measured hot methods to C++ operating on the same
+   `Value`/object representation; no AOT pipeline currently exists.
+4. Profile transforms, collision and software rasterization independently of
+   IL execution. There is no measured frame-cost distribution on Xbox, no GPU
+   sprite batching, and no validated audio mixer.
 
-The interpreter is therefore a correctness-first execution engine with a
-defined AOT escape hatch, not a permanent design ceiling.
+These options do not establish acceptable Xenon performance. Windows timing,
+Xenia timing and hardware timing must be measured and identified separately.
 
 ## Layers
+
+This is the target module layout. Its list includes facilities such as managed
+exceptions, audio and scene loading that are absent or incomplete today.
 
 ```
 src/core       fixed-width types, endian loads/stores, files, logging,
@@ -89,16 +98,19 @@ Assembly-CSharp.dll (user's copy)
                           win32 / xbox360 platform backends
 ```
 
-Assets flow through `tools/prepare_game.py`:
+The current development pipeline uses `tools/extract_scene.py`:
 
 ```
 GOG installation
-   |  version detection + manifest
-   |  UnityFS bundle extraction (sprites, textures, audio, fonts)
-   |  serialized scene/animation extraction
+   |  serialized scene/dependency extraction
+   |  sprite crops and partial animation/script extraction
    v
-GameData/ (original or losslessly repacked data; never committed)
+scene.chs + anim.chs + per-sprite RGBA (development data; never committed)
 ```
+
+The production GameData packer, bounded residency, complete UI/audio/font
+conversion and Xbox texture formats remain work to do. The documented
+`tools/prepare_game.py` command does not currently exist.
 
 ## Executable contract
 
@@ -127,33 +139,49 @@ and IL are little-endian.
   expected tiled/swizzled layout by the platform renderer, not by the shared
   game logic.
 - Hash/checksum algorithms operate on bytes, not host words.
-- Tests include a big-endian data-path test that runs on both targets.
+- Shared SelfTestEndian in src/app/app.cpp tests explicit byte readers/writers
+  and is compiled into both targets. A Windows pass does not validate a
+  big-endian CPU execution path; Xenia and hardware execution need separate
+  recorded evidence.
 
 ## Memory model
 
 - 32-bit pointers, 4-byte object references.
-- Object heap: 4-byte type id + fields, allocated from a tracked heap. Initial
-  implementation uses a simple non-moving allocator plus free lists; a
-  mark/sweep collector is planned once object lifetimes are exercised.
-- Asset data is streamed/cached separately from the game heap and evicted by
-  bundle, to respect the 512 MB shared memory budget.
-- No assumption that all 5.22 GB of bundles is resident.
+- Managed values/objects use the runtime's explicit tagged representation;
+  they are not CLR-compatible memory layouts merely because pointers are 32-bit.
+- Allocations are tracked and primarily retained until interpreter shutdown.
+  There is no managed collector. Repeated scenes and retries need bounded
+  lifetime/reclamation before long-session memory claims are justified.
+- Scene.LoadTextures currently reads and retains every raw RGBA texture. The
+  prepared tutorial payload is about 944 MiB; Root Pack about 1,421 MiB. This
+  eager path exceeds the entire 512 MiB Xbox shared-memory budget.
+- Streaming/cache eviction and bounded peak accounting are target requirements,
+  not current facilities. File-size deduplication alone does not provide them.
 
 ## Coroutines and lifecycle
 
-C# iterator state machines are ordinary classes with a `MoveNext` method. The
-runtime's coroutine scheduler owns the `IEnumerator` object and calls
-`MoveNext` once per frame, matching Unity's behaviour:
+C# iterator state machines are ordinary classes with MoveNext. At the audited
+`beb3a87` baseline, StartCoroutine registers an iterator but returns null,
+Stop APIs are no-ops, ownership/join waits are absent, and a name filter disables
+boss families. The first repair checkpoint addresses these defects; its exact
+validated behavior and approximations belong in VERIFICATION.md.
 
-- `StartCoroutine` registers the enumerator;
-- yielded `WaitForSeconds`/`WaitForEndOfFrame`/null values are interpreted by
-  the scheduler;
-- `StopCoroutine` removes it;
-- `OnDisable`/`OnDestroy` stop owned coroutines.
+The target distinguishes coroutine ownership from waiting on an independently
+started handle. GameObject deactivation/destruction stops owned coroutines;
+disabling a Behaviour alone must not stop them. The audited baseline has no
+common lifecycle loop implementing all Awake/OnEnable/Start/FixedUpdate/Update/
+LateUpdate/OnDisable/OnDestroy callbacks. Scene teardown, persistent roots,
+asynchronous loads and fresh encounter initialization are later prerequisites.
 
-Unity message dispatch (`Awake`, `OnEnable`, `Start`, `FixedUpdate`, `Update`,
-`LateUpdate`, `OnDisable`, `OnDestroy`) is driven by the engine's component
-scheduler using method lookup on the managed type.
+## Storage boundary
+
+Original PlayerData.Init requires storage callbacks during slot selection.
+OnlineInterfaceGog.SavePath selects the installed game's AppData Cuphead directory
+when Application.platform is WindowsPlayer; the current shim reports that
+platform. A port-local storage path or interface override must be implemented
+and tested before original storage calls are enabled. Tests must demonstrate
+that the installed save directory is neither read nor written. In-memory
+progression and durable save/reload remain separate acceptance checks.
 
 ## Deliberate non-goals
 

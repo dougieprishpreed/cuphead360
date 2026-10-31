@@ -3,6 +3,10 @@
 This document describes the formats produced by the local preparation tools
 and consumed by the shared C++ runtime.
 
+The [2026-10-31 port review](PORT_REVIEW.md) records current feasibility limits.
+These are development formats. A production packer, atlasing, bounded texture
+residency and Xbox texture layout support are not implemented.
+
 All tools read the user's GOG installation and write only to their `--out`
 directory. They never modify `game/`.
 
@@ -14,9 +18,10 @@ Produced by:
 python tools/build_metadata.py game\Cuphead_Data\Managed\Assembly-CSharp.dll work\metadata\metadata.chm
 ```
 
-The package is derived from the original `Assembly-CSharp.dll`. It preserves
-the original IL byte-for-byte (after canonicalizing metadata token operands
-to TypeDef/FieldDef/MethodDef where possible). It is little-endian and is
+The package is derived from the original `Assembly-CSharp.dll`. It retains IL
+instructions while canonicalizing metadata token operands to
+TypeDef/FieldDef/MethodDef where possible; it is not an unmodified byte copy.
+It is little-endian and is
 converted to host values by `src/runtime/metadata.cpp`.
 
 Header: 64 u32 words (`CHM1`, version, file size, counts, section offsets,
@@ -24,7 +29,9 @@ section sizes). Sections: strings, types, fields, methods, signatures,
 method signatures, local signatures, IL, exception clauses, user strings,
 member refs, method specs, params, and auxiliary arrays.
 
-The loader was validated on Windows and on big-endian Xbox 360 under Xenia.
+The loader has historical Windows and emulated big-endian Xbox 360/Xenia
+validation. This is separate from hardware validation and does not establish
+execution of the latest checkpoint on either console target.
 
 ## Scene: `scene.chs`
 
@@ -71,18 +78,56 @@ Header: 32 u32 words (`CHAN`). Sections: strings, clips (32 bytes), frames
 (16), states (24), controllers (32).
 
 The runtime currently plays each controller's default state. Transitions,
-parameters, float/scale curves, and game-script `Animator.Play` calls are
-future work.
+parameters, triggers, animation events, float/scale curves, and game-script
+Animator.Play calls remain work to do. anim.chs has no sections for transitions,
+parameters, triggers or animation events; the extractor and consuming runtime
+must both change. Root Pack attacks, death and phase changes depend on them.
 
 ## Current limitations
 
-- Only SpriteRenderer/Animator/Camera components are extracted. UI/Canvas/
-  TextMeshPro, colliders, audio sources, and MonoBehaviour serialized fields
-  are not yet represented.
+- GameObjects/transforms, SpriteRenderer/Animator/Camera, BoxCollider2D,
+  CircleCollider2D, Rigidbody2D and partial MonoBehaviour serialized fields
+  are represented. Complete Canvas/TMP presentation, audio and arbitrary
+  component graphs are not. EdgeCollider2D is omitted: the original Isle I
+  scene file contains 40 such boundary components.
 - Animation extraction covers sprite PPtr tracks. Scale/alpha/position
   curves (including the title-screen fader) are not applied yet.
+- Nested serialized class collections need a structured decoder. The current
+  List/array path calls parse_sig_value directly for each element, where a
+  class is treated as a Unity object reference; it bypasses the serializable
+  class recursion in parse_field_value. parse_script_values also stops at the
+  first unsupported field and returns partial values. Complete graph recovery
+  must validate byte consumption and report unsupported layouts explicitly.
 - Scene dependencies are loaded by path from `Cuphead_Data`; asset bundles are
   loaded only for SpriteAtlas lookup. A production packer will consolidate
   these into streamable `GameData` packs.
 - Sprite crops are per-sprite for development. Final packing should atlas
   them for batching and console memory.
+
+## Residency and next packaging steps
+
+Scene.LoadTextures currently retains all raw RGBA files at once. The current
+prepared tutorial has 3,874 files totaling 989,522,484 bytes (943.68 MiB);
+Root Pack has 5,955 totaling 1,490,179,264 bytes (1,421.15 MiB). These are file
+totals, not a measured process peak, but the consuming eager path exceeds the
+Xbox 360 shared-memory budget before other allocations.
+
+Before expanding extraction, make optional PNG previews explicit and preserve
+one current package per scene. Introduce immutable content identities and a
+shared manifest for disk deduplication, then bounded texture residency with
+resident/peak accounting and scene-lifetime release. Do not use writable
+hardlinks that let regeneration mutate another scene's content. Validate sprite
+rects, pivots, transparency, packing and animation references visually; the
+retained checkpoint images contain packed-pose rendering artifacts.
+
+Atlas organization and target-specific formats must have a consuming renderer.
+The current software renderer reads linear RGBA; converting files to a GPU
+layout alone does not supply a GPU renderer or establish console viability.
+
+The original dialogue resource is present at resources.assets path ID 1175
+(87,612 bytes). UnityPy's available type tree reads only its 56-byte header and
+rejects the remaining payload. Recovery therefore needs the serialized schema
+from metadata (or an independently validated reconstructed type tree), including
+the nested dialogue/global/theme lists and the collection decoder correction
+described under Current limitations. The existing empty runtime object is not
+a recovered dialogue database.
