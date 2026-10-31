@@ -157,8 +157,22 @@ captured camera-follow frames were black because the prefab scene's drawable
 content is the oversized static player art rather than the tutorial level.
 This is not a validated visual slice.
 
-## Status
+## Latest status (current runtime)
+
+- Windows `--logic`, `--stack`, `--motor` and the native `--play` tutorial
+  slice all PASS with the current runtime; `--play` reports
+  `result=PASS ... jumped=1 landed=1 dashes=2`.
+- The Xbox 360 XEX builds and boots under Xenia. A full 240-frame play run
+  passed before the newest runtime changes. The most recent Xenia run reached
+  frame 90 before the background harness ended, so full big-endian
+  revalidation of the newest changes is still pending.
+- The original player motor moves and grounds on Windows
+  (`motor moved ... PASS`). Its rendered mode (`--motorplay`) passes its logic
+  checks, but the captured camera-follow frames were black because the
+  prefab scene's drawable content is oversized static player art rather than
+  the tutorial level.
 
 This verifies the runtime/metadata/scene/script foundation and the beginning
 of the original player lifecycle. It does **not** verify any complete level,
-boss, menu, save, audio, or DLC gameplay.
+boss, menu, save, audio, or DLC gameplay. See `docs/STATUS.md` for the
+implemented/validated/missing breakdown and roadmap.
