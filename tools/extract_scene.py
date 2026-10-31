@@ -664,6 +664,13 @@ def parse_field_value(builder, f, raw, pos, values, parent):
                 if pos is None:
                     return None
             return pos
+    if sig.kind == SIG_GENERICINST and t is not None:
+        # Unity does not serialize Dictionary/HashSet fields; they occupy no
+        # bytes in the MonoBehaviour payload. Skipping them keeps later
+        # serialized fields (e.g. Level.Bounds) aligned.
+        if (t.full_name.startswith("System.Collections.Generic.Dictionary`2") or
+                t.full_name.startswith("System.Collections.Generic.HashSet`1")):
+            return pos
     return parse_sig_value(builder, sig, raw, pos, values, f.id, parent, 0)
 
 
@@ -674,9 +681,10 @@ def parse_script_values(builder, full_name: str, raw: bytes):
     pos = mb_header_offset(raw)
     values = []
     for f in fields:
-        pos = parse_field_value(builder, f, raw, pos, values, 0)
-        if pos is None:
+        next_pos = parse_field_value(builder, f, raw, pos, values, 0)
+        if next_pos is None:
             break
+        pos = next_pos
     return values
 
 def decode_streamed_frames(clip):
