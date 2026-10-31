@@ -1341,6 +1341,22 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         }
     }
 
+    Value weapon_manager = Value::Null();
+    u32 start_basic = 0;
+    {
+        u32 wmt = pkg.FindType("LevelPlayerWeaponManager");
+        start_basic = wmt ? pkg.FindMethod(wmt, "StartBasic") : 0;
+        for (u32 c = 0; c < po.component_count; ++c) {
+            u32 ci = po.component_start + c;
+            if (ci >= scene.ComponentCount()) break;
+            if (scene.Component(ci).type == 4 &&
+                strcmp(scene.Component(ci).controller, "LevelPlayerWeaponManager") == 0) {
+                weapon_manager = interp.ManagedComponent(ci);
+                break;
+            }
+        }
+    }
+
     scene.ComputeWorldTransforms();
 
     f32 start_x = scene.Object(player_oi).world_x;
@@ -1375,6 +1391,12 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
             if (i >= 10) buttons |= 1u << 4; // shoot (Rewired action 4)
         }
         SetRewiredInputState(ax, ay, buttons);
+        if (i == 10 && start_basic && weapon_manager.tag == VT_OBJECT) {
+            Value wargs[1]; wargs[0] = weapon_manager; Value wr;
+            if (!interp.Invoke(start_basic, wargs, 1, &wr)) {
+                LogWarn("levelplay", "StartBasic failed");
+            }
+        }
         Value args[1]; args[0] = motor; Value mr;
         if (!interp.Invoke(fixed_update, args, 1, &mr)) {
             LogWarn("levelplay", "motor FixedUpdate failed");
