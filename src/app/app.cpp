@@ -498,10 +498,19 @@ static int RunStackTest(MetadataPackage& pkg, const AppConfig& config) {
     if (pm_inputs) {
         const SigInfo& is = pkg.Sig(pkg.Field(pm_inputs).type_sig);
         Value dict = interp.NewDictionaryValue(is.type_id);
-        interp.DictionarySet(dict, Value::I4(0), Value::Null());
-        interp.DictionarySet(dict, Value::I4(1), Value::Null());
+        u32 rewired_type = pkg.FindType("Rewired.Player");
+        if (!rewired_type) rewired_type = pkg.FindType("System.Object");
+        Object* r0 = rewired_type ? interp.AllocObjectWithSlots(rewired_type, 4) : 0;
+        Object* r1 = rewired_type ? interp.AllocObjectWithSlots(rewired_type, 4) : 0;
+        Value p0 = r0 ? Value::ObjectRef(r0) : Value::Null();
+        Value p1 = r1 ? Value::ObjectRef(r1) : Value::Null();
+        if (r0) r0->Fields()[0] = Value::I4(0);
+        if (r1) r1->Fields()[0] = Value::I4(1);
+        interp.DictionarySet(dict, Value::I4(0), p0);
+        interp.DictionarySet(dict, Value::I4(1), p1);
         interp.SetField(pm_inputs, Value::Null(), dict);
-        LogInfo("stack", "PlayerManager.playerInputs initialized type=%u", is.type_id);
+        LogInfo("stack", "PlayerManager.playerInputs initialized type=%u rewired=%u",
+                is.type_id, rewired_type);
     } else {
         LogWarn("stack", "PlayerManager.playerInputs field not found");
     }

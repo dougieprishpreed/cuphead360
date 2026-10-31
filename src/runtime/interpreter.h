@@ -175,6 +175,9 @@ private:
 bool InvokeUnityNative(Interpreter& interp, const MemberRefInfo& member,
                        u32 arg_count, Value* args, Value* ret);
 
+// Feeds the minimal Rewired action bridge used by PlayerInput.
+void SetRewiredInputState(f32 axis_x, f32 axis_y, u32 buttons);
+
 } // namespace ch360
 
 #endif // CH360_RUNTIME_INTERPRETER_H

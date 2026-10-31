@@ -996,6 +996,28 @@ static bool Exception_Ctor(Interpreter& in, const MemberRefInfo& member, u32, Va
     return true;
 }
 
+static f32 g_rewired_axis_x = 0.0f;
+static f32 g_rewired_axis_y = 0.0f;
+static u32 g_rewired_buttons = 0;
+
+void SetRewiredInputState(f32 axis_x, f32 axis_y, u32 buttons) {
+    g_rewired_axis_x = axis_x;
+    g_rewired_axis_y = axis_y;
+    g_rewired_buttons = buttons;
+}
+
+static bool Rewired_GetAxis(Interpreter&, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    if (argc < 2) return RetF32(ret, 0.0f);
+    s32 axis = Interpreter::ToI32(a[1]);
+    return RetF32(ret, axis == 0 ? g_rewired_axis_x : g_rewired_axis_y);
+}
+static bool Rewired_GetButton(Interpreter&, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    if (argc < 2) return RetBool(ret, false);
+    s32 button = Interpreter::ToI32(a[1]);
+    return RetBool(ret, button >= 0 && button < 32 &&
+                        ((g_rewired_buttons >> button) & 1u) != 0);
+}
+
 static const NativeEntry kEntries[] = {
     { "UnityEngine.Vector2", ".ctor", Vec2_Ctor },
     { "UnityEngine.Vector2", "get_x", Vec2_GetX },
@@ -1092,6 +1114,8 @@ static const NativeEntry kEntries[] = {
     { "System.IO.StringReader", ".ctor", Object_NewFromCtor },
     { "System.IO.StringReader", "ReadToEnd", StringReader_ReadToEnd },
     { "System.IO.StringReader", "Dispose", Native_Void },
+    { "Rewired.Player", "GetAxis", Rewired_GetAxis },
+    { "Rewired.Player", "GetButton", Rewired_GetButton },
 };
 
 bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value* args, Value* ret) {
