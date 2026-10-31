@@ -6,6 +6,15 @@ playable alpha release candidate with no content or behavior gaps versus the
 Windows version. This document records exactly what is implemented, what has
 been validated, and what remains.
 
+## 2026-10-31 Xbox revalidation
+
+The rebuilt XEX was re-run under Xenia Canary on the native tutorial play slice.
+It loaded 186 objects / 277 components, initialized D3D9, advanced through
+jump/run states and wrote fresh `play.45.bmp` / `play.100.bmp` screenshots.
+This validates the newest Windows runtime and the shared Xbox build for that
+slice. The full extracted tutorial scene is still a Windows-only validation
+path, and no boss, menu, audio or DLC content has been validated on Xbox.
+
 ## 2026-10-31 runtime update
 
 The original tutorial `LevelInit`/`LevelStart` path now runs through the real

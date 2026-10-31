@@ -1,4 +1,27 @@
-## 2026-10-31 prefab-clone/dynamic-update increment
+## Xbox 360 / Xenia revalidation (2026-10-31)
+
+Rebuilt with `scripts\build_xbox360.bat Release`, copied the fresh
+`build\xbox360\default.xex` into `work\xenia_test`, and ran the XEX under
+Xenia Canary. Observed:
+
+```
+[INFO] [boot] event=command name=play
+[INFO] [metadata] loaded game:\GameData\metadata.chm types=7417 ...
+[INFO] [scene] loaded game:\GameData\scene.chs objects=186 components=277 ...
+[INFO] [unity] bound 186 gameobjects, 277 components
+[INFO] [play] player object=185 component=276 idle=5 run=54 jump=22 dash=16
+[INFO] [display] D3D9 1280x720 initialized
+[INFO] [play] scene lifecycle LevelPlatform.Awake=1 PlayerDeathEffect.Start=1
+[INFO] [play] frame=30 state=Jump pos=220.5,-165.2 vel=489.5,1190.0 grounded=0
+[INFO] [play] screenshot=game:\play.45.bmp
+[INFO] [play] frame=90 state=Run pos=753.7,-185.0 vel=359.5,0.0 grounded=1
+[INFO] [play] screenshot=game:\play.100.bmp
+```
+
+Fresh `work\xenia_test\play.45.bmp` and `play.100.bmp` were written. This
+validates the newest runtime on the Xbox 360 target for the native tutorial
+play slice. It is not a full-level or boss validation, and the XEX does not
+yet run the complete original scene graph on Xbox.
 
 `UnityEngine.Object.Instantiate` now clones the template hierarchy and its
 managed components, remaps internal GameObject/Transform/component references,
