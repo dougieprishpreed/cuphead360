@@ -974,6 +974,28 @@ static bool Array_GetEnumerator(Interpreter& in, const MemberRefInfo&, u32, Valu
     return true;
 }
 
+static bool Array_Copy(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    if (argc < 3) return false;
+    Value src = a[0];
+    Value dst = (argc >= 5) ? a[2] : a[1];
+    s32 src_index = (argc >= 5) ? Interpreter::ToI32(a[1]) : 0;
+    s32 dst_index = (argc >= 5) ? Interpreter::ToI32(a[3]) : 0;
+    s32 length = Interpreter::ToI32(a[argc >= 5 ? 4 : 2]);
+    if (src.tag != VT_ARRAY || !src.data.array || dst.tag != VT_ARRAY || !dst.data.array) return false;
+    if (src_index < 0 || dst_index < 0 || length < 0) return false;
+    u32 src_len = src.data.array->length;
+    u32 dst_len = dst.data.array->length;
+    if ((u32)src_index > src_len || (u32)dst_index > dst_len) return false;
+    u32 max_len = src_len - (u32)src_index;
+    if ((u32)length > max_len) length = (s32)max_len;
+    if ((u32)length > dst_len - (u32)dst_index) length = (s32)(dst_len - (u32)dst_index);
+    for (s32 i = 0; i < length; ++i) {
+        dst.data.array->Elements()[dst_index + i] =
+            in.CopyValue(src.data.array->Elements()[src_index + i]);
+    }
+    return RetVoid(ret);
+}
+
 static bool ArrayEnumerator_MoveNext(Interpreter&, Object* e, Value* ret) {
     Value arr = e->Fields()[0];
     if (arr.tag != VT_ARRAY || !arr.data.array) return RetBool(ret, false);
@@ -1688,6 +1710,7 @@ static const NativeEntry kEntries[] = {
     { "System.Char", "ToLower", Char_ToLower },
     { "System.Char", "ToUpper", Char_ToUpper },
     { "System.Array", "GetEnumerator", Array_GetEnumerator },
+    { "System.Array", "Copy", Array_Copy },
     { "System.Delegate", "Combine", Delegate_Combine },
     { "System.Delegate", "Remove", Delegate_Remove },
     { "System.MulticastDelegate", "CombineImpl", Delegate_Combine },

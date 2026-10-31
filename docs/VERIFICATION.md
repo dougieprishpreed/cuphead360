@@ -1,3 +1,28 @@
+## Train boss scene boot (2026-10-31)
+
+Implemented the `System.Array.Copy` overloads used by boss timelines and
+validated `scene_level_train`:
+
+```
+python tools\extract_scene.py --game game\Cuphead_Data ^
+  --scene scene_level_train --out work\extract_train --add-level-resources
+
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_train\scene.chs --level --headless
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_train\scene.chs --levelplay --frames 30 --headless
+```
+
+Observed:
+
+```
+[INFO] [level] result=PASS
+[INFO] [levelplay] start=-330.0,-250.0 max_x=-85.0 max_y=-171.0 min_y=-283.3 collisions=74 result=PASS
+```
+
+Tutorial regression remains PASS. Boss attack/timeline behavior is still not
+validated.
+
 ## Veggies boss scene boot (2026-10-31)
 
 Added coroutine liveness validation and a temporary safety filter for known
