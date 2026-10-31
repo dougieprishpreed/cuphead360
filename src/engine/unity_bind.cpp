@@ -637,14 +637,22 @@ static bool Object_FindObjectsOfType(Interpreter& in, const MemberRefInfo&, u32,
 static bool GameObject_SetActive(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     u32 oi = ManagedObjectIndex(in, a[0]);
     Scene* scene = in.BoundScene();
+    bool enabled = Interpreter::ToBool(a[1]);
+    if (a[0].tag == VT_OBJECT && a[0].data.obj) {
+        a[0].data.obj->flags = (a[0].data.obj->flags & ~1u) | (enabled ? 1u : 0u);
+    }
     if (scene && oi < scene->ObjectCount()) {
-        // SceneObject flags are read-only through the public API; keep the
-        // active bit in the managed object's extra slot for now.
-        a[0].data.obj->flags = (a[0].data.obj->flags & ~1u) | (Interpreter::ToBool(a[1]) ? 1u : 0u);
+        SceneObject& o = scene->MutableObject(oi);
+        o.flags = (o.flags & ~1u) | (enabled ? 1u : 0u);
     }
     return RetVoid(ret);
 }
-static bool GameObject_GetActiveSelf(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+static bool GameObject_GetActiveSelf(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    if (scene && oi < scene->ObjectCount()) {
+        return RetBoolV(ret, (scene->Object(oi).flags & 1u) != 0);
+    }
     return RetBoolV(ret, (a[0].data.obj->flags & 1u) != 0);
 }
 

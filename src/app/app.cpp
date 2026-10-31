@@ -585,6 +585,23 @@ static int RunStackTest(MetadataPackage& pkg, const AppConfig& config, bool driv
     LogInfo("stack", "player LevelStart %s", start_ok ? "PASS" : "FAIL");
     pass = pass && start_ok;
 
+    for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
+        u32 id = scene.Object(oi).id;
+        if (id != 1006348 && id != 1005415 && id != 1005743) continue;
+        const SceneObject& o = scene.Object(oi);
+        u32 sr_enabled = 0;
+        for (u32 c = 0; c < o.component_count; ++c) {
+            u32 ci = o.component_start + c;
+            if (ci >= scene.ComponentCount()) break;
+            if (scene.Component(ci).type == 1) {
+                sr_enabled = scene.Component(ci).flags & 1u;
+                break;
+            }
+        }
+        LogInfo("stack", "player part %s active=%u sprite_enabled=%u",
+                o.name, o.flags & 1u, sr_enabled);
+    }
+
     if (drive_motor) {
         u32 motor_type = pkg.FindType("LevelPlayerMotor");
         u32 fixed_update = pkg.FindMethod(motor_type, "FixedUpdate");
@@ -605,7 +622,10 @@ static int RunStackTest(MetadataPackage& pkg, const AppConfig& config, bool driv
             bool render_ready = false;
             SoftRenderer renderer(1280, 720);
             if (render_play) {
-                if (!DisplayInit(1280, 720, config.headless)) {
+                if (!scene.LoadTextures()) {
+                    LogError("stack", "texture load failed");
+                    pass = false;
+                } else if (!DisplayInit(1280, 720, config.headless)) {
                     LogError("stack", "display init failed");
                     pass = false;
                 } else {
@@ -653,6 +673,10 @@ static int RunStackTest(MetadataPackage& pkg, const AppConfig& config, bool driv
                     f32 cam_x = px + 200.0f;
                     f32 cam_y = py + 35.0f;
                     if (cam_y < -120.0f) cam_y = -120.0f;
+                    if (i == 45) {
+                        LogInfo("stack", "capture camera=%.1f,%.1f player=%.1f,%.1f",
+                                cam_x, cam_y, px, py);
+                    }
                     scene.SetMainCameraPosition(cam_x, cam_y);
                     renderer.DrawScene(scene);
                     if (config.screenshot_path && saved < 3 &&
