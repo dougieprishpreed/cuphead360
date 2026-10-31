@@ -380,22 +380,29 @@ static int RunUnityTest(MetadataPackage& pkg, const AppConfig& config) {
         if (!called) pass = false;
     }
 
-    // Verify nested serializable object recovery (Level.intro).
+    // Verify nested serializable object recovery (Level.bounds). The old
+    // Level.intro test used [NonSerialized] fields, which are correctly
+    // excluded after the schema fix.
     u32 level_type = pkg.FindType("TutorialLevel");
-    u32 intro_field = 7161;
-    u32 intro_child = 7246;
-    if (level_type && intro_field) {
+    u32 bounds_field = 7163;
+    u32 bounds_top = 7217;
+    u32 bounds_bottom = 7218;
+    if (level_type && bounds_field) {
         for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
             const SceneComponent& comp = scene.Component(ci);
             if (comp.type != 4 || strcmp(comp.controller, "TutorialLevel") != 0) continue;
             Value obj = interp.ManagedComponent(ci);
-            Value intro = interp.GetField(intro_field, obj);
-            Value child = (intro.tag == VT_OBJECT || intro.tag == VT_STRUCT) ? interp.GetField(intro_child, intro) : Value::Null();
-            bool nested_ok = (intro.tag == VT_OBJECT || intro.tag == VT_STRUCT) && intro.data.obj != 0 &&
-                             child.tag == VT_BOOL && child.data.i32 != 0;
-            LogInfo("unity", "TutorialLevel nested intro=%s child=%d %s",
-                    (intro.data.obj ? "object" : "null"), child.data.i32,
-                    nested_ok ? "PASS" : "FAIL");
+            Value bounds = interp.GetField(bounds_field, obj);
+            Value top = (bounds.tag == VT_OBJECT || bounds.tag == VT_STRUCT)
+                ? interp.GetField(bounds_top, bounds) : Value::Null();
+            Value bottom = (bounds.tag == VT_OBJECT || bounds.tag == VT_STRUCT)
+                ? interp.GetField(bounds_bottom, bounds) : Value::Null();
+            bool nested_ok = (bounds.tag == VT_OBJECT || bounds.tag == VT_STRUCT) &&
+                             bounds.data.obj != 0 &&
+                             top.tag == VT_I4 && top.data.i32 == 500 &&
+                             bottom.tag == VT_I4 && bottom.data.i32 == 275;
+            LogInfo("unity", "TutorialLevel nested bounds top=%d bottom=%d expect=500/275 %s",
+                    top.data.i32, bottom.data.i32, nested_ok ? "PASS" : "FAIL");
             if (!nested_ok) pass = false;
             break;
         }

@@ -874,6 +874,8 @@ class MetadataBuilder:
             public = (f.flags & 0x7) == 0x6
             names = attrs.get(i, set())
             f.serialized = public or ("UnityEngine.SerializeField" in names)
+            if f.flags & 0x80:  # FieldAttributes.NotSerialized
+                f.serialized = False
             if "System.NonSerializedAttribute" in names or "System.NonSerialized" in names:
                 f.serialized = False
 

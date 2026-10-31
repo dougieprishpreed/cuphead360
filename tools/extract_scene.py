@@ -732,6 +732,9 @@ def append_prefab(env, out, atlas_cache, field_builder, root_go_id=5401):
                     ns = str(sc.m_Namespace or ""); cn = str(sc.m_ClassName or "")
                     full = ((ns+"."+cn) if ns else cn).replace("+","/")
                     vals = parse_script_values(field_builder, full, reader.get_raw_data()) if field_builder else []
+                    for v in vals:
+                        if v.get("kind") == 7 and v.get("target_kind") in (0, 2):
+                            v["object_id"] = (int(v.get("object_id", 0)) + id_base) & 0xFFFFFFFF
                     comp = {"type":"MonoBehaviour","source_id":cp.path_id+id_base,"script":full}
                     if vals: comp["values"]=vals
                     comps.append(comp)

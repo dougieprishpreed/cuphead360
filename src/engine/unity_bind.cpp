@@ -871,6 +871,27 @@ static bool Random_InitState(Interpreter& in, const MemberRefInfo&, u32, Value* 
     return RetVoid(ret);
 }
 
+static bool Renderer_GetMaterial(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 ci = ManagedComponentIndex(in, a[0]);
+    Value comp = in.ManagedComponent(ci);
+    if (comp.tag == VT_OBJECT && comp.data.obj) {
+        Object* c = comp.data.obj;
+        if (c->Fields()[2].tag == VT_OBJECT) {
+            if (ret) *ret = c->Fields()[2];
+            return true;
+        }
+        u32 material_type = in.Metadata().FindType("UnityEngine.Material");
+        if (!material_type) material_type = in.ComponentTypeId();
+        Object* mat = in.AllocObjectWithSlots(material_type, 8);
+        if (!mat) return false;
+        c->Fields()[2] = Value::ObjectRef(mat);
+        if (ret) *ret = Value::ObjectRef(mat);
+        return true;
+    }
+    if (ret) *ret = Value::Null();
+    return true;
+}
+
 static bool StringEqualsAscii(const Value& v, const char* text) {
     if (v.tag != VT_STRING || !v.data.str) return false;
     u32 n = (u32)strlen(text);
@@ -1049,6 +1070,7 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
             return Component_GetTransform(in, member, argc, args, ret);
         }
         if (strcmp(n, "GetComponent") == 0) return GameObject_GetComponent(in, member, argc, args, ret);
+        if (strcmp(n, "get_material") == 0 || strcmp(n, "get_sharedMaterial") == 0) return Renderer_GetMaterial(in, member, argc, args, ret);
         if (strcmp(n, "FindObjectsOfType") == 0) return Object_FindObjectsOfType(in, member, argc, args, ret);
         if (strcmp(n, "GetComponentsInChildren") == 0) return Component_GetComponentsInChildren(in, member, argc, args, ret);
         if (strcmp(n, "GetComponentInChildren") == 0) return Component_GetComponentInChildren(in, member, argc, args, ret);
