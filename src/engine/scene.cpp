@@ -116,6 +116,7 @@ bool Scene::Load(const char* path) {
     u32 strings_size = ReadU32LE(file_ + 64);
     u32 script_values_size = ReadU32LE(file_ + 88);
     u32 script_strings_size = ReadU32LE(file_ + 92);
+    u32 tags_off = ReadU32LE(file_ + 96);
 
     if (strings_off > file_size_ || strings_size > file_size_ - strings_off) return Fail("bad string section");
     if (go_count != 0 && (gos_off > file_size_ || go_count > (file_size_ - gos_off) / 64)) return Fail("bad object section");
@@ -125,6 +126,7 @@ bool Scene::Load(const char* path) {
     if (component_count != 0 && (components_off > file_size_ || component_count > (file_size_ - components_off) / 48)) return Fail("bad component section");
     if (script_values_size != 0 && (script_values_off > file_size_ || script_values_size > file_size_ - script_values_off)) return Fail("bad script value section");
     if (script_strings_size != 0 && (script_strings_off > file_size_ || script_strings_size > file_size_ - script_strings_off)) return Fail("bad script string section");
+    if (tags_off != 0 && (tags_off > file_size_ || go_count > (file_size_ - tags_off) / 4)) return Fail("bad tag section");
 
     strings_ = file_ + strings_off;
     strings_size_ = strings_size;
@@ -136,6 +138,7 @@ bool Scene::Load(const char* path) {
         o.id = ReadU32LE(p + 0);
         o.parent = ReadU32LE(p + 4);
         o.name = Str(ReadU32LE(p + 8));
+        o.tag = tags_off ? Str(ReadU32LE(file_ + tags_off + i * 4)) : "";
         o.flags = ReadU32LE(p + 12);
         for (u32 j = 0; j < 3; ++j) o.position[j] = ReadF32LE(p + 16 + j * 4);
         for (u32 j = 0; j < 4; ++j) o.rotation[j] = ReadF32LE(p + 28 + j * 4);

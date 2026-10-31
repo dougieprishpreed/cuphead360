@@ -272,6 +272,7 @@ def write_scene_binary(scene: dict, out_dir: str, path: str) -> int:
 
     components = bytearray()
     go_records = bytearray()
+    go_tags = bytearray()
     script_values = bytearray()
     script_strings = bytearray()
     for g in scene["gameobjects"]:
@@ -392,6 +393,7 @@ def write_scene_binary(scene: dict, out_dir: str, path: str) -> int:
             float(scale[0]), float(scale[1]), float(scale[2]),
             comp_start, count,
         ))
+        go_tags.extend(struct.pack("<I", s(g.get("tag", "Untagged"))))
 
     sprites = bytearray()
     for name in sorted(scene.get("sprites", {}).keys()):
@@ -449,11 +451,14 @@ def write_scene_binary(scene: dict, out_dir: str, path: str) -> int:
         offsets.append(base + len(body))
         sizes.append(len(sec))
         body.extend(sec)
+    tags_off = base + len(body)
+    body.extend(go_tags)
     while len(body) & 15:
         body.append(0)
     hdr.extend(offsets)
     hdr.extend(sizes)
     hdr.extend([0] * (SCENE_HEADER_WORDS - len(hdr)))
+    hdr[24] = tags_off
     hdr[2] = SCENE_HEADER_WORDS * 4 + len(body)
     blob = struct.pack("<%dI" % SCENE_HEADER_WORDS, *hdr) + bytes(body)
     with open(path, "wb") as f:
@@ -1218,7 +1223,9 @@ def append_prefab(env, out, atlas_cache, field_builder, root_go_id=5401):
         pos = [float(lp.x), float(lp.y), float(lp.z)]
         if gid == root_go_id:
             pos = [0.0, -180.0, 0.0]
-        obj = {"id":new_id,"name":g.m_Name,"active":bool(g.m_IsActive),
+        obj = {"id":new_id,"name":g.m_Name,
+               "tag":str(getattr(g,"m_TagString","Untagged") or "Untagged"),
+               "active":bool(g.m_IsActive),
                "transform":{"position":[float(pos[0]),float(pos[1]),float(pos[2])],
                             "rotation":[float(d.m_LocalRotation.x),float(d.m_LocalRotation.y),float(d.m_LocalRotation.z),float(d.m_LocalRotation.w)],
                             "scale":[float(d.m_LocalScale.x),float(d.m_LocalScale.y),float(d.m_LocalScale.z)],
@@ -1523,6 +1530,7 @@ def main():
                 "id": o.path_id,
                 "name": go.m_Name,
                 "active": bool(go.m_IsActive),
+                "tag": str(getattr(go, "m_TagString", "Untagged") or "Untagged"),
                 "components": [],
             }
     for o in env.objects:
@@ -1703,6 +1711,7 @@ def main():
             player = {
                 "id": pid,
                 "name": "Player",
+                "tag": "Player",
                 "active": True,
                 "transform": {
                     "position": [0.0, -180.0, 0.0],

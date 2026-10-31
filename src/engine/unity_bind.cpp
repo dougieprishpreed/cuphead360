@@ -587,6 +587,15 @@ static bool GameObject_GetTransform(Interpreter& in, const MemberRefInfo&, u32, 
     return true;
 }
 
+static bool Object_GetTag(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    const char* tag = "";
+    if (scene && oi < scene->ObjectCount()) tag = scene->Object(oi).tag;
+    if (ret) *ret = in.NewStringUtf8(tag ? tag : "");
+    return true;
+}
+
 static bool Component_CompareTag(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
     if (argc < 2 || a[1].tag != VT_STRING) return RetBoolV(ret, false);
     const char* tag = in.StringUtf8(a[1]);
@@ -596,7 +605,8 @@ static bool Component_CompareTag(Interpreter& in, const MemberRefInfo&, u32 argc
     bool match = false;
     if (scene && oi < scene->ObjectCount()) {
         const SceneObject& o = scene->Object(oi);
-        if (o.name && strstr(o.name, tag)) match = true;
+        if (o.tag && o.tag[0] && strcmp(o.tag, tag) == 0) match = true;
+        if (!match && o.name && strstr(o.name, tag)) match = true;
         if (!match) {
             for (u32 c = 0; c < o.component_count && !match; ++c) {
                 u32 ci = o.component_start + c;
@@ -2844,7 +2854,8 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
             if (ret) *ret = co ? Value::StructRef(co) : Value::Null();
             return true;
         }
-        if (strcmp(n, "get_tag") == 0 || strcmp(n, "set_tag") == 0) return RetVoid(ret);
+        if (strcmp(n, "get_tag") == 0) return Object_GetTag(in, member, argc, args, ret);
+        if (strcmp(n, "set_tag") == 0) return RetVoid(ret);
         if (strcmp(n, "StartCoroutine") == 0) return MonoBehaviour_StartCoroutine(in, member, argc, args, ret);
         if (strcmp(n, ".ctor") == 0 && strcmp(type, "UnityEngine.GameObject") == 0) {
             return GameObject_Ctor(in, member, argc, args, ret);

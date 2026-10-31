@@ -10,6 +10,7 @@ struct SceneObject {
     u32 id;
     u32 parent;
     const char* name;
+    const char* tag;
     u32 flags; // bit 0 active
     f32 position[3];
     f32 rotation[4];
