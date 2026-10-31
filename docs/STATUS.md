@@ -60,10 +60,11 @@ been validated, and what remains.
   `LevelPlayerMotor.FixedUpdate` with synthesized input. The motor moves the
   player and keeps it on the tutorial ground:
   `max_x=816.67 min_y=-213.29 PASS`.
-- `--motorplay` adds software rendering and camera follow; after loading
-  textures and honoring scene active flags, its captured frame shows Cuphead
-  in the tutorial scene. The player art remains oversized/overlapping and
-  unanimated because the Animator state machine is not implemented.
+- `--motorplay` adds software rendering, camera follow, and a native sprite
+  animation bridge. It draws an animated Cuphead in the tutorial scene by
+  selecting extracted idle/run/jump/dash frames from the motor state. This
+  is not the original Animator state machine; the player art remains
+  oversized and the slice is a logic/rendering smoke test.
 
 ### Runtime primitives
 

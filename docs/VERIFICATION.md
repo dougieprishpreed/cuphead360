@@ -167,11 +167,12 @@ This is not a validated visual slice.
   frame 90 before the background harness ended, so full big-endian
   revalidation of the newest changes is still pending.
 - The original player motor moves and grounds on Windows
-  (`motor moved ... PASS`). Its rendered mode (`--motorplay`) now draws
-  Cuphead in the tutorial scene with camera follow after loading textures
-  and honoring scene active flags. The player art is still oversized and
-  partly overlapping because the Animator state machine/sprite animation are
-  not implemented; it is a logic and rendering smoke test, not a polished
+  (`motor moved ... PASS`). Its rendered mode (`--motorplay`) draws an
+  animated Cuphead in the tutorial scene with camera follow after loading
+  textures, honoring scene active flags, and selecting extracted
+  idle/run/jump/dash frames from the motor state. This is a native animation
+  bridge, not the original Animator state machine; the player art is still
+  oversized, and it is a logic/rendering smoke test rather than a polished
   playable level.
 
 This verifies the runtime/metadata/scene/script foundation and the beginning

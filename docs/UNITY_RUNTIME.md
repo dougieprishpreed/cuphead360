@@ -110,14 +110,16 @@ Supporting work:
   `Color`, `Animator.StringToHash`, and value-type (Vector2/Vector3/Rect/
   Color) constructors are implemented.
 
-`--motorplay` adds software rendering and camera follow. After loading the
-scene textures and honoring `GameObject.SetActive` in the renderer, the slice
-renders Cuphead in the tutorial scene with camera follow (captured frame:
-`work/extract_prefab/motorplay4.45.png`). The player art is still oversized
-and partly overlapping because the Animator state machine and sprite
-animation are not implemented, so this is a logic and rendering smoke test,
-not a polished playable level. The native `--play` tutorial slice remains the
-most visually validated playable slice.
+`--motorplay` adds software rendering, camera follow, and a native sprite
+animation bridge. After loading the scene textures and honoring
+`GameObject.SetActive` in the renderer, the slice draws Cuphead in the
+tutorial scene with camera follow and selects extracted idle/run/jump/dash
+frames from the motor's grounded/motion state (captured frame:
+`work/extract_prefab/motorplay6.45.png`). This is **not** the original
+Animator state machine: the Animator parameters, clips and transitions are
+still unimplemented, and the player art is oversized. It is a logic and
+rendering smoke test, not a polished playable level. The native `--play`
+tutorial slice remains the most visually validated playable slice.
 
 ## Verified
 
