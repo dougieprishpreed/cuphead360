@@ -602,6 +602,21 @@ static bool Dict_Ctor(Interpreter& in, const MemberRefInfo& member, u32 argc, Va
     return true;
 }
 
+static bool Dict_Add(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    DictionaryObject* d = AsDict(a[0]);
+    if (!d || Dict_Find(d, a[1]) >= 0 || !Dict_Ensure(d, d->count + 1)) return false;
+    for (u32 i = 0; i < d->capacity; ++i) {
+        if (d->entries[i].used) continue;
+        d->entries[i].key = in.CopyValue(a[1]);
+        d->entries[i].value = in.CopyValue(a[2]);
+        d->entries[i].used = 1;
+        ++d->count;
+        if (ret) *ret = Value::Void();
+        return true;
+    }
+    return false;
+}
+
 static bool Dict_SetItem(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     DictionaryObject* d = AsDict(a[0]);
     if (!d || !Dict_Ensure(d, d->count + 1)) return false;
@@ -684,6 +699,57 @@ static bool IsDictName(const char* name) {
 }
 
 // ---------------------------------------------------------------------------
+// System.Array enumeration
+// ---------------------------------------------------------------------------
+
+static bool Array_GetEnumerator(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag != VT_ARRAY || !a[0].data.array) return false;
+    u32 object_type = in.Metadata().FindType("System.Object");
+    Object* e = in.AllocObjectWithSlots(object_type, 2);
+    if (!e) return false;
+    e->Fields()[0] = a[0];
+    e->Fields()[1] = Value::I4(-1);
+    if (ret) *ret = Value::ObjectRef(e);
+    return true;
+}
+
+static bool ArrayEnumerator_MoveNext(Interpreter&, Object* e, Value* ret) {
+    Value arr = e->Fields()[0];
+    if (arr.tag != VT_ARRAY || !arr.data.array) return RetBool(ret, false);
+    s32 i = Interpreter::ToI32(e->Fields()[1]) + 1;
+    e->Fields()[1] = Value::I4(i);
+    return RetBool(ret, i >= 0 && (u32)i < arr.data.array->length);
+}
+
+static bool ArrayEnumerator_Current(Interpreter&, Object* e, Value* ret) {
+    Value arr = e->Fields()[0];
+    if (arr.tag != VT_ARRAY || !arr.data.array) return false;
+    s32 i = Interpreter::ToI32(e->Fields()[1]);
+    if (i < 0 || (u32)i >= arr.data.array->length) return false;
+    if (ret) *ret = arr.data.array->Elements()[i];
+    return true;
+}
+
+bool Interpreter::DictionarySet(const Value& dict, const Value& key, const Value& value) {
+    DictionaryObject* d = (dict.tag == VT_OBJECT && dict.data.obj)
+        ? (DictionaryObject*)dict.data.obj : 0;
+    if (!d) return false;
+    if (!Dict_Ensure(d, d->count + 1)) return false;
+    s32 at = Dict_Find(d, key);
+    if (at < 0) {
+        for (u32 i = 0; i < d->capacity; ++i) {
+            if (!d->entries[i].used) { at = (s32)i; break; }
+        }
+        if (at < 0) return false;
+        d->entries[at].key = CopyValue(key);
+        d->entries[at].used = 1;
+        ++d->count;
+    }
+    d->entries[at].value = CopyValue(value);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // System.Delegate / System.Type
 // ---------------------------------------------------------------------------
 
@@ -755,6 +821,15 @@ static bool Type_GetTypeFromHandle(Interpreter& in, const MemberRefInfo&, u32, V
     else if ((a[0].tag == VT_STRUCT || a[0].tag == VT_OBJECT) && a[0].data.obj) {
         token = (u32)a[0].data.obj->Fields()[0].data.i32;
     }
+    u32 table = token >> 24;
+    if (table == 0x7F) { // generic method parameter (MVAR)
+        u32 idx = token & 0xFFFFFF;
+        u32 tid = idx ? in.GenericArgType(idx - 1) : 0;
+        return RetI32(ret, (s32)tid);
+    }
+    if (table == 0x7E) { // generic type parameter (VAR)
+        return RetI32(ret, 0);
+    }
     u32 tid = token ? in.Metadata().ResolveTypeToken(token) : 0;
     return RetI32(ret, (s32)tid);
 }
@@ -777,6 +852,34 @@ static bool Type_GetIsValueType(Interpreter& in, const MemberRefInfo&, u32, Valu
     u32 tid = (u32)Interpreter::ToI32(a[0]);
     bool is_value = tid && tid <= in.Metadata().TypeCount() && in.Metadata().Type(tid).is_value_type;
     return RetBool(ret, is_value);
+}
+
+static bool Enum_GetValues(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 tid = (u32)Interpreter::ToI32(a[0]);
+    if (!tid || tid > in.Metadata().TypeCount()) return false;
+    const TypeInfo& t = in.Metadata().Type(tid);
+    if (!t.is_enum) return false;
+    u32 count = 0;
+    for (u32 i = 0; i < t.field_count; ++i) {
+        const FieldInfo& f = in.Metadata().Field(t.field_start + i);
+        if (f.flags & FIELD_FLAG_LITERAL) {
+            if (strcmp(f.name, "value__") != 0) ++count;
+        }
+    }
+    Value arr = in.NewArrayValue(tid, count);
+    if (arr.tag == VT_ARRAY && arr.data.array) {
+        u32 j = 0;
+        for (u32 i = 0; i < t.field_count && j < count; ++i) {
+            u32 fid = t.field_start + i;
+            const FieldInfo& f = in.Metadata().Field(fid);
+            if (!(f.flags & FIELD_FLAG_LITERAL) || strcmp(f.name, "value__") == 0) continue;
+            s64 value = 0;
+            if (!in.Metadata().FieldConstant(fid, &value)) continue;
+            arr.data.array->Elements()[j++] = Value::I4((s32)value);
+        }
+    }
+    if (ret) *ret = arr;
+    return true;
 }
 
 static bool Interlocked_CompareExchange(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
@@ -858,6 +961,11 @@ static bool RuntimeHelpers_InitializeArray(Interpreter& in, const MemberRefInfo&
     return RetVoid(ret);
 }
 
+static bool Exception_Ctor(Interpreter& in, const MemberRefInfo& member, u32, Value*, Value* ret) {
+    if (ret) *ret = in.NewObjectValue(member.decl_id);
+    return true;
+}
+
 static const NativeEntry kEntries[] = {
     { "UnityEngine.Vector2", ".ctor", Vec2_Ctor },
     { "UnityEngine.Vector2", "get_x", Vec2_GetX },
@@ -920,6 +1028,7 @@ static const NativeEntry kEntries[] = {
     { "System.String", "StartsWith", String_StartsWith },
     { "System.String", "EndsWith", String_EndsWith },
     { "System.String", "IndexOf", String_IndexOf },
+    { "System.Array", "GetEnumerator", Array_GetEnumerator },
     { "System.Delegate", "Combine", Delegate_Combine },
     { "System.Delegate", "Remove", Delegate_Remove },
     { "System.MulticastDelegate", "CombineImpl", Delegate_Combine },
@@ -928,13 +1037,41 @@ static const NativeEntry kEntries[] = {
     { "System.Type", "get_FullName", Type_GetName },
     { "System.Type", "get_IsEnum", Type_GetIsEnum },
     { "System.Type", "get_IsValueType", Type_GetIsValueType },
+    { "System.Enum", "GetValues", Enum_GetValues },
     { "System.Threading.Interlocked", "CompareExchange", Interlocked_CompareExchange },
     { "System.Runtime.CompilerServices.RuntimeHelpers", "InitializeArray", RuntimeHelpers_InitializeArray },
+    { "System.Exception", ".ctor", Exception_Ctor },
+    { "System.ArgumentException", ".ctor", Exception_Ctor },
+    { "System.ArgumentNullException", ".ctor", Exception_Ctor },
+    { "System.InvalidOperationException", ".ctor", Exception_Ctor },
+    { "System.NotSupportedException", ".ctor", Exception_Ctor },
+    { "System.NullReferenceException", ".ctor", Exception_Ctor },
+    { "System.IndexOutOfRangeException", ".ctor", Exception_Ctor },
+    { "System.InvalidCastException", ".ctor", Exception_Ctor },
+    { "System.FormatException", ".ctor", Exception_Ctor },
+    { "System.OverflowException", ".ctor", Exception_Ctor },
+    { "System.IO.IOException", ".ctor", Exception_Ctor },
+    { "System.Collections.Generic.KeyNotFoundException", ".ctor", Exception_Ctor },
 };
 
 bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value* args, Value* ret) {
     if (ret) *ret = Value::Void();
     const TypeInfo& t = metadata_.Type(member.decl_id);
+    if (arg_count >= 1 && (args[0].tag == VT_OBJECT || args[0].tag == VT_STRUCT) &&
+        args[0].data.obj) {
+        Object* recv = args[0].data.obj;
+        Value first = recv->Fields()[0];
+        if (first.tag == VT_ARRAY) {
+            const char* n = member.name;
+            if (strcmp(n, "MoveNext") == 0) return ArrayEnumerator_MoveNext(*this, recv, ret);
+            if (strcmp(n, "get_Current") == 0) return ArrayEnumerator_Current(*this, recv, ret);
+            if (strcmp(n, "Dispose") == 0) return RetVoid(ret);
+            if (strcmp(n, "Reset") == 0) {
+                recv->Fields()[1] = Value::I4(-1);
+                return RetVoid(ret);
+            }
+        }
+    }
     if (IsListName(t.full_name)) {
         const char* n = member.name;
         if (strcmp(n, ".ctor") == 0) return List_Ctor(*this, member, arg_count, args, ret);
@@ -958,6 +1095,7 @@ bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value
     if (IsDictName(t.full_name)) {
         const char* n = member.name;
         if (strcmp(n, ".ctor") == 0) return Dict_Ctor(*this, member, arg_count, args, ret);
+        if (strcmp(n, "Add") == 0) return Dict_Add(*this, member, arg_count, args, ret);
         if (strcmp(n, "set_Item") == 0) return Dict_SetItem(*this, member, arg_count, args, ret);
         if (strcmp(n, "get_Item") == 0) return Dict_GetItem(*this, member, arg_count, args, ret);
         if (strcmp(n, "TryGetValue") == 0) return Dict_TryGetValue(*this, member, arg_count, args, ret);
@@ -970,11 +1108,15 @@ bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value
     for (u32 i = 0; i < CH360_ARRAY_COUNT(kEntries); ++i) {
         if (strcmp(kEntries[i].type, t.full_name) == 0 &&
             strcmp(kEntries[i].name, member.name) == 0) {
-            return kEntries[i].fn(*this, member, arg_count, args, ret);
+            bool ok = kEntries[i].fn(*this, member, arg_count, args, ret);
+            if (!ok) LogError("native", "%s::%s returned false", t.full_name, member.name);
+            return ok;
         }
     }
     if (strncmp(t.full_name, "UnityEngine.", 12) == 0) {
-        return InvokeUnityNative(*this, member, arg_count, args, ret);
+        bool ok = InvokeUnityNative(*this, member, arg_count, args, ret);
+        if (!ok) LogError("native", "%s::%s returned false (unity)", t.full_name, member.name);
+        return ok;
     }
     LogError("native", "unimplemented native method %s::%s (argc=%u)",
              t.full_name, member.name, arg_count);

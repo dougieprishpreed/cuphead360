@@ -346,11 +346,13 @@ class MetadataBuilder:
         self.exceptions = []
         self.param_names = []
         self.field_rvas = []  # (field_id, bytes)
+        self.field_constants = {}  # field_id -> integer constant
 
         self._build_typedefs()
         self._resolve_bases()
         self._build_nested_relationships()
         self._build_fields_and_methods()
+        self._build_field_constants()
         self._build_field_rvas()
         self._build_interfaces()
         self._build_memberrefs()
@@ -439,6 +441,16 @@ class MetadataBuilder:
         object_type = self.find_type("System", "Object")
         value_type = self.find_type("System", "ValueType")
         enum_type = self.find_type("System", "Enum")
+        if value_type is None:
+            for t in self.types:
+                if t is not None and t.full_name == "System.ValueType":
+                    value_type = t
+                    break
+        if enum_type is None:
+            for t in self.types:
+                if t is not None and t.full_name == "System.Enum":
+                    enum_type = t
+                    break
         for t in self.types:
             if t is None or t.external:
                 continue
@@ -1006,6 +1018,44 @@ class MetadataBuilder:
         return 0
 
     # -- field RVA data ----------------------------------------------------
+
+    def _build_field_constants(self):
+        """Collects literal field constants (enum values, const primitives)."""
+        table = getattr(self.md, "Constant", None)
+        if table is None:
+            return
+        for row in table.rows:
+            try:
+                if type(row.Parent.table).__name__ != "Field":
+                    continue
+                fid = row.Parent.row_index
+            except Exception:
+                continue
+            if fid <= 0 or fid >= len(self.fields):
+                continue
+            raw = row.Value.value if row.Value is not None else b""
+            et = int(row.Type)
+            value = 0
+            try:
+                if et == 0x08 and len(raw) >= 4:
+                    value = struct.unpack_from("<i", raw, 0)[0]
+                elif et == 0x09 and len(raw) >= 4:
+                    value = struct.unpack_from("<I", raw, 0)[0]
+                elif et == 0x06 and len(raw) >= 2:
+                    value = struct.unpack_from("<h", raw, 0)[0]
+                elif et == 0x07 and len(raw) >= 2:
+                    value = struct.unpack_from("<H", raw, 0)[0]
+                elif et in (0x04, 0x05) and len(raw) >= 1:
+                    value = raw[0]
+                elif et == 0x02 and len(raw) >= 1:
+                    value = 1 if raw[0] else 0
+                elif et == 0x0A and len(raw) >= 8:
+                    value = struct.unpack_from("<q", raw, 0)[0]
+                else:
+                    continue
+            except Exception:
+                continue
+            self.field_constants[fid] = value
 
     def _build_field_rvas(self):
         """Collects static field initializer blobs used by InitializeArray."""

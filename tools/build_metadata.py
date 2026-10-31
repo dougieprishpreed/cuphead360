@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from metadata_lib import (
     MetadataBuilder, SigNode, SIG_CLASS, SIG_VALUETYPE, SIG_GENERICINST,
     SIG_SZARRAY, SIG_ARRAY, SIG_BYREF, SIG_PTR, SIG_VAR, SIG_MVAR,
-    SIG_PINNED, SIG_SENTINEL, METHOD_FLAG_STATIC, il_instructions,
+    SIG_PINNED, SIG_SENTINEL, METHOD_FLAG_STATIC, il_instructions, Reader,
 )
 
 MAGIC = 0x43484D31  # "CHM1"
@@ -31,6 +31,7 @@ SECTION_NAMES = [
     "memberrefs", "methodspecs", "params", "interface_ids",
     "generic_arg_ids", "sig_children", "method_param_sigs",
     "local_var_sigs", "methodspec_args", "field_rvas", "field_rva_bytes",
+    "field_constants",
 ]
 
 
@@ -201,6 +202,19 @@ class PackageWriter:
                 continue
             token = struct.unpack_from("<I", code, operand_off)[0]
             table = token >> 24
+            if opcode == 0xD0 and table == 0x1B:
+                idx = token & 0xFFFFFF
+                if 1 <= idx <= len(b.md.TypeSpec.rows):
+                    try:
+                        row = b.md.TypeSpec.rows[idx - 1]
+                        sig = b.parse_type(Reader(b.blob(row.Signature)))
+                    except Exception:
+                        sig = None
+                    if sig is not None and sig.kind in (SIG_MVAR, SIG_VAR):
+                        marker = 0x7F000000 if sig.kind == SIG_MVAR else 0x7E000000
+                        struct.pack_into("<I", code, operand_off,
+                                         marker | ((sig.extra & 0xFFFFFF) + 1))
+                        continue
             if opcode in type_ops or (opcode == 0xD0 and table in (0x01, 0x1B)):
                 tid = b.resolve_token_type(token)
                 if tid:
@@ -290,6 +304,11 @@ class PackageWriter:
             self.field_rva_records.append((fid, off, len(data)))
         field_rvas = b"".join(struct.pack("<3I", *r) for r in self.field_rva_records)
 
+        field_constants = b"".join(
+            struct.pack("<3I", fid, int(value) & 0xFFFFFFFF,
+                        (int(value) >> 32) & 0xFFFFFFFF)
+            for fid, value in sorted(b.field_constants.items()))
+
         def u32arr(values):
             return b"".join(struct.pack("<I", v) for v in values)
 
@@ -320,6 +339,7 @@ class PackageWriter:
             "methodspec_args": u32arr(self.methodspec_args),
             "field_rvas": field_rvas,
             "field_rva_bytes": bytes(field_rva_bytes),
+            "field_constants": field_constants,
         }
 
         # Header layout: magic/version/file_size + counts + section offsets.
@@ -339,6 +359,7 @@ class PackageWriter:
             "exception_count": len(exceptions) // 24,
             "param_count": len(self.param_records),
             "field_rva_count": len(self.field_rva_records),
+            "field_constant_count": len(b.field_constants),
         }
 
         header = [MAGIC, VERSION, 0]  # file_size patched below
@@ -350,7 +371,7 @@ class PackageWriter:
             "param_count",
             "interface_id_count", "generic_arg_id_count", "sig_child_count",
             "method_param_sig_count", "local_var_sig_count",
-            "methodspec_arg_count", "field_rva_count",
+            "methodspec_arg_count", "field_rva_count", "field_constant_count",
         ]
         extra_counts = {
             "interface_id_count": len(self.interface_ids),

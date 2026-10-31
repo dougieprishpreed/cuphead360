@@ -319,7 +319,16 @@ void Interpreter::Shutdown() {
 }
 
 Object* Interpreter::AllocObject(u32 type_id) {
-    return AllocObjectWithSlots(type_id, runtime_types_[type_id].total_slots);
+    u32 slots = runtime_types_[type_id].total_slots;
+    if (type_id && type_id <= metadata_.TypeCount()) {
+        const TypeInfo& t = metadata_.Type(type_id);
+        if (strcmp(t.full_name, "UnityEngine.Rect") == 0) slots = 4;
+        else if (strcmp(t.full_name, "UnityEngine.Color") == 0) slots = 4;
+        else if (strcmp(t.full_name, "UnityEngine.Quaternion") == 0) slots = 4;
+        else if (strcmp(t.full_name, "UnityEngine.Vector4") == 0) slots = 4;
+        else if (strcmp(t.full_name, "UnityEngine.Bounds") == 0) slots = 6;
+    }
+    return AllocObjectWithSlots(type_id, slots);
 }
 
 Object* Interpreter::AllocObjectWithSlots(u32 type_id, u32 slots) {
@@ -348,6 +357,19 @@ Value Interpreter::NewObjectValue(u32 type_id) {
 Value Interpreter::NewStructValue(u32 type_id) {
     Object* o = AllocObject(type_id);
     return Value::StructRef(o);
+}
+
+Value Interpreter::NewDictionaryValue(u32 type_id) {
+    DictionaryObject* d = (DictionaryObject*)TrackAllocation(MemAlloc(sizeof(DictionaryObject)));
+    if (!d) return Value::Null();
+    memset(d, 0, sizeof(DictionaryObject));
+    d->type_id = type_id;
+    const TypeInfo& t = metadata_.Type(type_id);
+    if (t.generic_arg_count >= 2) {
+        d->key_type = metadata_.GenericArg(t.generic_arg_start);
+        d->value_type = metadata_.GenericArg(t.generic_arg_start + 1);
+    }
+    return Value::ObjectRef((Object*)d);
 }
 
 Value Interpreter::NewArrayValue(u32 element_type_id, u32 length) {
@@ -779,6 +801,8 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
     bool returned = false;
     bool ok = true;
     Value result = Value::Void();
+    u8 last_op = 0;
+    u32 last_pc = 0;
 
 #define PUSH(v) do { if (sp >= kMaxStack) { ok = Fail("evaluation stack overflow", method_id); goto done; } stack[sp++] = (v); } while (0)
 #define POP(dst) do { if (sp == 0) { ok = Fail("evaluation stack underflow", method_id); goto done; } (dst) = stack[--sp]; } while (0)
@@ -790,6 +814,8 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
             LogDebug("il", "method=%u pc=%u op=%02x", method_id, pc, code[pc]);
         }
         u8 op = code[pc++];
+        last_op = op;
+        last_pc = pc - 1;
         switch (op) {
             case 0x00: break; // nop
             case 0x01: break; // break
@@ -1130,6 +1156,13 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                 bool isType = (v.tag == VT_NULL) || IsAssignable(ObjectTypeId(v), target) ||
                               (target == string_type_id_ && v.tag == VT_STRING) ||
                               (target == array_type_id_ && v.tag == VT_ARRAY);
+                if (!isType && v.tag == VT_ARRAY && v.data.array && target) {
+                    const TypeInfo& tt = metadata_.Type(target);
+                    if (tt.element_id) {
+                        isType = v.data.array->element_type == tt.element_id ||
+                                 IsAssignable(v.data.array->element_type, tt.element_id);
+                    }
+                }
                 if (op == 0x75) {
                     PUSH(isType ? v : Value::Null());
                 } else {
@@ -1158,8 +1191,16 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                         else PUSH(Value::Null());
                     }
                 } else {
-                    ok = Fail("unbox of non-object", method_id);
-                    goto done;
+                    // Primitive and enum values are stored unboxed in this
+                    // runtime. Accept them for value-type targets so code such
+                    // as Enum.GetValues() consumers can unbox normally.
+                    const TypeInfo& tt = metadata_.Type(target);
+                    if (tt.is_value_type || tt.is_enum) {
+                        PUSH(op == 0xA5 ? CopyValue(box) : box);
+                    } else {
+                        ok = Fail("unbox of non-object", method_id);
+                        goto done;
+                    }
                 }
                 break;
             }
@@ -1401,7 +1442,13 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                             *addr.data.ref = NewVec2(0.0f, 0.0f);
                         } else if (strcmp(ti.full_name, "UnityEngine.Vector3") == 0) {
                             *addr.data.ref = NewVec3(0.0f, 0.0f, 0.0f);
-                        } else if (ti.is_value_type && runtime_types_[tid].total_slots > 0) {
+                        } else if (ti.is_value_type &&
+                                   (runtime_types_[tid].total_slots > 0 ||
+                                    strcmp(ti.full_name, "UnityEngine.Rect") == 0 ||
+                                    strcmp(ti.full_name, "UnityEngine.Color") == 0 ||
+                                    strcmp(ti.full_name, "UnityEngine.Quaternion") == 0 ||
+                                    strcmp(ti.full_name, "UnityEngine.Vector4") == 0 ||
+                                    strcmp(ti.full_name, "UnityEngine.Bounds") == 0)) {
                             Object* o = AllocObject(tid);
                             if (o) *addr.data.ref = Value::StructRef(o);
                         } else {
@@ -1427,6 +1474,11 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
 
 done:
     current_method_id_ = saved_method;
+    if (!ok) {
+        LogError("interp", "execute failed %s.%s id=%u pc=%u op=%02x",
+                 metadata_.Type(method.decl_id).full_name, method.name,
+                 method_id, last_pc, last_op);
+    }
     if (ok && returned && ret) *ret = CopyValue(result);
     if (locals) MemFree(locals);
     MemFree(arg_slots);

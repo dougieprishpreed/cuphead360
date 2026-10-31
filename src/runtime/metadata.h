@@ -170,6 +170,11 @@ struct FieldRvaInfo {
     u32 size;
 };
 
+struct FieldConstantInfo {
+    u32 field_id;
+    s64 value;
+};
+
 struct ParamInfo {
     const char* name;
     u32 flags;
@@ -208,6 +213,8 @@ public:
     u32 FieldRvaCount() const { return field_rva_count_; }
     const FieldRvaInfo& FieldRva(u32 index) const;
     const u8* FieldRvaData(u32 field_id, u32* out_size) const;
+    u32 FieldConstantCount() const { return field_constant_count_; }
+    bool FieldConstant(u32 field_id, s64* out) const;
 
     const TypeInfo& Type(u32 id) const;
     const FieldInfo& Field(u32 id) const;
@@ -270,6 +277,7 @@ private:
     u32 exception_count_;
     u32 param_count_;
     u32 field_rva_count_;
+    u32 field_constant_count_;
 
     const u8* strings_;
     u32 strings_size_;
@@ -291,6 +299,7 @@ private:
     Buffer<ParamInfo> params_;
     Buffer<ExceptionInfo> exceptions_;
     Buffer<FieldRvaInfo> field_rvas_;
+    Buffer<FieldConstantInfo> field_constants_;
 
     Buffer<u32> interface_ids_;
     Buffer<u32> generic_arg_ids_;

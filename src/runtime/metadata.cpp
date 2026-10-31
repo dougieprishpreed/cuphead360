@@ -15,7 +15,7 @@ static const u32 kHeaderWords = 80;
 static const u32 kHeaderBytes = kHeaderWords * 4;
 static const u32 kCountBase = 3;
 static const u32 kOffsetBase = 24;
-static const u32 kSizeBase = 46;
+static const u32 kSizeBase = 47;
 
 // Section indices in the package header.
 enum SectionIndex {
@@ -41,6 +41,7 @@ enum SectionIndex {
     SEC_METHODSPEC_ARGS,
     SEC_FIELD_RVAS,
     SEC_FIELD_RVA_BYTES,
+    SEC_FIELD_CONSTANTS,
     SEC_COUNT
 };
 
@@ -70,7 +71,7 @@ MetadataPackage::MetadataPackage()
       field_count_(0), method_count_(0), sig_count_(0), method_sig_count_(0),
       local_sig_count_(0), user_string_count_(0), memberref_count_(0),
       methodspec_count_(0), exception_count_(0), param_count_(0),
-      field_rva_count_(0), strings_(0), strings_size_(0), il_(0), il_size_(0),
+      field_rva_count_(0), field_constant_count_(0), strings_(0), strings_size_(0), il_(0), il_size_(0),
       user_bytes_(0), user_bytes_size_(0), field_rva_bytes_(0),
       field_rva_bytes_size_(0), type_bucket_mask_(0) {}
 
@@ -135,12 +136,14 @@ void MetadataPackage::Unload() {
     user_strings_.Reset();
     user_chars_.Reset();
     field_rvas_.Reset();
+    field_constants_.Reset();
     type_buckets_.Reset();
     type_next_.Reset();
     type_count_ = field_count_ = method_count_ = sig_count_ = 0;
     method_sig_count_ = local_sig_count_ = user_string_count_ = 0;
     memberref_count_ = methodspec_count_ = exception_count_ = param_count_ = 0;
     field_rva_count_ = 0;
+    field_constant_count_ = 0;
     type_bucket_mask_ = 0;
     last_error_ = "not loaded";
 }
@@ -157,8 +160,8 @@ bool MetadataPackage::Load(const char* path) {
     if (ReadWord(file_, 1) != kVersion) return Fail("unsupported package version");
     if (ReadWord(file_, 2) != file_size_) return Fail("package size mismatch");
 
-    u32 counts[18];
-    for (u32 i = 0; i < 18; ++i) counts[i] = ReadWord(file_, kCountBase + i);
+    u32 counts[19];
+    for (u32 i = 0; i < 19; ++i) counts[i] = ReadWord(file_, kCountBase + i);
     type_count_ = counts[0];
     field_count_ = counts[1];
     method_count_ = counts[2];
@@ -171,6 +174,7 @@ bool MetadataPackage::Load(const char* path) {
     exception_count_ = counts[9];
     param_count_ = counts[10];
     field_rva_count_ = counts[17];
+    field_constant_count_ = counts[18];
 
     u32 sec_size = 0;
     strings_ = Section(SEC_STRINGS, &strings_size_);
@@ -345,6 +349,24 @@ bool MetadataPackage::Load(const char* path) {
         }
     }
 
+    const u8* const_data = Section(SEC_FIELD_CONSTANTS, &sec_size);
+    if (field_constant_count_) {
+        if (!const_data || sec_size < field_constant_count_ * 12u) {
+            return Fail("bad field constant section");
+        }
+        if (!field_constants_.Resize(field_constant_count_)) {
+            return Fail("out of memory for field constants");
+        }
+        for (u32 i = 0; i < field_constant_count_; ++i) {
+            const u8* p = const_data + i * 12u;
+            FieldConstantInfo& c = field_constants_[i];
+            c.field_id = ReadU32LE(p + 0);
+            u64 lo = (u64)ReadU32LE(p + 4);
+            u64 hi = (u64)ReadU32LE(p + 8);
+            c.value = (s64)(lo | (hi << 32));
+        }
+    }
+
     const u8* exc_data = Section(SEC_EXCEPTIONS, &sec_size);
     if (!exc_data || sec_size < exception_count_ * 24u) return Fail("bad exception section");
     if (!exceptions_.Resize(exception_count_)) return Fail("out of memory for exceptions");
@@ -500,6 +522,17 @@ const u8* MetadataPackage::FieldRvaData(u32 field_id, u32* out_size) const {
         }
     }
     return 0;
+}
+
+bool MetadataPackage::FieldConstant(u32 field_id, s64* out) const {
+    if (out) *out = 0;
+    for (u32 i = 0; i < field_constant_count_; ++i) {
+        if (field_constants_[i].field_id == field_id) {
+            if (out) *out = field_constants_[i].value;
+            return true;
+        }
+    }
+    return false;
 }
 
 const ExceptionInfo& MetadataPackage::Exception(u32 index) const {

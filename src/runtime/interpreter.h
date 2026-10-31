@@ -46,6 +46,8 @@ public:
     Value CopyValue(const Value& v);
     Value NewStructValue(u32 type_id);
     Value NewArrayValue(u32 element_type_id, u32 length);
+    Value NewDictionaryValue(u32 type_id);
+    bool DictionarySet(const Value& dict, const Value& key, const Value& value);
     Value NewStringUtf16(const u16* chars, u32 length);
     Value NewStringUtf8(const char* text);
     Value NewStringAscii(const char* text);

@@ -476,6 +476,29 @@ static int RunStackTest(MetadataPackage& pkg, const AppConfig& config) {
     interp.SetField(players_field, Value::Null(), Value::Bool(true));
     LogInfo("stack", "Level.Current set, PlayersCreated=true");
 
+    u32 pm_type = pkg.FindType("PlayerManager");
+    u32 pm_players = pkg.FindField(pm_type, "players");
+    if (pm_players) {
+        const FieldInfo& pf = pkg.Field(pm_players);
+        const SigInfo& ps = pkg.Sig(pf.type_sig);
+        Value dict = interp.NewDictionaryValue(ps.type_id);
+        interp.SetField(pm_players, Value::Null(), dict);
+        LogInfo("stack", "PlayerManager.players initialized type=%u", ps.type_id);
+    } else {
+        LogWarn("stack", "PlayerManager.players field not found");
+    }
+    u32 pm_inputs = pkg.FindField(pm_type, "playerInputs");
+    if (pm_inputs) {
+        const SigInfo& is = pkg.Sig(pkg.Field(pm_inputs).type_sig);
+        Value dict = interp.NewDictionaryValue(is.type_id);
+        interp.DictionarySet(dict, Value::I4(0), Value::Null());
+        interp.DictionarySet(dict, Value::I4(1), Value::Null());
+        interp.SetField(pm_inputs, Value::Null(), dict);
+        LogInfo("stack", "PlayerManager.playerInputs initialized type=%u", is.type_id);
+    } else {
+        LogWarn("stack", "PlayerManager.playerInputs field not found");
+    }
+
     bool pass = true;
     u32 ctrl_type = pkg.FindType("LevelPlayerController");
 
@@ -531,13 +554,14 @@ static int RunStackTest(MetadataPackage& pkg, const AppConfig& config) {
 
     u32 level_init = pkg.FindMethod(ctrl_type, "LevelInit");
     bool init_ok = false;
+    LogInfo("stack", "LevelInit method=%u", level_init);
     if (level_init) {
         Value args[2];
         args[0] = controller;
         args[1] = Value::I4(0); // PlayerId.PlayerOne
         init_ok = interp.Invoke(level_init, args, 2, &r);
     }
-    LogInfo("stack", "player LevelInit %s", init_ok ? "PASS" : "FAIL");
+    LogInfo("stack", "player LevelInit %s (last_error=%u)", init_ok ? "PASS" : "FAIL", interp.LastError());
     pass = pass && init_ok;
 
     u32 level_start = FindMethodInHierarchy(pkg, ctrl_type, "LevelStart");
