@@ -42,6 +42,10 @@ int main(int argc, char** argv) {
             cfg.command = "motor";
             explicit_mode = true;
             cfg.frames = 180;
+        } else if (ArgEquals(a, "--motorplay")) {
+            cfg.command = "motorplay";
+            explicit_mode = true;
+            cfg.frames = 240;
         } else if (ArgEquals(a, "--play")) {
             cfg.command = "play";
             explicit_mode = true;
@@ -73,6 +77,7 @@ int main(int argc, char** argv) {
             printf("  --unity\n");
             printf("  --stack\n");
             printf("  --motor\n");
+            printf("  --motorplay\n");
             printf("  --play\n");
             printf("  --manual\n");
             printf("  --screenshot PATH\n");

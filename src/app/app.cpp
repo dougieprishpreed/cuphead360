@@ -444,7 +444,7 @@ static bool InvokeOnComponent(Interpreter& interp, u32 method, Value obj, Value*
 // Exercises the original platforming player stack against the extracted
 // prefab: static Level state, generic GetComponent<T>, Awake, LevelInit and
 // LevelStart. Failures are reported by the interpreter with the exact method.
-static int RunStackTest(MetadataPackage& pkg, const AppConfig& config, bool drive_motor) {
+static int RunStackTest(MetadataPackage& pkg, const AppConfig& config, bool drive_motor, bool render_play) {
     if (!config.scene_path) {
         LogError("stack", "no scene path");
         return 1;
@@ -588,22 +588,58 @@ static int RunStackTest(MetadataPackage& pkg, const AppConfig& config, bool driv
     if (drive_motor) {
         u32 motor_type = pkg.FindType("LevelPlayerMotor");
         u32 fixed_update = pkg.FindMethod(motor_type, "FixedUpdate");
+        u32 motor_update = FindMethodInHierarchy(pkg, motor_type, "Update");
+        u32 motor_start = FindMethodInHierarchy(pkg, motor_type, "Start");
         u32 player_oi = interp.ManagedObjectIndexFor(controller);
         if (!fixed_update || motor.tag != VT_OBJECT || player_oi >= scene.ObjectCount()) {
             LogError("stack", "motor test prerequisites missing (method=%u motor=%d oi=%u)",
                      fixed_update, motor.tag, player_oi);
             pass = false;
         } else {
+            if (motor_start) {
+                Value sargs[1]; sargs[0] = motor; Value sr;
+                if (!interp.Invoke(motor_start, sargs, 1, &sr)) {
+                    LogWarn("stack", "motor Start failed");
+                }
+            }
+            bool render_ready = false;
+            SoftRenderer renderer(1280, 720);
+            if (render_play) {
+                if (!DisplayInit(1280, 720, config.headless)) {
+                    LogError("stack", "display init failed");
+                    pass = false;
+                } else {
+                    InputInit();
+                    render_ready = true;
+                }
+            }
             f32 start_x = scene.Object(player_oi).world_x;
             f32 start_y = scene.Object(player_oi).world_y;
             f32 max_x = start_x, min_y = start_y, max_y = start_y;
             u32 frames = config.frames > 1 ? config.frames : 180;
+            u32 saved = 0;
             for (u32 i = 0; i < frames; ++i) {
+                InputState in;
+                if (render_play) in = InputRead();
+                f32 ax = 1.0f, ay = 0.0f;
                 u32 buttons = 0;
-                if (i >= 20 && i < 50) buttons |= 1u << 2; // Jump
-                SetRewiredInputState(1.0f, 0.0f, buttons);
+                if (render_play && !config.auto_input) {
+                    ax = in.axis_x;
+                    ay = in.axis_y;
+                    if (in.jump_held) buttons |= 1u << 2;
+                    if (in.dash_pressed) buttons |= 1u << 7;
+                    if (in.start_pressed) buttons |= 1u << 8;
+                } else {
+                    if (i >= 20 && i < 50) buttons |= 1u << 2; // Jump
+                    if (i == 100) buttons |= 1u << 7;          // Dash
+                }
+                SetRewiredInputState(ax, ay, buttons);
                 Value args[1]; args[0] = motor; Value mr;
                 if (!interp.Invoke(fixed_update, args, 1, &mr)) break;
+                if (motor_update) {
+                    Value uargs[1]; uargs[0] = motor; Value ur;
+                    interp.Invoke(motor_update, uargs, 1, &ur);
+                }
                 f32 px = scene.Object(player_oi).world_x;
                 f32 py = scene.Object(player_oi).world_y;
                 if (px > max_x) max_x = px;
@@ -613,6 +649,36 @@ static int RunStackTest(MetadataPackage& pkg, const AppConfig& config, bool driv
                     LogInfo("stack", "motor frame=%u pos=%.2f,%.2f",
                             i, px, py);
                 }
+                if (render_play && render_ready) {
+                    f32 cam_x = px + 200.0f;
+                    f32 cam_y = py + 35.0f;
+                    if (cam_y < -120.0f) cam_y = -120.0f;
+                    scene.SetMainCameraPosition(cam_x, cam_y);
+                    renderer.DrawScene(scene);
+                    if (config.screenshot_path && saved < 3 &&
+                        (i == 45 || i == 100 || i == 200)) {
+                        char path[1024];
+                        _snprintf(path, sizeof(path) - 1, "%s.%u.bmp", config.screenshot_path, i);
+                        path[sizeof(path) - 1] = 0;
+                        if (renderer.SaveBmp(path)) {
+                            LogInfo("stack", "screenshot=%s", path);
+                            ++saved;
+                        }
+                    }
+                    DisplayPresent(renderer.Pixels());
+                    DisplayPump();
+                    if (DisplayShouldQuit() || in.quit_pressed) break;
+                    if (!config.headless) PlatformSleepMs(16);
+                }
+            }
+            if (render_play && render_ready) {
+                if (config.screenshot_path) {
+                    char path[1024];
+                    _snprintf(path, sizeof(path) - 1, "%s.final.bmp", config.screenshot_path);
+                    path[sizeof(path) - 1] = 0;
+                    renderer.SaveBmp(path);
+                }
+                DisplayShutdown();
             }
             f32 end_x = scene.Object(player_oi).world_x;
             f32 end_y = scene.Object(player_oi).world_y;
@@ -964,6 +1030,7 @@ int AppMain(const AppConfig& config) {
                             strcmp(config.command, "unity") == 0 ||
                             strcmp(config.command, "stack") == 0 ||
                             strcmp(config.command, "motor") == 0 ||
+                            strcmp(config.command, "motorplay") == 0 ||
                             strcmp(config.command, "play") == 0));
     const char* metadata_path = config.metadata_path;
 #if defined(_XBOX)
@@ -1004,14 +1071,21 @@ int AppMain(const AppConfig& config) {
             LogError("stack", "metadata and scene required");
             result = 1;
         } else {
-            result = RunStackTest(metadata, config, false);
+            result = RunStackTest(metadata, config, false, false);
         }
     } else if (config.command && strcmp(config.command, "motor") == 0) {
         if (!metadata.IsLoaded() || !config.scene_path) {
             LogError("stack", "metadata and scene required");
             result = 1;
         } else {
-            result = RunStackTest(metadata, config, true);
+            result = RunStackTest(metadata, config, true, false);
+        }
+    } else if (config.command && strcmp(config.command, "motorplay") == 0) {
+        if (!metadata.IsLoaded() || !config.scene_path) {
+            LogError("stack", "metadata and scene required");
+            result = 1;
+        } else {
+            result = RunStackTest(metadata, config, true, true);
         }
     } else if (config.command && strcmp(config.command, "scene") == 0) {
         result = RunScene(config);
