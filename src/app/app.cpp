@@ -840,6 +840,91 @@ static bool SceneObjectActiveInHierarchy(const Scene& scene, u32 oi) {
     return oi < scene.ObjectCount();
 }
 
+struct RuntimeCollider {
+    u32 oi;
+    u32 ci;
+    f32 minx, maxx, miny, maxy;
+};
+
+static bool ComputeColliderBounds(const Scene& scene, u32 oi, u32 ci, RuntimeCollider* out) {
+    if (oi >= scene.ObjectCount() || ci >= scene.ComponentCount()) return false;
+    const SceneComponent& c = scene.Component(ci);
+    if (c.type != 5 && c.type != 6) return false;
+    const SceneObject& o = scene.Object(oi);
+    f32 sx = o.world_scale_x, sy = o.world_scale_y;
+    f32 hw = 0.0f, hh = 0.0f, ox = 0.0f, oy = 0.0f;
+    if (c.type == 5) {
+        hw = c.color[0] * 0.5f * fabsf(sx);
+        hh = c.color[1] * 0.5f * fabsf(sy);
+    } else {
+        f32 s = fabsf(sx) > fabsf(sy) ? fabsf(sx) : fabsf(sy);
+        hw = hh = c.color[0] * 0.5f * s;
+    }
+    ox = c.color[2] * sx;
+    oy = c.color[3] * sy;
+    f32 ca = cosf(o.world_rotation), sa = sinf(o.world_rotation);
+    f32 cx = o.world_x + ox * ca - oy * sa;
+    f32 cy = o.world_y + ox * sa + oy * ca;
+    out->oi = oi;
+    out->ci = ci;
+    out->minx = cx - hw; out->maxx = cx + hw;
+    out->miny = cy - hh; out->maxy = cy + hh;
+    return true;
+}
+
+static u64 ColliderPairKey(u32 a, u32 b) {
+    if (a > b) { u32 t = a; a = b; b = t; }
+    return ((u64)a << 32) | b;
+}
+
+static bool PairListHas(const Buffer<u64>& list, u64 key) {
+    for (u32 i = 0; i < list.Size(); ++i) if (list[i] == key) return true;
+    return false;
+}
+
+static bool ControllerHas(const Scene& scene, u32 oi, const char* needle) {
+    if (oi >= scene.ObjectCount()) return false;
+    const SceneObject& o = scene.Object(oi);
+    for (u32 c = 0; c < o.component_count; ++c) {
+        u32 ci = o.component_start + c;
+        if (ci >= scene.ComponentCount()) break;
+        const char* ctrl = scene.Component(ci).controller;
+        if (ctrl && strstr(ctrl, needle)) return true;
+    }
+    return false;
+}
+
+static u32 InvokeCollisionOnObject(Interpreter& interp, MetadataPackage& pkg, Scene& scene,
+                                   u32 oi, u32 other_ci, u32* failure_count) {
+    if (oi >= scene.ObjectCount()) return 0;
+    const SceneObject& o = scene.Object(oi);
+    u32 invoked = 0;
+    for (u32 c = 0; c < o.component_count; ++c) {
+        u32 ci = o.component_start + c;
+        if (ci >= scene.ComponentCount()) break;
+        const SceneComponent& sc = scene.Component(ci);
+        if (sc.type != 4) continue;
+        Value self = interp.ManagedComponent(ci);
+        if (self.tag != VT_OBJECT || !self.data.obj) continue;
+        u32 m = FindMethodInHierarchy(pkg, self.data.obj->type_id, "OnTriggerEnter2D");
+        if (!m) continue;
+        Value args[2];
+        args[0] = self;
+        args[1] = interp.ManagedComponent(other_ci);
+        Value r;
+        if (!interp.Invoke(m, args, 2, &r)) {
+            if (failure_count) {
+                if (*failure_count < 12) {
+                    LogWarn("collision", "OnTriggerEnter2D %s failed", sc.controller);
+                }
+                ++*failure_count;
+            }
+        }
+        ++invoked;
+    }
+    return invoked;
+}
+
 static bool NonGameplayScript(const char* ctrl) {
     if (!ctrl) return true;
     return strncmp(ctrl, "UnityEngine.UI.", 15) == 0 ||
@@ -1226,6 +1311,9 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     bool logged_player_update_fail = false;
     bool logged_level_update_fail = false;
     u32 dynamic_start_failures = 0;
+    Buffer<u64> active_collision_pairs;
+    u32 collision_events = 0;
+    u32 collision_failures = 0;
     for (u32 i = 0; i < frames; ++i) {
         InputState in_state;
         in_state = InputRead();
@@ -1322,6 +1410,46 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
             extra_update_seen[ci] = 1;
         }
         extra_update_failed.Resize(extra_update_cis.Size());
+        // Dispatch Unity-style trigger enter events for overlapping 2D
+        // colliders. Cuphead's AbstractCollidableObject hierarchy uses
+        // OnTriggerEnter2D to route damage, pickups and projectile hits.
+        {
+            Buffer<RuntimeCollider> colliders;
+            for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
+                if (!(scene.Object(oi).flags & 1u)) continue;
+                const SceneObject& o = scene.Object(oi);
+                for (u32 c = 0; c < o.component_count; ++c) {
+                    u32 ci = o.component_start + c;
+                    if (ci >= scene.ComponentCount()) break;
+                    const SceneComponent& sc = scene.Component(ci);
+                    if (sc.type != 5 && sc.type != 6) continue;
+                    if (!(sc.flags & 1u)) continue;
+                    RuntimeCollider rc;
+                    if (ComputeColliderBounds(scene, oi, ci, &rc)) colliders.PushBack(rc);
+                }
+            }
+            Buffer<u64> frame_pairs;
+            for (u32 a = 0; a < colliders.Size(); ++a) {
+                for (u32 b = a + 1; b < colliders.Size(); ++b) {
+                    const RuntimeCollider& ca = colliders[a];
+                    const RuntimeCollider& cb = colliders[b];
+                    if (ca.oi == cb.oi) continue;
+                    if (ca.maxx < cb.minx || cb.maxx < ca.minx ||
+                        ca.maxy < cb.miny || cb.maxy < ca.miny) continue;
+                    u64 key = ColliderPairKey(ca.oi, cb.oi);
+                    frame_pairs.PushBack(key);
+                    if (PairListHas(active_collision_pairs, key)) continue;
+                    collision_events += InvokeCollisionOnObject(interp, pkg, scene,
+                        ca.oi, cb.ci, &collision_failures);
+                    collision_events += InvokeCollisionOnObject(interp, pkg, scene,
+                        cb.oi, ca.ci, &collision_failures);
+                }
+            }
+            active_collision_pairs.Reset();
+            for (u32 i2 = 0; i2 < frame_pairs.Size(); ++i2) {
+                active_collision_pairs.PushBack(frame_pairs[i2]);
+            }
+        }
         f32 px = scene.Object(player_oi).world_x;
         f32 py = scene.Object(player_oi).world_y;
         if (px > max_x) max_x = px;
@@ -1373,8 +1501,8 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         if (!config.headless) PlatformSleepMs(16);
     }
     bool pass = loop_ok && (max_x - start_x > 50.0f);
-    LogInfo("levelplay", "start=%.1f,%.1f max_x=%.1f max_y=%.1f min_y=%.1f result=%s",
-            start_x, start_y, max_x, max_y, min_y, pass ? "PASS" : "FAIL");
+    LogInfo("levelplay", "start=%.1f,%.1f max_x=%.1f max_y=%.1f min_y=%.1f collisions=%u result=%s",
+            start_x, start_y, max_x, max_y, min_y, collision_events, pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
 }
 
