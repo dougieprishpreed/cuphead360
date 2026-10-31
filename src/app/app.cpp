@@ -1407,9 +1407,9 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
             Value ev = interp.ManagedComponent(extra_update_cis[k]);
             if (ev.tag != VT_OBJECT || !ev.data.obj) continue;
             if (i == 0) {
-                LogInfo("levelplay", "update %s ci=%u",
+                LogInfo("levelplay", "update %s ci=%u fixed=%u update=%u",
                         scene.Component(extra_update_cis[k]).controller,
-                        extra_update_cis[k]);
+                        extra_update_cis[k], extra_fixed_mids[k], extra_update_mids[k]);
             }
             Value eargs[1]; eargs[0] = ev; Value er;
             if (extra_fixed_mids[k]) {

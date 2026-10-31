@@ -675,6 +675,18 @@ bool Interpreter::IsStaticField(u32 field_id) const {
     return field_static_[field_id] != 0;
 }
 
+static Value CoerceEnumFieldValue(MetadataPackage& md, const FieldInfo& f, const Value& v) {
+    if ((v.tag != VT_OBJECT && v.tag != VT_STRUCT) || !v.data.obj) return v;
+    const SigInfo& fs = md.Sig(f.type_sig);
+    u32 ftid = fs.type_id;
+    if (!ftid || ftid > md.TypeCount()) return v;
+    const TypeInfo& ft = md.Type(ftid);
+    if (!ft.is_enum) return v;
+    Object* o = v.data.obj;
+    if (!o || o->slots == 0) return Value::I4(0);
+    return o->Fields()[0];
+}
+
 Value Interpreter::GetField(u32 field_id, const Value& instance, bool* ok) {
     if (ok) *ok = false;
     const FieldInfo& f = metadata_.Field(field_id);
@@ -684,7 +696,8 @@ Value Interpreter::GetField(u32 field_id, const Value& instance, bool* ok) {
         u32 slot = FieldSlot(field_id);
         if (!rt.static_values || slot >= rt.static_slots) return Value::Null();
         if (ok) *ok = true;
-        return rt.static_values[slot];
+        Value sv = rt.static_values[slot];
+        return CoerceEnumFieldValue(metadata_, f, sv);
     }
     Object* o = 0;
     if (instance.tag == VT_OBJECT || instance.tag == VT_STRUCT) o = instance.data.obj;
@@ -693,6 +706,7 @@ Value Interpreter::GetField(u32 field_id, const Value& instance, bool* ok) {
     if (slot >= o->slots) return Value::Null();
     if (ok) *ok = true;
     Value v = o->Fields()[slot];
+    v = CoerceEnumFieldValue(metadata_, f, v);
     if (v.tag == VT_NULL) {
         const SigInfo& fs = metadata_.Sig(f.type_sig);
         if (fs.kind == SIG_VALUETYPE && fs.type_id) {
@@ -777,16 +791,17 @@ bool Interpreter::SetExternalField(const MemberRefInfo& member, const Value& ins
 void Interpreter::SetField(u32 field_id, const Value& instance, const Value& value) {
     const FieldInfo& f = metadata_.Field(field_id);
     if (field_id == 0) return;
+    Value cv = CoerceEnumFieldValue(metadata_, f, value);
     if (IsStaticField(field_id)) {
         TypeRuntime& rt = runtime_types_[f.decl_id];
         u32 slot = FieldSlot(field_id);
-        if (rt.static_values && slot < rt.static_slots) StoreValue(&rt.static_values[slot], value);
+        if (rt.static_values && slot < rt.static_slots) StoreValue(&rt.static_values[slot], cv);
         return;
     }
     Object* o = (instance.tag == VT_OBJECT || instance.tag == VT_STRUCT) ? instance.data.obj : 0;
     if (!o) return;
     u32 slot = FieldSlot(field_id);
-    if (slot < o->slots) StoreValue(&o->Fields()[slot], value);
+    if (slot < o->slots) StoreValue(&o->Fields()[slot], cv);
 }
 
 bool Interpreter::EnsureTypeInitialized(u32 type_id) {
