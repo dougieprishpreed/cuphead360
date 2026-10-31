@@ -1300,6 +1300,11 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                     const MemberRefInfo* mr = metadata_.MemberRefForToken(token);
                     Value v;
                     if (!mr || !GetExternalField(*mr, obj, &v)) {
+                        if (mr) {
+                            const TypeInfo& mt = metadata_.Type(mr->decl_id);
+                            LogError("interp", "unresolved external field %s.%s",
+                                     mt.full_name, mr->name);
+                        }
                         ok = Fail("unresolved external field", method_id);
                         goto done;
                     }

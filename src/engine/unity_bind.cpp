@@ -1759,6 +1759,34 @@ static bool Rect_SetYMax(Interpreter&, const MemberRefInfo&, u32, Value* a, Valu
     if (o) o->Fields()[3] = Value::R4(a[1].data.f32 - o->Fields()[1].data.f32);
     return RetVoid(ret);
 }
+static bool Rect_Ctor(Interpreter&, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    Object* o = RectObject(a[0]);
+    if (o && argc >= 5) {
+        o->Fields()[0] = Value::R4(a[1].data.f32);
+        o->Fields()[1] = Value::R4(a[2].data.f32);
+        o->Fields()[2] = Value::R4(a[3].data.f32);
+        o->Fields()[3] = Value::R4(a[4].data.f32);
+    }
+    return RetVoid(ret);
+}
+static bool Rect_Contains(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = RectObject(a[0]);
+    f32 px = 0.0f, py = 0.0f;
+    if (a[1].tag == VT_VEC2 && a[1].data.ptr) {
+        const Vec2* p = (const Vec2*)a[1].data.ptr;
+        px = p->x; py = p->y;
+    } else if ((a[1].tag == VT_STRUCT || a[1].tag == VT_OBJECT) && a[1].data.obj) {
+        Object* p = a[1].data.obj;
+        px = p->Fields()[0].data.f32;
+        py = p->Fields()[1].data.f32;
+    }
+    if (!o) return RetBoolV(ret, false);
+    f32 x = o->Fields()[0].data.f32;
+    f32 y = o->Fields()[1].data.f32;
+    f32 w = o->Fields()[2].data.f32;
+    f32 h = o->Fields()[3].data.f32;
+    return RetBoolV(ret, px >= x && px <= x + w && py >= y && py <= y + h);
+}
 
 static bool Camera_GetMain(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
     Scene* scene = in.BoundScene();
@@ -1885,8 +1913,14 @@ static bool Vector3_Mul(Interpreter& in, const MemberRefInfo&, u32, Value* a, Va
     if (ret) *ret = in.NewVec3(x->x * s, x->y * s, x->z * s);
     return true;
 }
-static bool Vector3_ImplicitV2(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
-    if (a[0].tag == VT_VEC3 && a[0].data.ptr) {
+static bool Vector3_Distance(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag != VT_VEC3 || a[1].tag != VT_VEC3 || !a[0].data.ptr || !a[1].data.ptr) return false;
+    const Vec3* x = (const Vec3*)a[0].data.ptr;
+    const Vec3* y = (const Vec3*)a[1].data.ptr;
+    f32 dx = x->x - y->x, dy = x->y - y->y, dz = x->z - y->z;
+    return RetF32V(ret, sqrtf(dx * dx + dy * dy + dz * dz));
+}
+static bool Vector3_ImplicitV2(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {    if (a[0].tag == VT_VEC3 && a[0].data.ptr) {
         const Vec3* x = (const Vec3*)a[0].data.ptr;
         if (ret) *ret = in.NewVec2(x->x, x->y);
         return true;
@@ -2121,6 +2155,30 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "Instantiate") == 0) return Object_Instantiate(in, member, argc, args, ret);
         if (strcmp(n, "FindObjectOfType") == 0) return Object_FindObjectOfType(in, member, argc, args, ret);
         if (strcmp(n, "get_material") == 0 || strcmp(n, "get_sharedMaterial") == 0) return Renderer_GetMaterial(in, member, argc, args, ret);
+        if (strcmp(n, "get_sortingOrder") == 0) {
+            const SceneComponent* c = SceneComponentFor(in, args[0]);
+            return RetI32V(ret, c ? c->sorting_order : 0);
+        }
+        if (strcmp(n, "set_sortingOrder") == 0) {
+            SceneComponent* c = MutableSceneComponentFor(in, args[0]);
+            if (c) c->sorting_order = Interpreter::ToI32(args[1]);
+            return RetVoid(ret);
+        }
+        if (strcmp(n, "get_sortingLayerID") == 0) {
+            const SceneComponent* c = SceneComponentFor(in, args[0]);
+            return RetI32V(ret, c ? c->sorting_layer : 0);
+        }
+        if (strcmp(n, "get_sortingLayer") == 0) {
+            const SceneComponent* c = SceneComponentFor(in, args[0]);
+            return RetI32V(ret, c ? c->sorting_layer : 0);
+        }
+        if (strcmp(n, "get_sortingLayerName") == 0) {
+            if (ret) *ret = in.NewStringAscii("");
+            return true;
+        }
+        if (strcmp(n, "set_sortingLayerName") == 0 || strcmp(n, "set_sortingLayerID") == 0) {
+            return RetVoid(ret);
+        }
         if (strcmp(n, "FindObjectsOfType") == 0) return Object_FindObjectsOfType(in, member, argc, args, ret);
         if (strcmp(n, "GetComponentsInChildren") == 0) return Component_GetComponentsInChildren(in, member, argc, args, ret);
         if (strcmp(n, "GetComponentInChildren") == 0) return Component_GetComponentInChildren(in, member, argc, args, ret);
@@ -2294,6 +2352,8 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "get_speed") == 0) return Animator_GetSpeed(in, member, argc, args, ret);
     }
     if (strcmp(type, "UnityEngine.Rect") == 0) {
+        if (strcmp(n, ".ctor") == 0) return Rect_Ctor(in, member, argc, args, ret);
+        if (strcmp(n, "Contains") == 0) return Rect_Contains(in, member, argc, args, ret);
         if (strcmp(n, "get_x") == 0) return Rect_GetX(in, member, argc, args, ret);
         if (strcmp(n, "set_x") == 0) return Rect_SetX(in, member, argc, args, ret);
         if (strcmp(n, "get_y") == 0) return Rect_GetY(in, member, argc, args, ret);
@@ -2322,6 +2382,7 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "op_Addition") == 0) return Vector3_Add(in, member, argc, args, ret);
         if (strcmp(n, "op_Subtraction") == 0) return Vector3_Sub(in, member, argc, args, ret);
         if (strcmp(n, "op_Multiply") == 0) return Vector3_Mul(in, member, argc, args, ret);
+        if (strcmp(n, "Distance") == 0) return Vector3_Distance(in, member, argc, args, ret);
         if (strcmp(n, "op_Implicit") == 0) return Vector3_ImplicitV2(in, member, argc, args, ret);
     }
     if (strcmp(type, "UnityEngine.Vector2") == 0) {

@@ -966,6 +966,7 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
             strncmp(ctrl, "Blur", 4) == 0 ||
             strncmp(ctrl, "Chromatic", 9) == 0 ||
             strncmp(ctrl, "AdjustTMP", 9) == 0 ||
+            strcmp(ctrl, "Cuphead") == 0 ||
             strncmp(ctrl, "CameraAnimationController", 25) == 0) {
             continue;
         }
@@ -979,6 +980,51 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     Buffer<u8> extra_update_failed;
     extra_update_failed.Resize(extra_update_cis.Size());
     LogInfo("levelplay", "additional update scripts=%u", extra_update_cis.Size());
+
+    // Unity calls Awake on active scene scripts before Start. Prefab
+    // instances were already handled by Object.Instantiate; this pass covers
+    // scene-authored components such as CupheadLevelCamera.
+    interp.MarkComponentAwake(level_ci);
+    interp.MarkComponentAwake(player_ci);
+    if (motor_ci != 0xFFFFFFFFu) interp.MarkComponentAwake(motor_ci);
+    u32 awake_failures = 0;
+    for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+        const SceneComponent& sc = scene.Component(ci);
+        if (sc.type != 4) continue;
+        if (interp.IsComponentAwake(ci)) continue;
+        const char* ctrl = sc.controller;
+        if (strncmp(ctrl, "UnityEngine.UI.", 15) == 0 ||
+            strncmp(ctrl, "TMPro.", 6) == 0 ||
+            strncmp(ctrl, "Rewired.", 8) == 0 ||
+            strncmp(ctrl, "LevelHUD", 8) == 0 ||
+            strncmp(ctrl, "LevelGUI", 8) == 0 ||
+            strncmp(ctrl, "Options", 7) == 0 ||
+            strncmp(ctrl, "Localization", 12) == 0 ||
+            strncmp(ctrl, "UIText", 6) == 0 ||
+            strncmp(ctrl, "Audio", 5) == 0 ||
+            strncmp(ctrl, "Music", 5) == 0 ||
+            strncmp(ctrl, "AdjustTMP", 9) == 0 ||
+            strncmp(ctrl, "SpriteAtlas", 11) == 0 ||
+            strncmp(ctrl, "TextureLoader", 13) == 0 ||
+            strncmp(ctrl, "AssetBundle", 11) == 0 ||
+            strncmp(ctrl, "CupheadGlyph", 12) == 0 ||
+            strncmp(ctrl, "Blur", 4) == 0 ||
+            strncmp(ctrl, "Chromatic", 9) == 0 ||
+            strcmp(ctrl, "Cuphead") == 0) {
+            continue;
+        }
+        Value v = interp.ManagedComponent(ci);
+        if (v.tag != VT_OBJECT || !v.data.obj) continue;
+        u32 am = FindMethodInHierarchy(pkg, v.data.obj->type_id, "Awake");
+        if (am) {
+            Value aargs[1]; aargs[0] = v; Value ar;
+            if (!interp.Invoke(am, aargs, 1, &ar)) {
+                if (awake_failures < 8) LogWarn("levelplay", "Awake %s failed", ctrl);
+                ++awake_failures;
+            }
+        }
+        interp.MarkComponentAwake(ci);
+    }
 
     // Unity calls Start once on every active script before the first Update.
     // Several scene scripts cache camera/effect components there.
@@ -1045,6 +1091,7 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         } else {
             if (i >= 20 && i < 50) buttons |= 1u << 2;
             if (i == 100) buttons |= 1u << 7;
+            if (i >= 10) buttons |= 1u << 3; // shoot
         }
         SetRewiredInputState(ax, ay, buttons);
         Value args[1]; args[0] = motor; Value mr;
