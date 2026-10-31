@@ -5,56 +5,114 @@ XDK built / Xenia tested / Hardware tested**
 
 ## Completed in this session
 
-### Investigation
+### Environment and source identification
 
 - [x] Located and verified the GOG installation at `game/`.
-- [x] Identified Cuphead `bundleVersion` 1.3.2, Unity 2017.4.9f1, Mono.
-- [x] Confirmed DLC (`The Delicious Last Course`) is present in the same
-  build: DLC scenes in `BuildSettings`, DLC types in `Assembly-CSharp.dll`,
-  DLC asset bundles.
-- [x] Inventoried managed assemblies, scene list, bundle contents, and object
-  counts. See `REVERSE_ENGINEERING.md`.
-- [x] Decompiled `Assembly-CSharp.dll` locally with ILSpy 11.1 for analysis
-  (not committed).
-- [x] Verified the XDK toolchain by rebuilding Spire360's `hello` XEX: VS2010
-  PowerPC compiler `_MSC_VER=1600`, big-endian, D3D9, XInput, file writes.
-- [x] Verified VS2010 x86 compiler exists for the Windows target.
-- [x] Confirmed private GitHub repository `dougieprishpreed/cuphead360` exists
-  (empty) and the configured Git credential manager can access it.
+- [x] Identified Cuphead `bundleVersion` 1.3.2, GOG build
+  `55543280706943035`, Unity 2017.4.9f1, Mono backend.
+- [x] Confirmed The Delicious Last Course is present in the same build:
+  DLC scenes in `BuildSettings`, DLC types in `Assembly-CSharp.dll`,
+  DLC asset bundles, DLC progression fields.
+- [x] Inventoried managed assemblies, 79 scenes, 5.22 GB of AssetBundles,
+  87,659 sprites, 1,108 textures, 132 AudioClips.
+- [x] Verified the XDK PowerPC compiler (`_MSC_VER=1600`), VS2010 x86
+  compiler, MSBuild, XDK libs/headers, and Xenia Canary.
+- [x] Confirmed the private GitHub repository and credential access.
 
-### Architecture
+### Shared platform foundation
 
-- [x] Selected metadata-driven IL execution + native Unity layer + future hot
-  path AOT. Rationale in `ARCHITECTURE.md`.
-- [x] Confirmed game code has no generic type/method definitions, reducing
-  runtime complexity.
-- [x] Established endianness and memory constraints as first-class design
-  requirements.
+- [x] Portable core: fixed-width types, explicit LE/BE readers, file I/O,
+  logging, tracked allocator, dynamic buffers, string builder.
+- [x] Windows executable and Xbox 360 XEX built from the same core sources.
+- [x] Windows executable runs self-tests (endian/memory/file/containers) PASS.
+- [x] XEX loads and logs on Xenia.
+- [x] Xbox 360 build produces `build\xbox360\default.xex`.
 
-### Code
+### Metadata recovery
 
-- [ ] Portable core skeleton.
-- [ ] Windows executable.
-- [ ] Xbox 360 XEX from shared core.
-- [ ] Metadata package generator.
-- [ ] C++ metadata loader.
-- [ ] IL interpreter.
-- [ ] First original-logic execution milestone.
-- [ ] Asset extraction pipeline.
-- [ ] Renderer/engine vertical slice.
+- [x] Python metadata reader over the original `Assembly-CSharp.dll`:
+  5,639 game TypeDefs, 37,524 fields, 34,747 methods, 34,266 methods with IL,
+  2,590,233 IL bytes, 6,834 unique user strings.
+- [x] Signature parser for all CLI element types, generics, arrays,
+  byrefs, custom modifiers, locals, method refs, type specs.
+- [x] IL decoder validated against all 34,266 method bodies with zero
+  undecoded methods.
+- [x] Field layout/static offsets/vtable slots computed; no generic game types
+  or methods (generics are BCL-only).
+- [x] Compact `metadata.chm` package (8.4 MB) generated reproducibly.
+- [x] C++ package loader works identically on x86 Windows and big-endian
+  Xbox 360 under Xenia (verified in logs).
 
-## Known gaps
+### Runtime / interpreter
 
-- No full game runtime yet.
-- No rendering/audio/collision engine yet.
-- The decoder/interpreter does not yet cover the full IL opcode set.
-- No Xenia/hardware validation of Cuphead360 itself.
+- [x] Metadata-driven IL execution runtime with objects, fields, statics,
+  arrays, structs, virtual dispatch, static constructors, delegates
+  (basic), and native method dispatch.
+- [x] Native `UnityEngine.Mathf` functions.
+- [x] Native `System.Object`, `System.String` (core operations).
+- [x] Native `UnityEngine.Vector2` value type and operators/fields.
+- [x] Native `System.Collections.Generic.List<T>` (Add/Count/Indexer/Remove/
+  Clear/Contains/GetEnumerator) with native enumerator.
+- [x] Original `EaseUtils` pure methods execute and match a .NET reference
+  harness for 18 cases.
+- [x] Original `EaseUtils.Ease` switch dispatcher executes and matches.
+- [x] Original `PlayerData/PlayerInventory..ctor` executes: creates a
+  `List<Weapon>` and adds both starting weapons (count 2).
+- [x] Original `LevelPlayerMotor/VelocityManager.get_Total` executes with
+  real movement math and returns expected `(100, -202.5)` for a controlled
+  state.
+- [x] All the above PASS on Windows **and** on the Xbox 360 XEX in Xenia
+  (big-endian), with logs captured.
+
+### Content pipeline and renderer
+
+- [x] Scene extractor for Unity 2017 serialized scenes:
+  GameObject/Transform hierarchy, SpriteRenderer, Animator, Camera.
+- [x] Atlas lookup by `SpriteAtlas` render-data key; crops used sprites into
+  portable RGBA `CHTX` files.
+- [x] Compact `scene.chs` format consumed by C++.
+- [x] Animation extractor for Unity StreamedClip frames, controller states,
+  sprite PPtr curves, path-CRC binding to GameObjects.
+- [x] Compact `anim.chs` format; native animation player applies default
+  state sprite tracks.
+- [x] Software renderer with camera, sprite quads, alpha blending, sorting,
+  colour tint, flips; BMP screenshots.
+- [x] Windows and Xbox 360 software-rendered tutorial scene screenshots
+  produced from real game data.
+- [x] D3D9 presentation backend for Xbox 360 (device/texture/quad/present).
+
+## Verified evidence
+
+- Windows logic log: `build/logs/logic7.log` — `result=PASS` with all
+  Ease/PlayerInventory/VelocityManager cases.
+- Xenia logic log: `build/xbox360/cuphead360.log` — same cases PASS on
+  big-endian PowerPC, including movement math.
+- Xenia scene log: `build/xbox360/cuphead360.log` — scene, 25 textures,
+  D3D9 device, screenshot written.
+- 360 framebuffer screenshot: `build/xbox360/frame.bmp` (rendered by the
+  XEX; can be compared with `work/extract_tutorial_anim2/render.png`).
+
+## Not yet implemented
+
+- Managed Unity object model (`GameObject`, `Transform`, `Component`,
+  `MonoBehaviour`) and scene-instance binding.
+- MonoBehaviour serialized-field recovery and script instantiation.
+- Unity message lifecycle/coroutines driven by game scripts.
+- Input (Rewired-facing API / XInput), physics/collision, audio.
+- Full player controller, boss logic, menus, saves, DLC progression.
+- All 79 levels and DLC playable content.
+- Xenia visual validation of the D3D9 presentation (software framebuffer
+  screenshot is validated; D3D9 output capture is limited by Xenia's
+  window capture).
 
 ## Next priorities
 
-1. Shared core + dual-target hello build.
-2. Python metadata package generator validated against ILSpy.
-3. C++ metadata loader tested on Windows and 360.
-4. Interpreter slice executing real `Assembly-CSharp` methods with a .NET
-   reference comparison.
-5. Asset pipeline for player sprites/animation and a first render.
+1. Build the managed Unity object model and bind scene objects/components to
+   interpreter objects.
+2. Parse MonoBehaviour serialized fields (using the game's metadata field
+   order) and instantiate original scripts.
+3. Drive `Awake/Start/Update` and coroutines; implement Transform/Renderer/
+   Animator/Input natively.
+4. Implement the player controller and a tutorial-level playable slice.
+5. Add physics, audio, and save/progression.
+6. Expand content coverage and regression tests.

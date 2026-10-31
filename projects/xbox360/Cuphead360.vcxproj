@@ -50,6 +50,13 @@
     <ClCompile Include="..\..\src\core\file.cpp" />
     <ClCompile Include="..\..\src\core\log.cpp" />
     <ClCompile Include="..\..\src\core\mem.cpp" />
+    <ClCompile Include="..\..\src\engine\animation.cpp" />
+    <ClCompile Include="..\..\src\engine\renderer_soft.cpp" />
+    <ClCompile Include="..\..\src\engine\scene.cpp" />
+    <ClCompile Include="..\..\src\runtime\interpreter.cpp" />
+    <ClCompile Include="..\..\src\runtime\metadata.cpp" />
+    <ClCompile Include="..\..\src\runtime\native.cpp" />
+    <ClCompile Include="..\..\src\platform\display.cpp" />
     <ClCompile Include="..\..\src\platform\platform_winapi.cpp" />
     <ClCompile Include="..\..\src\platform\xbox360\main_xbox360.cpp" />
   </ItemGroup>

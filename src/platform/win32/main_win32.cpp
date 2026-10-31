@@ -25,6 +25,19 @@ int main(int argc, char** argv) {
             cfg.seed = (u32)strtoul(argv[++i], 0, 10);
         } else if (ArgEquals(a, "--log") && i + 1 < argc) {
             cfg.log_path = argv[++i];
+        } else if (ArgEquals(a, "--metadata") && i + 1 < argc) {
+            cfg.metadata_path = argv[++i];
+        } else if (ArgEquals(a, "--inspect")) {
+            cfg.command = "inspect";
+        } else if (ArgEquals(a, "--logic")) {
+            cfg.command = "logic";
+        } else if (ArgEquals(a, "--scene") && i + 1 < argc) {
+            cfg.command = "scene";
+            cfg.scene_path = argv[++i];
+        } else if (ArgEquals(a, "--screenshot") && i + 1 < argc) {
+            cfg.screenshot_path = argv[++i];
+        } else if (ArgEquals(a, "--anim-time") && i + 1 < argc) {
+            cfg.anim_time = (f32)atof(argv[++i]);
         } else if (ArgEquals(a, "--command") && i + 1 < argc) {
             cfg.command = argv[++i];
         } else if (ArgEquals(a, "--selftest")) {
@@ -37,6 +50,12 @@ int main(int argc, char** argv) {
             printf("  --frames N\n");
             printf("  --seed N\n");
             printf("  --log PATH\n");
+            printf("  --metadata PATH\n");
+            printf("  --inspect\n");
+            printf("  --logic\n");
+            printf("  --scene PATH\n");
+            printf("  --screenshot PATH\n");
+            printf("  --anim-time SECONDS\n");
             printf("  --selftest\n");
             printf("  --speed N\n");
             return 0;

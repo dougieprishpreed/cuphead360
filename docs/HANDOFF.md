@@ -1,55 +1,90 @@
 # Handoff
 
-## Environment facts
+## Environment
 
-- Project root: `F:\downloads\temp\python\hermes\cuphead360`
-- Game install: `F:\downloads\temp\python\hermes\cuphead360\game` (gitignored)
-- XDK: `C:\Program Files (x86)\Microsoft Xbox 360 SDK` (`XEDK` env var set)
-- XDK compiler: `%XEDK%\bin\win32\cl.exe`, `_MSC_VER=1600`
+- Project: `F:\downloads\temp\python\hermes\cuphead360`
+- Game (gitignored): `game/`
+- XDK: `C:\Program Files (x86)\Microsoft Xbox 360 SDK` (`XEDK`)
+- XDK compiler: `_MSC_VER=1600`, big-endian PowerPC
 - VS2010: `C:\Program Files (x86)\Microsoft Visual Studio 10.0`
 - MSBuild: `C:\Windows\Microsoft.NET\Framework\v4.0.30319\MSBuild.exe`
 - ILSpy CLI: `F:\downloads\temp\python\hermes\spire360\out\tools\ilspycmd.exe`
-- Working analysis/decompile output: `work/` (gitignored)
-- Remote: `https://github.com/dougieprishpreed/cuphead360` (private, initially
-  empty; Git credential manager authenticated)
+- Xenia Canary: `F:\downloads\xenia_canary_windows\xenia_canary.exe`
+  (local test copy in `work/xenia_test/`)
 
-## Verified source build
+## Build
 
-- Cuphead GOG bundleVersion 1.3.2, GOG build `55543280706943035`
-- Unity 2017.4.9f1, Mono backend
-- 79 scenes including all DLC scenes
-- `Assembly-CSharp.dll`: 5,640 TypeDefs, 34,747 MethodDefs, 34,266 methods
-  with IL, 2,590,233 IL bytes, no generic definitions
-- StreamingAssets bundles: 5.22 GB, 87,659 sprites, 1,108 textures, 132
-  AudioClips
+```
+scripts\build_win32.bat Release
+scripts\build_xbox360.bat Release
+```
 
-## Toolchain verified
+Outputs: `build\win32\Cuphead360.exe`, `build\xbox360\default.xex`.
 
-Spire360's `xdk\hello` project was rebuilt locally and its XEX/report were
-examined. The report confirms big-endian PowerPC, `_MSC_VER=1600`, working
-D3D9, XInput, VirtualAlloc, and `game:\` file writes. This environment can
-produce XEXs.
+## Generate metadata and content
 
-## Current code state
+```
+python tools\build_metadata.py game\Cuphead_Data\Managed\Assembly-CSharp.dll work\metadata\metadata.chm
+python tools\extract_scene.py --game game\Cuphead_Data --scene scene_level_tutorial --out work\extract_tutorial_anim2
+```
 
-See `docs/PROGRESS.md`. At the time of writing, the repository contains the
-investigation/architecture documentation and is being brought up to the
-first shared-core dual-target build.
+Metadata package: `work\metadata\metadata.chm` (8.4 MB).
+Scene package: `scene.chs`, `anim.chs`, cropped `sprites/*.rgba` + `.png`.
 
-## Immediate next steps
+## Run tests
 
-1. Build `src/core` + `src/app` for Win32 and Xbox 360.
-2. Add `tools/build_metadata.py`; generate a compact metadata package from the
-   user's `Assembly-CSharp.dll`.
-3. Implement `src/runtime/metadata.*` and verify on both targets.
-4. Implement the interpreter subset needed for a real game method; compare
-   with a .NET reference harness.
-5. Implement sprite/atlas extraction and a headless Win32 render test.
+Windows logic (all original-IL checks):
 
-## Important constraints
+```
+build\win32\Cuphead360.exe --logic --metadata work\metadata\metadata.chm --log build\logs\logic.log
+```
 
-- Never commit `game/`, `work/`, extracted assets, XDK files, or game code.
-- Both targets must compile from the same shared sources.
-- All serialized reads must be explicitly little-endian.
-- Do not claim Xenia/hardware validation without an actual run.
-- The private repository is the only remote; verify before pushing.
+Windows scene render:
+
+```
+build\win32\Cuphead360.exe --scene work\extract_tutorial_anim2\scene.chs --anim-time 0.5 --screenshot build\tutorial.bmp
+```
+
+Xbox 360 scene:
+
+1. Copy `scene.chs`, `sprites/` into `build\xbox360\GameData\`.
+2. Run `build\xbox360\default.xex` in Xenia or on hardware.
+3. The current XEX boots the scene viewer (see `src/platform/xbox360/main_xbox360.cpp`).
+   It writes `game:\cuphead360.log` and `game:\frame.bmp`.
+
+Xbox 360 logic mode: set `cfg.command = "logic"` in
+`src/platform/xbox360/main_xbox360.cpp`, copy `metadata.chm` to
+`build\xbox360\GameData\metadata.chm`, rebuild and run. Last verified log:
+all Ease/PlayerInventory/VelocityManager tests PASS under Xenia.
+
+## Current code map
+
+- `src/core/` — endian, files, logging, memory, buffers.
+- `src/runtime/metadata.*` — `.chm` loader, tokens, fields/methods.
+- `src/runtime/interpreter.*` — IL execution, objects, statics, vtables.
+- `src/runtime/native.cpp` — Mathf, String, Vector2, List<T>.
+- `src/engine/scene.*` — `.chs` scene loader, transforms.
+- `src/engine/renderer_soft.*` — software sprite renderer, BMP.
+- `src/engine/animation.*` — `.chs` animation loader/player.
+- `src/platform/display.cpp` — Win32 window / D3D9 present.
+- `src/app/app.cpp` — commands: selftest, inspect, logic, scene.
+
+## Known issues / next actions
+
+- `display.cpp` Xbox D3D9 uses `D3DUSAGE_CPU_CACHED_MEMORY` and a managed
+  texture; device init and presentation execute in Xenia, but visual capture
+  of the host window was black (likely PrintWindow limitation). The
+  framebuffer screenshot proves rendering; confirm D3D output manually.
+- `Scene::LoadTextures` keeps the whole `FileReadAll` block and points
+  `pixels` at offset 16 (owned pointer stored separately).
+- Unity external types are stubs; only Mathf/String/Vector2/List are native.
+- MonoBehaviour serialized fields are not parsed yet.
+- `Scene`/`AnimationPlayer` are a viewer, not the game loop.
+- The XEX currently runs the scene viewer for 120 frames; the final boot
+  flow must be replaced with the real game.
+- Metadata decompilation/analysis lives in `work/` (gitignored).
+
+## Git
+
+- Remote: `https://github.com/dougieprishpreed/cuphead360` (private)
+- Do not commit `game/`, `work/`, `build/`, or extracted assets.

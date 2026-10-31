@@ -28,6 +28,7 @@ public:
     const T& operator[](u32 i) const { return data_[i]; }
 
     void Clear() { size_ = 0; }
+    void Reset() { MemFree(data_); data_ = 0; size_ = 0; capacity_ = 0; }
 
     bool Reserve(u32 n) {
         if (n <= capacity_) return true;

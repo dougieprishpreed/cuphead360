@@ -12,10 +12,20 @@ locally generated `GameData/` directory.
 
 ## Status
 
-Early foundation. See [docs/PROGRESS.md](docs/PROGRESS.md) for exactly what
-compiles, what executes, and what has been validated. Nothing in this
-repository should be read as a claim of full-game compatibility until that
-document says so explicitly.
+Foundation plus first executable vertical slices. The current build:
+- loads the original `Assembly-CSharp.dll` metadata and IL through a custom
+  big-endian-safe runtime;
+- executes original `EaseUtils`, `PlayerData/PlayerInventory`, and
+  `LevelPlayerMotor/VelocityManager` logic on Windows **and** on the Xbox 360
+  XEX under Xenia;
+- extracts real scenes, sprites, and sprite animation tracks from the user's
+  game data and renders them with the same shared software renderer on
+  Windows and Xbox 360.
+
+It is **not** yet a playable Cuphead port. See
+[docs/PROGRESS.md](docs/PROGRESS.md) for exactly what compiles, executes, and
+has been validated, and [docs/HANDOFF.md](docs/HANDOFF.md) for the current
+build mode and next steps.
 
 Current reference build:
 
