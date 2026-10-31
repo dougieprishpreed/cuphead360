@@ -1,3 +1,33 @@
+## Frogs boss scene boot (2026-10-31)
+
+Fixed the content pipeline to skip Unity `Dictionary`/`HashSet` fields that
+occupy no bytes in serialized MonoBehaviour payloads. This unblocked
+`Level/Bounds.colliders` and, in turn, the derived `FrogsLevel` fields
+(`tall`, `small`, `morphed`, `demonTrigger`).
+
+Extracted and ran `scene_level_frogs`:
+
+```
+python tools\extract_scene.py --game game\Cuphead_Data ^
+  --scene scene_level_frogs --out work\extract_frogs --add-level-resources
+
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_frogs\scene.chs --level --headless
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_frogs\scene.chs --levelplay --frames 30 --headless
+```
+
+Observed:
+
+```
+[INFO] [level] result=PASS
+[INFO] [levelplay] start=-410.0,-240.0 max_x=225.9 max_y=-132.2 min_y=-244.5 collisions=653 result=PASS
+```
+
+This validates boss-scene extraction, level startup and the movement/play
+harness on a second boss scene. Boss attacks, phase logic, damage, UI/audio and
+full-scene rendering are still not validated.
+
 ## Synthetic weapon firing and collision milestone
 
 The level-play harness now invokes the original
