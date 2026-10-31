@@ -14,6 +14,7 @@ struct SceneObject {
     u32 flags; // bit 0 active
     f32 position[3];
     f32 rotation[4];
+    f32 euler[3];
     f32 scale[3];
     u32 component_start;
     u32 component_count;

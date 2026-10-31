@@ -1,4 +1,4 @@
-﻿#include "app/app.h"
+#include "app/app.h"
 #include "core/containers.h"
 #include "core/endian.h"
 #include "core/file.h"
@@ -850,6 +850,119 @@ static bool SceneObjectActiveInHierarchy(const Scene& scene, u32 oi) {
     return oi < scene.ObjectCount();
 }
 
+static bool SceneObjectWithin(const Scene& scene, u32 oi, u32 root_oi) {
+    u32 cur = oi;
+    u32 guard = 0;
+    while (cur < scene.ObjectCount() && guard++ < 256) {
+        if (cur == root_oi) return true;
+        u32 pid = scene.Object(cur).parent;
+        if (pid == 0 || pid == 0xFFFFFFFFu) break;
+        u32 pi = FindSceneObjectIndexById(scene, pid);
+        if (pi == 0xFFFFFFFFu || pi == cur) break;
+        cur = pi;
+    }
+    return false;
+}
+
+static bool SceneObjectIsPlayerRelated(const Scene& scene, u32 oi) {
+    u32 cur = oi;
+    u32 guard = 0;
+    while (cur < scene.ObjectCount() && guard++ < 256) {
+        const SceneObject& o = scene.Object(cur);
+        if (o.name && strstr(o.name, "Player")) return true;
+        for (u32 c = 0; c < o.component_count; ++c) {
+            u32 ci = o.component_start + c;
+            if (ci >= scene.ComponentCount()) break;
+            const char* ctrl = scene.Component(ci).controller;
+            if (ctrl && (strstr(ctrl, "LevelPlayer") ||
+                         strcmp(ctrl, "PlayerInput") == 0 ||
+                         strcmp(ctrl, "PlayerDamageReceiver") == 0)) {
+                return true;
+            }
+        }
+        u32 pid = o.parent;
+        if (pid == 0 || pid == 0xFFFFFFFFu) break;
+        u32 pi = FindSceneObjectIndexById(scene, pid);
+        if (pi == 0xFFFFFFFFu || pi == cur) break;
+        cur = pi;
+    }
+    return false;
+}
+
+static bool SceneObjectHasDamageReceiver(Interpreter& in, MetadataPackage& pkg,
+                                         const Scene& scene, u32 oi) {
+    if (oi >= scene.ObjectCount()) return false;
+    u32 dr_type = pkg.FindType("DamageReceiver");
+    u32 drc_type = pkg.FindType("DamageReceiverChild");
+    const SceneObject& o = scene.Object(oi);
+    for (u32 c = 0; c < o.component_count; ++c) {
+        u32 ci = o.component_start + c;
+        if (ci >= scene.ComponentCount()) break;
+        const SceneComponent& sc = scene.Component(ci);
+        if (sc.type != 4 || !sc.controller) continue;
+        Value v = in.ManagedComponent(ci);
+        if (v.tag != VT_OBJECT || !v.data.obj) continue;
+        u32 vt = v.data.obj->type_id;
+        if ((dr_type && in.IsAssignable(vt, dr_type)) ||
+            (drc_type && in.IsAssignable(vt, drc_type))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool SceneObjectIsProjectile(const Scene& scene, u32 oi) {
+    u32 cur = oi;
+    u32 guard = 0;
+    while (cur < scene.ObjectCount() && guard++ < 256) {
+        const SceneObject& o = scene.Object(cur);
+        if (o.name && (strstr(o.name, "Projectile") || strstr(o.name, "Peashot"))) return true;
+        for (u32 c = 0; c < o.component_count; ++c) {
+            u32 ci = o.component_start + c;
+            if (ci >= scene.ComponentCount()) break;
+            const char* ctrl = scene.Component(ci).controller;
+            if (ctrl && strstr(ctrl, "Projectile")) return true;
+        }
+        u32 pid = o.parent;
+        if (pid == 0 || pid == 0xFFFFFFFFu) break;
+        u32 pi = FindSceneObjectIndexById(scene, pid);
+        if (pi == 0xFFFFFFFFu || pi == cur) break;
+        cur = pi;
+    }
+    return false;
+}
+
+static bool SceneObjectOwnsProjectileCollider(Interpreter& in, MetadataPackage& pkg,
+                                              const Scene& scene, u32 oi) {
+    if (SceneObjectIsProjectile(scene, oi)) return true;
+    if (oi >= scene.ObjectCount()) return false;
+    u32 projectile_type = pkg.FindType("BasicProjectile");
+    u32 base_projectile_type = pkg.FindType("AbstractProjectile");
+    const SceneObject& o = scene.Object(oi);
+    for (u32 c = 0; c < o.component_count; ++c) {
+        u32 ci = o.component_start + c;
+        if (ci >= scene.ComponentCount()) break;
+        const SceneComponent& sc = scene.Component(ci);
+        if (sc.type != 4 || !sc.controller || strcmp(sc.controller, "CollisionChild") != 0) continue;
+        Value self = in.ManagedComponent(ci);
+        if (self.tag != VT_OBJECT || !self.data.obj) continue;
+        u32 parent_field = 0, cur = self.data.obj->type_id, guard = 0;
+        while (cur && guard++ < 64 && !parent_field) {
+            parent_field = pkg.FindField(cur, "collisionParent");
+            cur = pkg.Type(cur).base_id;
+        }
+        if (!parent_field) continue;
+        Value parent = in.GetField(parent_field, self);
+        if (parent.tag != VT_OBJECT || !parent.data.obj) continue;
+        u32 pt = parent.data.obj->type_id;
+        if ((projectile_type && in.IsAssignable(pt, projectile_type)) ||
+            (base_projectile_type && in.IsAssignable(pt, base_projectile_type))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 struct RuntimeCollider {
     u32 oi;
     u32 ci;
@@ -890,6 +1003,18 @@ static u64 ColliderPairKey(u32 a, u32 b) {
 static bool PairListHas(const Buffer<u64>& list, u64 key) {
     for (u32 i = 0; i < list.Size(); ++i) if (list[i] == key) return true;
     return false;
+}
+
+static bool IsNonBlockingProjectileGeometry(const Scene& scene, u32 oi) {
+    if (oi >= scene.ObjectCount()) return false;
+    const SceneObject& o = scene.Object(oi);
+    return o.name && strstr(o.name, "before_pyramid");
+}
+
+static bool IsCameraBoundCollider(const RuntimeCollider& c) {
+    f32 w = c.maxx - c.minx;
+    f32 h = c.maxy - c.miny;
+    return w > 5000.0f && h < 1000.0f;
 }
 
 static bool ControllerHas(const Scene& scene, u32 oi, const char* needle) {
@@ -956,6 +1081,131 @@ static bool NonGameplayScript(const char* ctrl) {
            strncmp(ctrl, "Chromatic", 9) == 0 ||
            strcmp(ctrl, "Cuphead") == 0 ||
            strncmp(ctrl, "CameraAnimationController", 25) == 0;
+}
+
+// Development probe used by --probe-fields to inspect the live state that the
+// original scripts wrote into the scene graph (health, projectile positions).
+static void ProbeGameplayFields(MetadataPackage& pkg, Interpreter& interp, Scene& scene) {
+    u32 printed_health = 0;
+    for (u32 ci = 0; ci < scene.ComponentCount() && printed_health < 16; ++ci) {
+        const SceneComponent& comp = scene.Component(ci);
+        if (comp.type != 4 || !comp.controller) continue;
+        Value obj = interp.ManagedComponent(ci);
+        if (obj.tag != VT_OBJECT || !obj.data.obj) continue;
+        u32 cur = obj.data.obj->type_id;
+        u32 guard = 0;
+        while (cur && guard++ < 64 && printed_health < 16) {
+            const TypeInfo& ti = pkg.Type(cur);
+            for (u32 fi = 0; fi < ti.field_count && printed_health < 16; ++fi) {
+                u32 fid = ti.field_start + fi;
+                const FieldInfo& f = pkg.Field(fid);
+                if (!f.name) continue;
+                bool health = strstr(f.name, "health") || strstr(f.name, "Health") ||
+                              strcmp(f.name, "hp") == 0 || strcmp(f.name, "HP") == 0 ||
+                              strcmp(f.name, "hpBox") == 0;
+                if (!health) continue;
+                Value v = interp.GetField(fid, obj);
+                if (v.tag == VT_R4 || v.tag == VT_R8) {
+                    u32 oi = OwnerObjectForComponent(scene, ci);
+                    LogInfo("probe", "health %s.%s ci=%u value=%.3f active=%d",
+                            comp.controller, f.name, ci,
+                            v.tag == VT_R4 ? v.data.f32 : v.data.f64,
+                            oi < scene.ObjectCount() ? (s32)(scene.Object(oi).flags & 1u) : -1);
+                    ++printed_health;
+                } else if (v.tag == VT_I4 || v.tag == VT_I8) {
+                    u32 oi = OwnerObjectForComponent(scene, ci);
+                    LogInfo("probe", "health %s.%s ci=%u value=%d active=%d",
+                            comp.controller, f.name, ci, Interpreter::ToI32(v),
+                            oi < scene.ObjectCount() ? (s32)(scene.Object(oi).flags & 1u) : -1);
+                    ++printed_health;
+                }
+            }
+            cur = ti.base_id;
+        }
+    }
+    u32 projectiles = 0, active_projectiles = 0, printed_projectiles = 0;
+    u32 cuphead_time_type = pkg.FindType("CupheadTime");
+    u32 global_speed_field = cuphead_time_type ? pkg.FindField(cuphead_time_type, "globalSpeed") : 0;
+    if (global_speed_field) {
+        Value gs = interp.GetField(global_speed_field, Value::Null());
+        if (gs.tag == VT_R4) LogInfo("probe", "CupheadTime.globalSpeed=%.3f", gs.data.f32);
+    }
+    u32 peashot_basic_type = pkg.FindType("WeaponProperties+LevelWeaponPeashot+Basic");
+    u32 peashot_speed_field = peashot_basic_type ? pkg.FindField(peashot_basic_type, "speed") : 0;
+    if (peashot_speed_field) {
+        Value ps = interp.GetField(peashot_speed_field, Value::Null());
+        if (ps.tag == VT_R4) LogInfo("probe", "WeaponProperties.LevelWeaponPeashot.Basic.speed=%.3f", ps.data.f32);
+    }
+    for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
+        const SceneObject& o = scene.Object(oi);
+        bool is_projectile = false;
+        u32 projectile_ci = 0xFFFFFFFFu;
+        for (u32 c = 0; c < o.component_count; ++c) {
+            u32 ci = o.component_start + c;
+            if (ci >= scene.ComponentCount()) break;
+            const SceneComponent& sc = scene.Component(ci);
+            if (sc.type == 4 && sc.controller && strstr(sc.controller, "Projectile")) {
+                is_projectile = true;
+                projectile_ci = ci;
+                break;
+            }
+        }
+        if (!is_projectile) continue;
+        ++projectiles;
+        if (o.flags & 1u) ++active_projectiles;
+        if (printed_projectiles < 8 && (o.flags & 1u)) {
+            u32 pc = projectile_ci;
+            const char* pctrl = "?";
+            f32 pspeed = -1.0f;
+            s32 pmove = -1;
+            if (pc < scene.ComponentCount()) pctrl = scene.Component(pc).controller;
+            Value pv = interp.ManagedComponent(pc);
+            if (pv.tag == VT_OBJECT && pv.data.obj) {
+                u32 spf = 0, cur = pv.data.obj->type_id, guard = 0;
+                while (cur && guard++ < 64 && !spf) {
+                    spf = pkg.FindField(cur, "Speed");
+                    cur = pkg.Type(cur).base_id;
+                }
+                if (spf) {
+                    Value sv = interp.GetField(spf, pv);
+                    if (sv.tag == VT_R4) pspeed = sv.data.f32;
+                }
+                u32 mvf = 0; cur = pv.data.obj->type_id; guard = 0;
+                while (cur && guard++ < 64 && !mvf) {
+                    mvf = pkg.FindField(cur, "move");
+                    cur = pkg.Type(cur).base_id;
+                }
+                if (mvf) {
+                    Value mv = interp.GetField(mvf, pv);
+                    pmove = Interpreter::ToI32(mv);
+                }
+            }
+            LogInfo("probe", "projectile-active '%s' oi=%u ci=%u ctrl=%s at=%.1f,%.1f speed=%.1f move=%d rot=%.1f",
+                    o.name ? o.name : "?", oi, pc, pctrl, o.world_x, o.world_y, pspeed, pmove,
+                    o.euler[2]);
+            ++printed_projectiles;
+        }
+    }
+    if (printed_projectiles == 0) {
+        for (u32 oi = 0; oi < scene.ObjectCount() && printed_projectiles < 8; ++oi) {
+            const SceneObject& o = scene.Object(oi);
+            bool is_projectile = false;
+            for (u32 c = 0; c < o.component_count; ++c) {
+                u32 ci = o.component_start + c;
+                if (ci >= scene.ComponentCount()) break;
+                const SceneComponent& sc = scene.Component(ci);
+                if (sc.type == 4 && sc.controller && strstr(sc.controller, "Projectile")) {
+                    is_projectile = true;
+                    break;
+                }
+            }
+            if (!is_projectile) continue;
+            LogInfo("probe", "projectile-template '%s' at=%.1f,%.1f",
+                    o.name ? o.name : "?", o.world_x, o.world_y);
+            ++printed_projectiles;
+        }
+    }
+    LogInfo("probe", "projectiles=%u active=%u", projectiles, active_projectiles);
 }
 
 static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play = false) {
@@ -1351,9 +1601,14 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
 
     Value weapon_manager = Value::Null();
     u32 start_basic = 0;
+    u32 new_enemy_dealer = 0;
+    u32 deal_damage = 0;
     {
         u32 wmt = pkg.FindType("LevelPlayerWeaponManager");
         start_basic = wmt ? pkg.FindMethod(wmt, "StartBasic") : 0;
+        u32 dd_type = pkg.FindType("DamageDealer");
+        new_enemy_dealer = dd_type ? pkg.FindMethod(dd_type, "NewEnemy") : 0;
+        deal_damage = dd_type ? pkg.FindMethod(dd_type, "DealDamage") : 0;
         for (u32 c = 0; c < po.component_count; ++c) {
             u32 ci = po.component_start + c;
             if (ci >= scene.ComponentCount()) break;
@@ -1366,6 +1621,15 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     }
 
     scene.ComputeWorldTransforms();
+    if (config.combat_test) {
+        // Deterministic combat probe: stand close enough to the tutorial
+        // target to put its center on the peashot line. This exercises the
+        // original weapon, projectile, DamageDealer and DamageReceiver code.
+        SceneObject& po2 = scene.MutableObject(player_oi);
+        po2.position[0] = 3000.0f;
+        po2.position[1] = 81.0f;
+        scene.ComputeWorldTransforms();
+    }
 
     f32 start_x = scene.Object(player_oi).world_x;
     f32 start_y = scene.Object(player_oi).world_y;
@@ -1385,7 +1649,14 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     for (u32 i = 0; i < frames; ++i) {
         InputState in_state;
         in_state = InputRead();
+        if (config.combat_test) {
+            SceneObject& po2 = scene.MutableObject(player_oi);
+            po2.position[0] = 3000.0f;
+            po2.position[1] = 81.0f;
+            scene.ComputeWorldTransforms();
+        }
         f32 ax = 1.0f, ay = 0.0f;
+        if (config.combat_test) { ax = 1.0f; ay = 0.0f; }
         u32 buttons = 0;
         if (!config.auto_input) {
             ax = in_state.axis_x;
@@ -1399,7 +1670,7 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
             if (i >= 10) buttons |= 1u << 4; // shoot (Rewired action 4)
         }
         SetRewiredInputState(ax, ay, buttons);
-        if (i == 10 && start_basic && weapon_manager.tag == VT_OBJECT) {
+        if ((i == 10 || (config.combat_test && i == 0)) && start_basic && weapon_manager.tag == VT_OBJECT) {
             Value wargs[1]; wargs[0] = weapon_manager; Value wr;
             if (!interp.Invoke(start_basic, wargs, 1, &wr)) {
                 LogWarn("levelplay", "StartBasic failed");
@@ -1462,6 +1733,27 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
                 ++extra_failures;
             }
         }
+        // Run original coroutine state machines before discovering components
+        // they just instantiated, so new projectiles get Start and enter the
+        // update/collision path in the same frame.
+        if (config.combat_test && (i == 12 || i == 40 || i == 68) &&
+            new_enemy_dealer && deal_damage) {
+            Value dealer_ret = Value::Null();
+            if (interp.Invoke(new_enemy_dealer, 0, 0, &dealer_ret) &&
+                dealer_ret.tag == VT_OBJECT && dealer_ret.data.obj) {
+                Value player_go = interp.ManagedGameObject(player_oi);
+                Value dargs[2]; dargs[0] = dealer_ret; dargs[1] = player_go; Value dr;
+                if (!interp.Invoke(deal_damage, dargs, 2, &dr)) {
+                    LogWarn("combat", "enemy DamageDealer.DealDamage failed");
+                } else {
+                    LogInfo("combat", "enemy damage frame=%u result=%.2f", i,
+                            dr.tag == VT_R4 ? dr.data.f32 : (f32)Interpreter::ToI32(dr));
+                }
+            } else {
+                LogWarn("combat", "DamageDealer.NewEnemy failed");
+            }
+        }
+        interp.UpdateCoroutines(config.fixed_dt);
         if (extra_update_seen.Size() < scene.ComponentCount()) {
             u32 old_size = extra_update_seen.Size();
             extra_update_seen.Resize(scene.ComponentCount());
@@ -1491,13 +1783,16 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
             u32 um = FindMethodInHierarchy(pkg, ev.data.obj->type_id, "Update");
             u32 fm = FindMethodInHierarchy(pkg, ev.data.obj->type_id, "FixedUpdate");
             if (!um && !fm) { extra_update_seen[ci] = 1; continue; }
+            if (sc.controller && strstr(sc.controller, "Projectile")) {
+                LogInfo("levelplay", "dynamic projectile ci=%u ctrl=%s update=%u fixed=%u",
+                        ci, sc.controller, um, fm);
+            }
             extra_update_cis.PushBack(ci);
             extra_update_mids.PushBack(um);
             extra_fixed_mids.PushBack(fm);
             extra_update_seen[ci] = 1;
         }
         extra_update_failed.Resize(extra_update_cis.Size());
-        interp.UpdateCoroutines(config.fixed_dt);
         // Advance the extracted Animator default states before the native
         // player sprite bridge applies its locomotion frames.
         if (animations.Loaded()) anim_player.Update(scene, animations, config.fixed_dt);
@@ -1520,22 +1815,69 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
                 }
             }
             Buffer<u64> frame_pairs;
+            Buffer<u64> damage_pairs;
+            // Damageable targets take priority over overlapping static geometry
+            // (the tutorial target sits inside its pedestal collider). Run the
+            // original projectile collision path against the DamageReceiver
+            // first, then process remaining geometry.
             for (u32 a = 0; a < colliders.Size(); ++a) {
                 for (u32 b = a + 1; b < colliders.Size(); ++b) {
                     const RuntimeCollider& ca = colliders[a];
                     const RuntimeCollider& cb = colliders[b];
                     if (ca.oi == cb.oi) continue;
-                    bool a_proj = ControllerHas(scene, ca.oi, "Projectile");
-                    bool b_proj = ControllerHas(scene, cb.oi, "Projectile");
+                    if (ca.maxx < cb.minx || cb.maxx < ca.minx ||
+                        ca.maxy < cb.miny || cb.maxy < ca.miny) continue;
+                    bool a_proj = SceneObjectOwnsProjectileCollider(interp, pkg, scene, ca.oi);
+                    bool b_proj = SceneObjectOwnsProjectileCollider(interp, pkg, scene, cb.oi);
+                    bool a_dmg = SceneObjectHasDamageReceiver(interp, pkg, scene, ca.oi) &&
+                                 !SceneObjectIsPlayerRelated(scene, ca.oi);
+                    bool b_dmg = SceneObjectHasDamageReceiver(interp, pkg, scene, cb.oi) &&
+                                 !SceneObjectIsPlayerRelated(scene, cb.oi);
+                    u64 key = ColliderPairKey(ca.oi, cb.oi);
+                    if (a_proj && b_dmg) {
+                        damage_pairs.PushBack(key);
+                        collision_events += InvokeCollisionOnObject(interp, pkg, scene,
+                            ca.oi, cb.ci, &collision_failures);
+                    } else if (b_proj && a_dmg) {
+                        damage_pairs.PushBack(key);
+                        collision_events += InvokeCollisionOnObject(interp, pkg, scene,
+                            cb.oi, ca.ci, &collision_failures);
+                    }
+                }
+            }
+            for (u32 a = 0; a < colliders.Size(); ++a) {
+                for (u32 b = a + 1; b < colliders.Size(); ++b) {
+                    const RuntimeCollider& ca = colliders[a];
+                    const RuntimeCollider& cb = colliders[b];
+                    if (ca.oi == cb.oi) continue;
+                    u64 key = ColliderPairKey(ca.oi, cb.oi);
+                    if (PairListHas(damage_pairs, key)) continue;
+                    bool a_proj = SceneObjectOwnsProjectileCollider(interp, pkg, scene, ca.oi);
+                    bool b_proj = SceneObjectOwnsProjectileCollider(interp, pkg, scene, cb.oi);
+                    bool a_firing = ControllerHas(scene, ca.oi, "LevelPlayerWeaponFiringHitbox");
+                    bool b_firing = ControllerHas(scene, cb.oi, "LevelPlayerWeaponFiringHitbox");
+                    if (a_firing || b_firing) continue;
                     // Approximate the original collision layers: player
                     // projectiles do not collide with each other or with the
                     // player's own body colliders.
                     if (a_proj && b_proj) continue;
                     if (a_proj && ControllerHas(scene, cb.oi, "LevelPlayerController")) continue;
                     if (b_proj && ControllerHas(scene, ca.oi, "LevelPlayerController")) continue;
+                    // Player projectiles must not collide with the player's
+                    // own firing hitboxes or other player children.
+                    if (a_proj && SceneObjectWithin(scene, cb.oi, player_oi)) continue;
+                    if (b_proj && SceneObjectWithin(scene, ca.oi, player_oi)) continue;
+                    if (a_proj && SceneObjectIsPlayerRelated(scene, cb.oi)) continue;
+                    if (b_proj && SceneObjectIsPlayerRelated(scene, ca.oi)) continue;
+                    // Level camera-bounds objects are horizontal 10000-unit
+                    // colliders. They are not solid gameplay walls and would
+                    // otherwise swallow every projectile in the level.
+                    if (a_proj && IsCameraBoundCollider(cb)) continue;
+                    if (b_proj && IsCameraBoundCollider(ca)) continue;
+                    if (a_proj && IsNonBlockingProjectileGeometry(scene, cb.oi)) continue;
+                    if (b_proj && IsNonBlockingProjectileGeometry(scene, ca.oi)) continue;
                     if (ca.maxx < cb.minx || cb.maxx < ca.minx ||
                         ca.maxy < cb.miny || cb.maxy < ca.miny) continue;
-                    u64 key = ColliderPairKey(ca.oi, cb.oi);
                     frame_pairs.PushBack(key);
                     if (PairListHas(active_collision_pairs, key)) continue;
                     collision_events += InvokeCollisionOnObject(interp, pkg, scene,
@@ -1600,6 +1942,18 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         if (!config.headless) PlatformSleepMs(16);
     }
     bool pass = loop_ok && (max_x - start_x > 50.0f);
+    bool target_seen = false, target_active = false;
+    if (config.combat_test) {
+        for (u32 oi = 0; oi < scene.ObjectCount(); ++oi) {
+            const SceneObject& o = scene.Object(oi);
+            if (!o.name || !strstr(o.name, "tutorial_target")) continue;
+            target_seen = true;
+            if (o.flags & 1u) target_active = true;
+        }
+        LogInfo("combat", "tutorial target seen=%d active=%d",
+                target_seen ? 1 : 0, target_active ? 1 : 0);
+        pass = loop_ok && target_seen && !target_active;
+    }
     u32 projectile_components = 0;
     for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
         const SceneComponent& sc = scene.Component(ci);
@@ -1609,6 +1963,7 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     }
     LogInfo("levelplay", "instances objects=%u projectiles=%u",
             scene.ObjectCount(), projectile_components);
+    if (config.probe_fields) ProbeGameplayFields(pkg, interp, scene);
     LogInfo("levelplay", "start=%.1f,%.1f max_x=%.1f max_y=%.1f min_y=%.1f collisions=%u result=%s",
             start_x, start_y, max_x, max_y, min_y, collision_events, pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;

@@ -574,6 +574,18 @@ bool Interpreter::InvokeDelegate(DelegateObject* d, u32 arg_count, Value* args, 
         if (!cur->method_id) continue;
         const MethodInfo& m = metadata_.Method(cur->method_id);
         bool is_static = (m.flags & METHOD_FLAG_STATIC) != 0;
+        u32 target_method = cur->method_id;
+        if (!is_static && (m.flags & METHOD_FLAG_VIRTUAL) &&
+            m.vtable_slot != 0xFFFFFFFFu) {
+            u32 target_type = ObjectTypeId(cur->target);
+            if (target_type) {
+                TypeRuntime& trt = runtime_types_[target_type];
+                if (m.vtable_slot < trt.vtable_size && trt.vtable &&
+                    trt.vtable[m.vtable_slot]) {
+                    target_method = trt.vtable[m.vtable_slot];
+                }
+            }
+        }
         Value call_args[kMaxCallArgs];
         u32 argc = arg_count;
         if (is_static) {
@@ -584,7 +596,7 @@ bool Interpreter::InvokeDelegate(DelegateObject* d, u32 arg_count, Value* args, 
             for (u32 i = 1; i < arg_count; ++i) call_args[i] = args[i];
         }
         Value r = Value::Void();
-        if (!Invoke(cur->method_id, call_args, argc, &r)) return false;
+        if (!Invoke(target_method, call_args, argc, &r)) return false;
         if (first && ret) *ret = r;
         first = false;
     }
@@ -936,6 +948,51 @@ bool Interpreter::Invoke(u32 method_id, Value* args, u32 arg_count, Value* ret) 
     if (method_id == 0 || method_id > metadata_.MethodCount()) return Fail("bad method id");
     const MethodInfo& m = metadata_.Method(method_id);
     const MethodSigInfo& sig = metadata_.MethodSig(m.sig);
+    {
+        const TypeInfo& dt = metadata_.Type(m.decl_id);
+        // Trilean is a tiny value type whose implicit conversions are used in
+        // hot gameplay predicates. Resolve them from the backing value so a
+        // nested struct copy cannot silently turn -1 into 0.
+        if (dt.full_name && strcmp(dt.full_name, "Trilean") == 0 &&
+            arg_count == 1 && strncmp(m.name, "op_", 3) == 0) {
+            Value self = args[0];
+            if (self.tag == VT_BYREF && self.data.ref) self = *self.data.ref;
+            u32 vf = metadata_.FindField(m.decl_id, "value");
+            s32 value = vf ? ToI32(GetField(vf, self)) : 0;
+            const SigInfo& rs = metadata_.Sig(sig.return_sig);
+            if (ret) {
+                if (rs.kind == SIG_BOOL) *ret = Value::Bool(value >= 0);
+                else if (rs.kind == SIG_R4) *ret = Value::R4((f32)value);
+                else if (rs.kind == SIG_R8) *ret = Value::R8((f64)value);
+                else if (rs.kind == SIG_I1 || rs.kind == SIG_U1 ||
+                         rs.kind == SIG_I2 || rs.kind == SIG_U2 ||
+                         rs.kind == SIG_I4 || rs.kind == SIG_U4 ||
+                         rs.kind == SIG_I8 || rs.kind == SIG_U8) *ret = Value::I4(value);
+                else *ret = Value::I4(value);
+            }
+            return true;
+        }
+        // AbstractMonoBehaviour caches transform in a serialized/copyable field.
+        // Cloned prefabs must resolve the transform of their own GameObject,
+        // not the template's cached reference or an index left in that slot.
+        if (arg_count == 1 && strcmp(m.name, "get_transform") == 0 &&
+            dt.full_name && strcmp(dt.full_name, "AbstractMonoBehaviour") == 0) {
+            u32 oi = 0xFFFFFFFFu;
+            const Value& recv = args[0];
+            if (recv.tag == VT_I4 || recv.tag == VT_U4 ||
+                recv.tag == VT_NATIVEINT || recv.tag == VT_NATIVEUINT) {
+                oi = (u32)recv.data.u32;
+            } else {
+                oi = ManagedObjectIndexFor(recv);
+            }
+            if (oi < managed_transforms_.Size()) {
+                if (ret) *ret = managed_transforms_[oi];
+                return true;
+            }
+            if (ret) *ret = Value::Null();
+            return true;
+        }
+    }
     {
         const TypeInfo& dt = metadata_.Type(m.decl_id);
         if (strcmp(m.name, "SyncAchievementsAndStats") == 0 &&
@@ -1313,6 +1370,12 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                     r = MakeNumeric(outTag, z, 0, true);
                 } else {
                     s64 x = NumI64(a), y = NumI64(b), z = 0;
+                    if (y == 0 && op >= 0x5B && op <= 0x5E) {
+                        const MethodInfo& dm = metadata_.Method(method_id);
+                        LogWarn("interp", "integer divide by zero in %s.%s id=%u; yielding 0",
+                                metadata_.Type(dm.decl_id).full_name, dm.name, method_id);
+                        y = 1;
+                    }
                     switch (op) {
                         case 0x58: z = x + y; break;
                         case 0x59: z = x - y; break;

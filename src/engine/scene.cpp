@@ -142,6 +142,9 @@ bool Scene::Load(const char* path) {
         o.flags = ReadU32LE(p + 12);
         for (u32 j = 0; j < 3; ++j) o.position[j] = ReadF32LE(p + 16 + j * 4);
         for (u32 j = 0; j < 4; ++j) o.rotation[j] = ReadF32LE(p + 28 + j * 4);
+        o.euler[0] = 0.0f;
+        o.euler[1] = 0.0f;
+        o.euler[2] = 2.0f * atan2f(o.rotation[2], o.rotation[3]);
         for (u32 j = 0; j < 3; ++j) o.scale[j] = ReadF32LE(p + 44 + j * 4);
         o.component_start = ReadU32LE(p + 56);
         o.component_count = ReadU32LE(p + 60);
@@ -327,7 +330,7 @@ void Scene::ComputeWorldTransforms() {
             if (o.parent == 0) {
                 o.world_x = o.position[0];
                 o.world_y = o.position[1];
-                o.world_rotation = 0.0f;
+                o.world_rotation = o.euler[2];
                 o.world_scale_x = o.scale[0];
                 o.world_scale_y = o.scale[1];
                 continue;
@@ -343,7 +346,7 @@ void Scene::ComputeWorldTransforms() {
             f32 sa = sinf(p->world_rotation);
             o.world_x = px + (o.position[0] * ca - o.position[1] * sa) * p->world_scale_x;
             o.world_y = py + (o.position[0] * sa + o.position[1] * ca) * p->world_scale_y;
-            o.world_rotation = p->world_rotation;
+            o.world_rotation = p->world_rotation + o.euler[2];
             o.world_scale_x = o.scale[0] * p->world_scale_x;
             o.world_scale_y = o.scale[1] * p->world_scale_y;
         }

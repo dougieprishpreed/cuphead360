@@ -5,11 +5,44 @@
 #include <string.h>
 #include <stdlib.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+
+static LONG WINAPI Cuphead360CrashFilter(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord || !info->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
+    const EXCEPTION_RECORD* er = info->ExceptionRecord;
+    const CONTEXT* ctx = info->ContextRecord;
+    ch360::LogError("crash", "unhandled exception code=%08lx address=%p",
+             (unsigned long)er->ExceptionCode, (void*)er->ExceptionAddress);
+#if defined(_M_IX86)
+    ch360::LogError("crash", "eip=%08lx esp=%08lx ebp=%08lx",
+             (unsigned long)ctx->Eip, (unsigned long)ctx->Esp, (unsigned long)ctx->Ebp);
+    const unsigned long* sp = (const unsigned long*)ctx->Esp;
+    if (sp && !IsBadReadPtr(sp, 16 * sizeof(unsigned long))) {
+        for (u32 i = 0; i < 16; ++i) {
+            ch360::LogError("crash", "stack[%02u]=%08lx", i, sp[i]);
+        }
+    }
+#elif defined(_M_X64)
+    ch360::LogError("crash", "rip=%016llx rsp=%016llx rbp=%016llx",
+             (unsigned long long)ctx->Rip, (unsigned long long)ctx->Rsp,
+             (unsigned long long)ctx->Rbp);
+#else
+    (void)ctx;
+#endif
+    ch360::LogFlush();
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 static bool ArgEquals(const char* a, const char* b) {
     return a && b && strcmp(a, b) == 0;
 }
 
 int main(int argc, char** argv) {
+#if defined(_WIN32)
+    SetUnhandledExceptionFilter(Cuphead360CrashFilter);
+#endif
     ch360::AppConfig cfg;
     bool explicit_mode = false;
     for (int i = 1; i < argc; ++i) {
@@ -58,6 +91,10 @@ int main(int argc, char** argv) {
             explicit_mode = true;
         } else if (ArgEquals(a, "--manual")) {
             cfg.auto_input = false;
+        } else if (ArgEquals(a, "--probe-fields")) {
+            cfg.probe_fields = true;
+        } else if (ArgEquals(a, "--combat-test")) {
+            cfg.combat_test = true;
         } else if (ArgEquals(a, "--scene") && i + 1 < argc) {
             cfg.scene_path = argv[++i];
             if (!explicit_mode) cfg.command = "scene";

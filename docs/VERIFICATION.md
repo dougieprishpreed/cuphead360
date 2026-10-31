@@ -1,4 +1,59 @@
+## M1 combat probe (2026-10-31)
+
+Implemented and tested the enemy-side combat loop on the Windows build:
+
+- virtual-delegate dispatch for weapon overrides (`WeaponPeashot.fireBasic`),
+- world-space transform position and persistent euler rotation,
+- cloned prefab root parenting,
+- effective `DamageReceiver.type` tags and `GetInstanceID`,
+- real `Object.Destroy` deactivation,
+- target-first collision resolution,
+- `--combat-test` and `--probe-fields` development probes.
+
+Build and run:
+
+```
+scripts\build_win32.bat Release
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_level\scene.chs --levelplay --combat-test ^
+  --frames 80 --headless --probe-fields ^
+  --log work\m1_final_combat2.log
+```
+
+Observed (exit code 0):
+
+```
+[combat] enemy damage frame=12 result=0.00
+[combat] enemy damage frame=40 result=0.00
+[combat] enemy damage frame=68 result=0.00
+[combat] tutorial target seen=1 active=0
+[probe] health TutorialLevelDamagableBox.boxHealth ci=182 value=-4.000 active=0
+[probe] health TutorialLevelDamagableBox.boxHealth ci=1009 value=0.000 active=0
+[levelplay] start=3000.0,81.0 max_x=3008.2 ... collisions=169 result=PASS
+```
+
+Tutorial regression:
+
+```
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_level\scene.chs --levelplay --frames 120 --headless ^
+  --log work\m1_final_reg.log
+```
+
+Observed:
+
+```
+[levelplay] start=-410.0,-270.0 max_x=938.7 ... result=PASS
+```
+
+Caveats: the synthetic enemy-damage attempt returns `0.0` and player health
+remains `3`; invulnerability/death/respawn, HUD rendering, audio and real
+Rewired shoot input are still not validated. This proves the enemy
+`DamageDealer` -> `DamageReceiver` target path and target destruction, not
+the complete M1 loop.
+
 ## Train boss scene boot (2026-10-31)
+
 
 Implemented the `System.Array.Copy` overloads used by boss timelines and
 validated `scene_level_train`:

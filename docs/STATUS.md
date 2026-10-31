@@ -6,6 +6,67 @@ playable alpha release candidate with no content or behavior gaps versus the
 Windows version. This document records exactly what is implemented, what has
 been validated, and what remains.
 
+## 2026-10-31 M1 combat checkpoint
+
+M1 is **not complete**, but the enemy side of the tutorial combat loop now
+runs end-to-end through original code:
+
+- `WeaponPeashot.fireBasic` is selected through a virtual delegate instead of
+  the base weapon method. Projectiles receive the original peashot speed and
+  damage.
+- Projectile clones spawn at the muzzle, move with weapon direction/speed, and
+  collide in the tutorial scene.
+- Damageable targets take priority over overlapping pedestal geometry.
+  The original `DamageDealer` -> `DamageReceiver` path ran on the tutorial
+  target; `boxHealth` changed from `20.0` to `-4.0` on the active copy and
+  `0.0` on the template copy, and both target objects became inactive after
+  `Object.Destroy(gameObject)`.
+- `Object.Destroy` now deactivates the target object/components instead of
+  being a no-op. Effective tags are derived from `DamageReceiver.type`, so
+  original `OnCollisionEnemy` routing works.
+- Transform hierarchy fixes now include `GetEnumerator`, `childCount`,
+  `GetChild`, world-space `position` assignment, and persistent euler angles.
+  Cloned prefab roots are unparented as Unity does.
+
+The deterministic combat probe is:
+
+```
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_level\scene.chs --levelplay --combat-test ^
+  --frames 80 --headless --probe-fields ^
+  --log work\m1_final_combat2.log
+```
+
+Observed:
+
+```
+[combat] tutorial target seen=1 active=0
+[probe] health TutorialLevelDamagableBox.boxHealth ci=182 value=-4.000 active=0
+[probe] health TutorialLevelDamagableBox.boxHealth ci=1009 value=0.000 active=0
+[levelplay] result=PASS
+```
+
+Normal tutorial regression still passes:
+
+```
+[levelplay] start=-410.0,-270.0 max_x=938.7 ... result=PASS
+```
+
+Still missing for M1:
+
+- Player damage through `DamageDealer.NewEnemy().DealDamage(player)` reports
+  `result=0.0`; player health stays `3`. The next investigation is the
+  player's `DamageReceiver` lookup / `CanTakeDamage` gating.
+- Invulnerability, hit state, death, respawn/retry, and level failure flow.
+- HUD health rendering and visible feedback. Current runs are headless and
+  muted; audio output is not validated.
+- Real Rewired shoot input. `--combat-test` teleports the player into the
+  target line and injects a synthetic enemy damage attempt.
+- Projectile collision is still an AABB approximation. Camera-bound objects
+  and the tutorial pedestal currently need targeted filters.
+- The tutorial scene contains duplicate target copies; target HP can overshoot
+  before the destroy callback runs.
+
 ## 2026-10-31 shooting/collision checkpoint
 
 The original coroutine scheduler, instruction budget, Unity wait-instruction

@@ -41,6 +41,13 @@ static SceneComponent* MutableSceneComponentFor(Interpreter& in, const Value& v)
 }
 
 static u32 ManagedObjectIndex(const Interpreter& in, const Value& v) {
+    // Some original scripts cache a reference in an int-sized slot (or the
+    // field was serialized as an object index). Treat those as scene indices;
+    // Unity object references use the normal binding path.
+    if (v.tag == VT_I4 || v.tag == VT_U4 || v.tag == VT_NATIVEINT ||
+        v.tag == VT_NATIVEUINT) {
+        return (u32)v.data.u32;
+    }
     return in.ManagedObjectIndexFor(v);
 }
 
@@ -77,7 +84,7 @@ static void SetUnboundTransformField(const Value& t, u32 slot, const Value& v) {
 
 static Value TransformWorldPosition(Interpreter& in, const Value& t) {
     if (t.tag != VT_OBJECT || !t.data.obj) return in.NewVec3(0.0f, 0.0f, 0.0f);
-    u32 oi = in.ManagedObjectIndexFor(t);
+    u32 oi = ManagedObjectIndex(in, t);
     Scene* scene = in.BoundScene();
     if (scene && oi < scene->ObjectCount()) {
         const SceneObject& o = scene->Object(oi);
@@ -587,11 +594,48 @@ static bool GameObject_GetTransform(Interpreter& in, const MemberRefInfo&, u32, 
     return true;
 }
 
+static const char* EffectiveObjectTag(Interpreter& in, u32 oi) {
+    Scene* scene = in.BoundScene();
+    if (!scene || oi >= scene->ObjectCount()) return "";
+    const SceneObject& o = scene->Object(oi);
+    const char* tag = (o.tag && o.tag[0]) ? o.tag : "Untagged";
+    if (strcmp(tag, "Untagged") != 0) return tag;
+    // DamageReceiver.Awake assigns the receiver type ("Enemy"/"Player") as the
+    // GameObject tag. The compact scene keeps the serialized tag, so derive the
+    // effective tag from the original component when no explicit tag exists.
+    u32 dr_type = in.Metadata().FindType("DamageReceiver");
+    if (!dr_type) return tag;
+    for (u32 c = 0; c < o.component_count; ++c) {
+        u32 ci = o.component_start + c;
+        if (ci >= scene->ComponentCount()) break;
+        const SceneComponent& sc = scene->Component(ci);
+        if (sc.type != 4 || !sc.controller || strcmp(sc.controller, "DamageReceiver") != 0) continue;
+        Value v = in.ManagedComponent(ci);
+        if (v.tag != VT_OBJECT || !v.data.obj) continue;
+        u32 type_field = in.Metadata().FindField(v.data.obj->type_id, "type");
+        if (!type_field) {
+            u32 cur = in.Metadata().Type(v.data.obj->type_id).base_id;
+            u32 guard = 0;
+            while (cur && guard++ < 64 && !type_field) {
+                type_field = in.Metadata().FindField(cur, "type");
+                cur = in.Metadata().Type(cur).base_id;
+            }
+        }
+        if (!type_field) continue;
+        Value tv = in.GetField(type_field, v);
+        s32 t = Interpreter::ToI32(tv);
+        if (t == 0) return "Enemy";
+        if (t == 1) return "Player";
+        if (t == 2) return "Other";
+    }
+    return tag;
+}
+
 static bool Object_GetTag(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     u32 oi = ManagedObjectIndex(in, a[0]);
     Scene* scene = in.BoundScene();
     const char* tag = "";
-    if (scene && oi < scene->ObjectCount()) tag = scene->Object(oi).tag;
+    if (scene && oi < scene->ObjectCount()) tag = EffectiveObjectTag(in, oi);
     if (ret) *ret = in.NewStringUtf8(tag ? tag : "");
     return true;
 }
@@ -600,12 +644,13 @@ static bool Component_CompareTag(Interpreter& in, const MemberRefInfo&, u32 argc
     if (argc < 2 || a[1].tag != VT_STRING) return RetBoolV(ret, false);
     const char* tag = in.StringUtf8(a[1]);
     if (!tag) tag = "";
-    u32 oi = in.ManagedObjectIndexFor(a[0]);
+    u32 oi = ManagedObjectIndex(in, a[0]);
     Scene* scene = in.BoundScene();
     bool match = false;
     if (scene && oi < scene->ObjectCount()) {
         const SceneObject& o = scene->Object(oi);
-        if (o.tag && o.tag[0] && strcmp(o.tag, tag) == 0) match = true;
+        const char* effective = EffectiveObjectTag(in, oi);
+        if (effective && effective[0] && strcmp(effective, tag) == 0) match = true;
         if (!match && o.name && strstr(o.name, tag)) match = true;
         if (!match) {
             for (u32 c = 0; c < o.component_count && !match; ++c) {
@@ -872,14 +917,47 @@ static bool Transform_GetPosition(Interpreter& in, const MemberRefInfo&, u32, Va
     return true;
 }
 static bool Transform_SetPosition(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
-    if (a[1].tag != VT_VEC3 || !a[1].data.ptr) return false;
     u32 oi = ManagedObjectIndex(in, a[0]);
+    if (a[1].tag != VT_VEC3 || !a[1].data.ptr) return false;
     if (IsSceneObjectIndex(in, oi)) {
         const Vec3* p = (const Vec3*)a[1].data.ptr;
-        SceneObject& o = const_cast<SceneObject&>(in.BoundScene()->Object(oi));
-        o.position[0] = p->x; o.position[1] = p->y; o.position[2] = p->z;
-        in.BoundScene()->ComputeWorldTransforms();
+        Scene* scene = in.BoundScene();
+        scene->ComputeWorldTransforms();
+        SceneObject& o = const_cast<SceneObject&>(scene->Object(oi));
+        f32 lx = p->x, ly = p->y, lz = p->z;
+        if (o.parent) {
+            u32 pi = FindObjectIndexById(*scene, o.parent);
+            if (pi != 0xFFFFFFFFu) {
+                const SceneObject& parent = scene->Object(pi);
+                f32 dx = p->x - parent.world_x;
+                f32 dy = p->y - parent.world_y;
+                f32 ca = cosf(parent.world_rotation);
+                f32 sa = sinf(parent.world_rotation);
+                f32 sx = parent.world_scale_x != 0.0f ? parent.world_scale_x : 1.0f;
+                f32 sy = parent.world_scale_y != 0.0f ? parent.world_scale_y : 1.0f;
+                lx = (dx * ca + dy * sa) / sx;
+                ly = (-dx * sa + dy * ca) / sy;
+            }
+        }
+        o.position[0] = lx; o.position[1] = ly; o.position[2] = lz;
+        if (o.name && strstr(o.name, "Peashot_Basic")) {
+            LogInfo("unity", "set projectile position '%s' oi=%u world=%.1f,%.1f local=%.1f,%.1f parent=%u",
+                    o.name, oi, p->x, p->y, lx, ly, o.parent);
+        }
+        scene->ComputeWorldTransforms();
         return RetVoid(ret);
+    }
+    if (a[0].tag == VT_OBJECT && a[0].data.obj) {
+        Value parent = a[0].data.obj->Fields()[2];
+        if (parent.tag == VT_OBJECT && parent.data.obj) {
+            Value pw = TransformWorldPosition(in, parent);
+            if (pw.tag == VT_VEC3 && pw.data.ptr) {
+                const Vec3* pp = (const Vec3*)pw.data.ptr;
+                const Vec3* p = (const Vec3*)a[1].data.ptr;
+                a[0].data.obj->Fields()[3] = in.NewVec3(p->x - pp->x, p->y - pp->y, p->z - pp->z);
+                return RetVoid(ret);
+            }
+        }
     }
     SetUnboundTransformField(a[0], 3, a[1]);
     return RetVoid(ret);
@@ -956,26 +1034,102 @@ static bool Transform_SetParent(Interpreter& in, const MemberRefInfo&, u32, Valu
 }
 static bool Transform_GetEuler(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     u32 oi = ManagedObjectIndex(in, a[0]);
-    if (IsSceneObjectIndex(in, oi)) return RetVec3V(in, ret, 0.0f, 0.0f, 0.0f);
+    if (IsSceneObjectIndex(in, oi)) {
+        const SceneObject& o = in.BoundScene()->Object(oi);
+        return RetVec3V(in, ret, o.euler[0], o.euler[1], o.euler[2]);
+    }
     Value v = UnboundTransformField(a[0], 5);
     if (v.tag == VT_VEC3) { if (ret) *ret = v; return true; }
     return RetVec3V(in, ret, 0.0f, 0.0f, 0.0f);
 }
 static bool Transform_SetEuler(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[1].tag != VT_VEC3 || !a[1].data.ptr) return false;
     u32 oi = ManagedObjectIndex(in, a[0]);
-    if (!IsSceneObjectIndex(in, oi) && a[1].tag == VT_VEC3) {
-        SetUnboundTransformField(a[0], 5, a[1]);
+    if (IsSceneObjectIndex(in, oi)) {
+        const Vec3* p = (const Vec3*)a[1].data.ptr;
+        SceneObject& o = const_cast<SceneObject&>(in.BoundScene()->Object(oi));
+        o.euler[0] = p->x; o.euler[1] = p->y; o.euler[2] = p->z;
+        in.BoundScene()->ComputeWorldTransforms();
+        return RetVoid(ret);
     }
+    SetUnboundTransformField(a[0], 5, a[1]);
     return RetVoid(ret);
 }
+static u32 TransformSceneChildCount(Interpreter& in, const Value& t, u32* first_index) {
+    u32 oi = ManagedObjectIndex(in, t);
+    Scene* scene = in.BoundScene();
+    if (first_index) *first_index = 0xFFFFFFFFu;
+    if (!scene || !IsSceneObjectIndex(in, oi)) return 0;
+    u32 parent_id = scene->Object(oi).id;
+    u32 count = 0;
+    for (u32 i = 0; i < scene->ObjectCount(); ++i) {
+        if (scene->Object(i).parent != parent_id) continue;
+        if (first_index && *first_index == 0xFFFFFFFFu) *first_index = i;
+        ++count;
+    }
+    return count;
+}
+
+static bool Transform_GetChildCount(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    return RetI32V(ret, (s32)TransformSceneChildCount(in, a[0], 0));
+}
+
+static bool Transform_GetChild(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    if (argc < 2) return false;
+    s32 want = Interpreter::ToI32(a[1]);
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    if (!scene || !IsSceneObjectIndex(in, oi) || want < 0) {
+        if (ret) *ret = Value::Null();
+        return true;
+    }
+    u32 parent_id = scene->Object(oi).id;
+    s32 at = 0;
+    for (u32 i = 0; i < scene->ObjectCount(); ++i) {
+        if (scene->Object(i).parent != parent_id) continue;
+        if (at++ == want) {
+            if (ret) *ret = in.ManagedTransform(i);
+            return true;
+        }
+    }
+    if (ret) *ret = Value::Null();
+    return true;
+}
+
+static bool Transform_GetEnumerator(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    Scene* scene = in.BoundScene();
+    u32 child_count = TransformSceneChildCount(in, a[0], 0);
+    u32 transform_type = in.TransformTypeId();
+    Value arr = in.NewArrayValue(transform_type, child_count);
+    if (arr.tag != VT_ARRAY || !arr.data.array) return false;
+    if (scene && IsSceneObjectIndex(in, oi) && child_count) {
+        u32 parent_id = scene->Object(oi).id;
+        u32 at = 0;
+        for (u32 i = 0; i < scene->ObjectCount() && at < child_count; ++i) {
+            if (scene->Object(i).parent != parent_id) continue;
+            arr.data.array->Elements()[at++] = in.ManagedTransform(i);
+        }
+    }
+    u32 object_type = in.Metadata().FindType("System.Object");
+    Object* e = in.AllocObjectWithSlots(object_type, 2);
+    if (!e) return false;
+    e->Fields()[0] = arr;
+    e->Fields()[1] = Value::I4(-1);
+    if (ret) *ret = Value::ObjectRef(e);
+    return true;
+}
+
 static bool Transform_GetRight(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     u32 oi = ManagedObjectIndex(in, a[0]);
-    f32 sign = 1.0f;
+    f32 x = 1.0f, y = 0.0f;
     if (IsSceneObjectIndex(in, oi)) {
         const SceneObject& o = in.BoundScene()->Object(oi);
-        if (o.world_scale_x < 0.0f) sign = -1.0f;
+        f32 r = o.world_rotation;
+        x = cosf(r);
+        y = sinf(r);
     }
-    return RetVec3V(in, ret, sign, 0.0f, 0.0f);
+    return RetVec3V(in, ret, x, y, 0.0f);
 }
 static bool Transform_GetRotation(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
     u32 qt = in.Metadata().FindType("UnityEngine.Quaternion");
@@ -1837,7 +1991,11 @@ bool Interpreter::CloneGameObject(u32 template_oi, Value* out_go) {
         o.flags = 1u;
         o.component_start = scene->ComponentCount();
         o.component_count = 0;
-        if (orig != template_oi) {
+        if (orig == template_oi) {
+            // Object.Instantiate without a parent creates an unparented root,
+            // even when the source is a component nested inside a prefab.
+            o.parent = 0;
+        } else {
             u32 src_parent = FindObjectIndexById(*scene, src.parent);
             if (src_parent != kInvalid && src_parent < obj_map.Size() &&
                 obj_map[src_parent] != kInvalid) {
@@ -2044,6 +2202,7 @@ bool Interpreter::CloneGameObject(u32 template_oi, Value* out_go) {
     }
 
     // Unity runs Awake on newly instantiated components before returning.
+    u32 basic_projectile_type = metadata_.FindType("BasicProjectile");
     for (u32 i = 0; i < subtree.Size(); ++i) {
         u32 new_oi = obj_map[subtree[i]];
         const SceneObject& o = scene->Object(new_oi);
@@ -2051,6 +2210,14 @@ bool Interpreter::CloneGameObject(u32 template_oi, Value* out_go) {
             u32 ci = o.component_start + c;
             if (ci >= scene->ComponentCount()) break;
             if (scene->Component(ci).type != 4) { MarkComponentAwake(ci); continue; }
+            Value comp_value = ManagedComponent(ci);
+            // Runtime movement flags are not serialized prefab state; a fresh
+            // projectile must start moving even if the template was stopped.
+            if (basic_projectile_type && comp_value.tag == VT_OBJECT && comp_value.data.obj &&
+                IsAssignable(comp_value.data.obj->type_id, basic_projectile_type)) {
+                u32 move_field = FindFieldInHierarchy(*this, comp_value.data.obj->type_id, "move");
+                if (move_field) SetField(move_field, comp_value, Value::Bool(true));
+            }
             const char* ctrl = scene->Component(ci).controller;
             if (strncmp(ctrl, "Rewired.UI.", 11) == 0 ||
                 strncmp(ctrl, "Rewired.Integration.", 20) == 0 ||
@@ -2128,6 +2295,10 @@ static bool Object_Instantiate(Interpreter& in, const MemberRefInfo&, u32 argc, 
         u32 new_oi = in.ManagedObjectIndexFor(cloned);
         if (new_oi < scene->ObjectCount()) {
             SceneObject& no = scene->MutableObject(new_oi);
+            if (no.name && strstr(no.name, "Peashot_Basic")) {
+                LogInfo("unity", "Instantiate projectile clone %s oi=%u pos=%.1f,%.1f parent=%u",
+                        no.name, new_oi, no.position[0], no.position[1], no.parent);
+            }
             if (argc >= 2) {
                 if (a[1].tag == VT_VEC3 && a[1].data.ptr) {
                     const Vec3* p = (const Vec3*)a[1].data.ptr;
@@ -2181,6 +2352,24 @@ static bool Object_Instantiate(Interpreter& in, const MemberRefInfo&, u32 argc, 
     InvokeAwakeOnTree(in, oi);
     if (ret) *ret = a[0];
     return true;
+}
+
+static bool Object_Destroy(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag == VT_OBJECT && a[0].data.obj) {
+        u32 oi = ManagedObjectIndex(in, a[0]);
+        Scene* scene = in.BoundScene();
+        if (scene && oi < scene->ObjectCount()) {
+            SceneObject& o = scene->MutableObject(oi);
+            o.flags &= ~1u;
+            for (u32 c = 0; c < o.component_count; ++c) {
+                u32 ci = o.component_start + c;
+                if (ci < scene->ComponentCount()) scene->MutableComponent(ci).flags &= ~1u;
+            }
+            scene->ComputeWorldTransforms();
+        }
+        a[0].data.obj->flags &= ~1u;
+    }
+    return RetVoid(ret);
 }
 
 static bool Object_FindObjectOfType(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
@@ -2742,6 +2931,10 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
             if (strcmp(type, "UnityEngine.GameObject") == 0) return GameObject_GetTransform(in, member, argc, args, ret);
             return Component_GetTransform(in, member, argc, args, ret);
         }
+        if (strcmp(n, "GetInstanceID") == 0) {
+            u32 oi = ManagedObjectIndex(in, args[0]);
+            return RetI32V(ret, oi == 0xFFFFFFFFu ? 0 : (s32)(oi + 1));
+        }
         if (strcmp(n, "GetComponent") == 0) return GameObject_GetComponent(in, member, argc, args, ret);
         if (strcmp(n, "AddComponent") == 0) {
             u32 target = 0;
@@ -2867,7 +3060,8 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "op_Equality") == 0) return RetBoolV(ret, args[0].data.obj == args[1].data.obj);
         if (strcmp(n, "op_Inequality") == 0) return RetBoolV(ret, args[0].data.obj != args[1].data.obj);
         if (strcmp(n, "op_Implicit") == 0) return RetBoolV(ret, args[0].data.obj != 0);
-        if (strcmp(n, "Destroy") == 0 || strcmp(n, "DontDestroyOnLoad") == 0) return RetVoid(ret);
+        if (strcmp(n, "Destroy") == 0) return Object_Destroy(in, member, argc, args, ret);
+        if (strcmp(n, "DontDestroyOnLoad") == 0) return RetVoid(ret);
         if (strcmp(type, "UnityEngine.Animator") == 0) {
             if (strcmp(n, "set_speed") == 0) return Animator_SetSpeed(in, member, argc, args, ret);
             if (strcmp(n, "get_speed") == 0) return Animator_GetSpeed(in, member, argc, args, ret);
@@ -2917,6 +3111,9 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
             return Transform_SetEuler(in, member, argc, args, ret);
         }
         if (strcmp(n, "get_right") == 0) return Transform_GetRight(in, member, argc, args, ret);
+        if (strcmp(n, "get_childCount") == 0) return Transform_GetChildCount(in, member, argc, args, ret);
+        if (strcmp(n, "GetChild") == 0) return Transform_GetChild(in, member, argc, args, ret);
+        if (strcmp(n, "GetEnumerator") == 0) return Transform_GetEnumerator(in, member, argc, args, ret);
         if (strcmp(n, "get_rotation") == 0) return Transform_GetRotation(in, member, argc, args, ret);
         if (strcmp(n, "set_rotation") == 0) return Transform_SetRotation(in, member, argc, args, ret);
         if (strcmp(n, "get_gameObject") == 0) return Component_GetGameObject(in, member, argc, args, ret);

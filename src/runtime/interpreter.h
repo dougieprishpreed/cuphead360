@@ -68,6 +68,7 @@ public:
 
     void SetTrace(bool enabled) { trace_ = enabled; }
     bool Trace() const { return trace_; }
+    u32 CurrentMethodId() const { return current_method_id_; }
     u32 LastError() const { return last_error_; }
 
     // Static helpers for native bindings.
