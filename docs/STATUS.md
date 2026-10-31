@@ -6,7 +6,22 @@ playable alpha release candidate with no content or behavior gaps versus the
 Windows version. This document records exactly what is implemented, what has
 been validated, and what remains.
 
-## 2026-10-31 milestone: runtime, clone and collision
+## 2026-10-31 shooting/collision checkpoint
+
+The original coroutine scheduler, instruction budget, Unity wait-instruction
+shims and dictionary/enum fixes are in place. The synthetic level-play harness
+can invoke `LevelPlayerWeaponManager.StartBasic`; the original
+`fireWeapon_cr` coroutines then create projectile clones and trigger collisions
+(tutorial run: 114 projectiles, 16224 collision events). This validates the
+weapon/projectile/collision plumbing, but **not** shooting gameplay: projectile
+spawn positions are still wrong (weapon-prefab position instead of muzzle),
+movement/despawn is incomplete, the tutorial target remains at 20 HP, and the
+real Rewired shoot input path is not wired. UI/audio/Animator parameters,
+enemies/bosses/damage, all other scenes and DLC remain unimplemented.
+
+This repository is still a verified foundation, not the requested fully
+playable alpha release candidate. The objective is not met.
+
 
 Windows and Xbox 360 builds pass. The original tutorial and platforming 1-1F
 startup flows pass, the level-play harness drives the real player motor, and

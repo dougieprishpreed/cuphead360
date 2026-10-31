@@ -1,4 +1,23 @@
-## GameObject tags and collision routing
+## Synthetic weapon firing and collision milestone
+
+The level-play harness now invokes the original
+`LevelPlayerWeaponManager.StartBasic` once when synthesized shooting starts,
+and the runtime coroutine scheduler runs the original
+`AbstractLevelWeapon.<fireWeapon_cr>` state machines. Observed on the tutorial
+scene:
+
+```
+[INFO] [levelplay] instances objects=2403 projectiles=114
+[INFO] [levelplay] start=-410.0,-270.0 max_x=1327.6 ... collisions=16224 result=PASS
+```
+
+Projectile clones are created and trigger collisions are dispatched. This is
+not yet a validated shooting slice: the spawned projectiles sit at the weapon
+prefab position, do not reach the target, and the tutorial target's
+`boxHealth` remains `20.0`. The real Rewired shoot-button path, projectile
+movement/despawn, damage delivery and enemy reaction are still open. The
+harness trigger is a temporary adapter, not parity with the Windows game.
+
 
 The extractor now reads Unity `m_TagString` for scene and prefab objects and
 writes a parallel tag-offset table into `CHSC` (header word 24). The runtime
