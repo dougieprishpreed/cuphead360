@@ -1814,7 +1814,6 @@ bool Interpreter::CloneGameObject(u32 template_oi, Value* out_go) {
             if (!seen && !subtree.PushBack(oi)) return false;
         }
     }
-
     Buffer<u32> obj_map;
     if (!obj_map.Resize(scene->ObjectCount())) return false;
     for (u32 i = 0; i < obj_map.Size(); ++i) obj_map[i] = kInvalid;
