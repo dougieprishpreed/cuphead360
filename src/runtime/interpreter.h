@@ -57,6 +57,7 @@ public:
 
     bool IsAssignable(u32 derived_type, u32 base_type) const;
     u32 ObjectTypeId(const Value& v) const;
+    bool IsLiveObject(const Object* obj) const;
     u32 StringTypeId() const { return string_type_id_; }
     u32 Int32TypeId() const { return int32_type_id_; }
     u32 SingleTypeId() const { return single_type_id_; }

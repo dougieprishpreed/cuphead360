@@ -517,6 +517,14 @@ u32 Interpreter::ObjectTypeId(const Value& v) const {
     return 0;
 }
 
+bool Interpreter::IsLiveObject(const Object* obj) const {
+    if (!obj) return false;
+    for (u32 i = 0; i < objects_.Size(); ++i) {
+        if (objects_[i] == obj) return true;
+    }
+    return false;
+}
+
 static u32 ResolveGenericSigType(MetadataPackage& md, u32 sig_index,
                                  const u32* outer_types, u32 outer_count) {
     if (!sig_index) return 0;
@@ -865,7 +873,24 @@ void Interpreter::UpdateCoroutines(f32 dt) {
         Value enumerator = coroutines_[i].enumerator;
         Object* en = (enumerator.tag == VT_OBJECT || enumerator.tag == VT_STRUCT)
             ? enumerator.data.obj : 0;
-        if (!en) { coroutines_[i].active = 0; continue; }
+        if (!en || !IsLiveObject(en)) { coroutines_[i].active = 0; continue; }
+        {
+            const TypeInfo& et = metadata_.Type(en->type_id);
+            const char* ename = et.full_name ? et.full_name : "";
+            // Temporary safety filter: these UI/boss coroutine state machines
+            // still expose incorrect managed references through the partial
+            // runtime and can fault the process. Run the gameplay coroutines
+            // that are validated while the remaining ones are brought up.
+            if (strstr(ename, "UIImageAnimationLoop") ||
+                strstr(ename, "VeggiesLevel") ||
+                strstr(ename, "PlayerDeathEffect") ||
+                strstr(ename, "WeaponWideShot/<angle_cr>") ||
+                strstr(ename, "GroundHomingMovement") ||
+                strstr(ename, "HomingProjectile/<move_cr>")) {
+                coroutines_[i].active = 0;
+                continue;
+            }
+        }
         u32 move = 0;
         u32 cur = en->type_id;
         u32 h = 0;
@@ -885,7 +910,8 @@ void Interpreter::UpdateCoroutines(f32 dt) {
         if (current) {
             Value cr = Value::Null();
             if (Invoke(current, &self, 1, &cr) &&
-                (cr.tag == VT_OBJECT || cr.tag == VT_STRUCT) && cr.data.obj) {
+                (cr.tag == VT_OBJECT || cr.tag == VT_STRUCT) && cr.data.obj &&
+                IsLiveObject(cr.data.obj)) {
                 const TypeInfo& ct = metadata_.Type(cr.data.obj->type_id);
                 if (ct.full_name && strstr(ct.full_name, "WaitForSeconds")) {
                     f32 seconds = cr.data.obj->slots > 0
