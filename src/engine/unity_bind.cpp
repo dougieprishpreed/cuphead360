@@ -955,6 +955,30 @@ static bool Transform_SetEuler(Interpreter& in, const MemberRefInfo&, u32, Value
     }
     return RetVoid(ret);
 }
+static bool Transform_GetRight(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    u32 oi = ManagedObjectIndex(in, a[0]);
+    f32 sign = 1.0f;
+    if (IsSceneObjectIndex(in, oi)) {
+        const SceneObject& o = in.BoundScene()->Object(oi);
+        if (o.world_scale_x < 0.0f) sign = -1.0f;
+    }
+    return RetVec3V(in, ret, sign, 0.0f, 0.0f);
+}
+static bool Transform_GetRotation(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    u32 qt = in.Metadata().FindType("UnityEngine.Quaternion");
+    Object* q = qt ? in.AllocObjectWithSlots(qt, 4) : 0;
+    if (q) {
+        q->Fields()[0] = Value::R4(0.0f);
+        q->Fields()[1] = Value::R4(0.0f);
+        q->Fields()[2] = Value::R4(0.0f);
+        q->Fields()[3] = Value::R4(1.0f);
+    }
+    if (ret) *ret = q ? Value::StructRef(q) : Value::Null();
+    return true;
+}
+static bool Transform_SetRotation(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
+    return RetVoid(ret);
+}
 
 static bool Collider2D_GetOffset(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     const SceneComponent* c = SceneComponentFor(in, a[0]);
@@ -2426,6 +2450,49 @@ static bool Vector3_Distance(Interpreter&, const MemberRefInfo&, u32, Value* a, 
     f32 dx = x->x - y->x, dy = x->y - y->y, dz = x->z - y->z;
     return RetF32V(ret, sqrtf(dx * dx + dy * dy + dz * dz));
 }
+static bool Vector3_Lerp(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag != VT_VEC3 || a[1].tag != VT_VEC3 || !a[0].data.ptr || !a[1].data.ptr) {
+        if (ret) *ret = in.NewVec3(0.0f, 0.0f, 0.0f);
+        return true;
+    }
+    const Vec3* x = (const Vec3*)a[0].data.ptr;
+    const Vec3* y = (const Vec3*)a[1].data.ptr;
+    f32 t = Interpreter::ToF32(a[2]);
+    if (ret) *ret = in.NewVec3(x->x + (y->x - x->x) * t,
+                               x->y + (y->y - x->y) * t,
+                               x->z + (y->z - x->z) * t);
+    return true;
+}
+static Object* QuatObject(const Value& v) {
+    Value x = v;
+    if (x.tag == VT_BYREF && x.data.ref) x = *x.data.ref;
+    if ((x.tag == VT_STRUCT || x.tag == VT_OBJECT) && x.data.obj) return x.data.obj;
+    return 0;
+}
+static bool Quaternion_GetEuler(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* q = QuatObject(a[0]);
+    f32 x = q ? q->Fields()[0].data.f32 : 0.0f;
+    f32 y = q ? q->Fields()[1].data.f32 : 0.0f;
+    f32 z = q ? q->Fields()[2].data.f32 : 0.0f;
+    f32 w = q ? q->Fields()[3].data.f32 : 1.0f;
+    const f32 rad2deg = 57.2957795f;
+    f32 roll = atan2f(2.0f * (w * x + y * z), 1.0f - 2.0f * (x * x + y * y));
+    f32 pitch = asinf(2.0f * (w * y - z * x));
+    f32 yaw = atan2f(2.0f * (w * z + x * y), 1.0f - 2.0f * (y * y + z * z));
+    return RetVec3V(in, ret, roll * rad2deg, pitch * rad2deg, yaw * rad2deg);
+}
+static bool Quaternion_Identity(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    u32 qt = in.Metadata().FindType("UnityEngine.Quaternion");
+    Object* q = qt ? in.AllocObjectWithSlots(qt, 4) : 0;
+    if (q) {
+        q->Fields()[0] = Value::R4(0.0f);
+        q->Fields()[1] = Value::R4(0.0f);
+        q->Fields()[2] = Value::R4(0.0f);
+        q->Fields()[3] = Value::R4(1.0f);
+    }
+    if (ret) *ret = q ? Value::StructRef(q) : Value::Null();
+    return true;
+}
 static bool Vector3_ImplicitV2(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {    if (a[0].tag == VT_VEC3 && a[0].data.ptr) {
         const Vec3* x = (const Vec3*)a[0].data.ptr;
         if (ret) *ret = in.NewVec2(x->x, x->y);
@@ -2582,6 +2649,18 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "get_rectTransform") == 0) {
             return GameObject_GetTransform(in, member, argc, args, ret);
         }
+        if (strcmp(n, "get_padding") == 0) {
+            u32 pt = in.Metadata().FindType("UnityEngine.RectOffset");
+            Object* po = pt ? in.AllocObjectWithSlots(pt, 4) : 0;
+            if (po) {
+                po->Fields()[0] = Value::I4(0);
+                po->Fields()[1] = Value::I4(0);
+                po->Fields()[2] = Value::I4(0);
+                po->Fields()[3] = Value::I4(0);
+            }
+            if (ret) *ret = po ? Value::StructRef(po) : Value::Null();
+            return true;
+        }
         if (strcmp(n, "get_color") == 0) {
             u32 ct = in.Metadata().FindType("UnityEngine.Color");
             Object* o = ct ? in.AllocObjectWithSlots(ct, 4) : 0;
@@ -2690,6 +2769,7 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "Instantiate") == 0) return Object_Instantiate(in, member, argc, args, ret);
         if (strcmp(n, "FindObjectOfType") == 0) return Object_FindObjectOfType(in, member, argc, args, ret);
         if (strcmp(n, "get_material") == 0 || strcmp(n, "get_sharedMaterial") == 0) return Renderer_GetMaterial(in, member, argc, args, ret);
+        if (strcmp(n, "set_material") == 0 || strcmp(n, "set_sharedMaterial") == 0) return RetVoid(ret);
         if (strcmp(n, "get_sortingOrder") == 0) {
             const SceneComponent* c = SceneComponentFor(in, args[0]);
             return RetI32V(ret, c ? c->sorting_order : 0);
@@ -2728,6 +2808,28 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "get_enabled") == 0) return Behaviour_GetEnabled(in, member, argc, args, ret);
         if (strcmp(n, "set_useGUILayout") == 0 || strcmp(n, "get_useGUILayout") == 0) return RetVoid(ret);
         if (strcmp(n, "CompareTag") == 0) return Component_CompareTag(in, member, argc, args, ret);
+        if (strcmp(n, "set_sprite") == 0) return RetVoid(ret);
+        if (strcmp(n, "set_flipX") == 0 || strcmp(n, "set_flipY") == 0) {
+            SceneComponent* c = MutableSceneComponentFor(in, args[0]);
+            if (c) {
+                u32 bit = (strcmp(n, "set_flipX") == 0) ? 2u : 4u;
+                if (Interpreter::ToBool(args[1])) c->flags |= bit;
+                else c->flags &= ~bit;
+            }
+            return RetVoid(ret);
+        }
+        if (strcmp(n, "get_color") == 0) {
+            u32 ct = in.Metadata().FindType("UnityEngine.Color");
+            Object* co = ct ? in.AllocObjectWithSlots(ct, 4) : 0;
+            if (co) {
+                co->Fields()[0] = Value::R4(1.0f);
+                co->Fields()[1] = Value::R4(1.0f);
+                co->Fields()[2] = Value::R4(1.0f);
+                co->Fields()[3] = Value::R4(1.0f);
+            }
+            if (ret) *ret = co ? Value::StructRef(co) : Value::Null();
+            return true;
+        }
         if (strcmp(n, "get_tag") == 0 || strcmp(n, "set_tag") == 0) return RetVoid(ret);
         if (strcmp(n, "StartCoroutine") == 0) return MonoBehaviour_StartCoroutine(in, member, argc, args, ret);
         if (strcmp(n, ".ctor") == 0 && strcmp(type, "UnityEngine.GameObject") == 0) {
@@ -2787,6 +2889,9 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "set_localEulerAngles") == 0 || strcmp(n, "set_eulerAngles") == 0) {
             return Transform_SetEuler(in, member, argc, args, ret);
         }
+        if (strcmp(n, "get_right") == 0) return Transform_GetRight(in, member, argc, args, ret);
+        if (strcmp(n, "get_rotation") == 0) return Transform_GetRotation(in, member, argc, args, ret);
+        if (strcmp(n, "set_rotation") == 0) return Transform_SetRotation(in, member, argc, args, ret);
         if (strcmp(n, "get_gameObject") == 0) return Component_GetGameObject(in, member, argc, args, ret);
         if (strcmp(n, "get_name") == 0) return Object_GetName(in, member, argc, args, ret);
     }
@@ -2888,6 +2993,14 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "StringToHash") == 0) return Animator_StringToHash(in, member, argc, args, ret);
         if (strcmp(n, "set_speed") == 0) return Animator_SetSpeed(in, member, argc, args, ret);
         if (strcmp(n, "get_speed") == 0) return Animator_GetSpeed(in, member, argc, args, ret);
+        if (strcmp(n, "SetLayerWeight") == 0 || strcmp(n, "Update") == 0 ||
+            strcmp(n, "ResetTrigger") == 0) return RetVoid(ret);
+    }
+    if (strcmp(type, "UnityEngine.SystemInfo") == 0) {
+        if (strcmp(n, "SupportsRenderTextureFormat") == 0) return RetBoolV(ret, false);
+        if (strcmp(n, "get_graphicsMemorySize") == 0) return RetI32V(ret, 256);
+        if (strcmp(n, "get_graphicsShaderLevel") == 0) return RetI32V(ret, 30);
+        if (strcmp(n, "get_processorCount") == 0) return RetI32V(ret, 3);
     }
     if (strcmp(type, "UnityEngine.Rect") == 0) {
         if (strcmp(n, ".ctor") == 0) return Rect_Ctor(in, member, argc, args, ret);
@@ -2921,7 +3034,46 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "op_Subtraction") == 0) return Vector3_Sub(in, member, argc, args, ret);
         if (strcmp(n, "op_Multiply") == 0) return Vector3_Mul(in, member, argc, args, ret);
         if (strcmp(n, "Distance") == 0) return Vector3_Distance(in, member, argc, args, ret);
+        if (strcmp(n, "Lerp") == 0) return Vector3_Lerp(in, member, argc, args, ret);
         if (strcmp(n, "op_Implicit") == 0) return Vector3_ImplicitV2(in, member, argc, args, ret);
+    }
+    if (strcmp(type, "UnityEngine.Quaternion") == 0) {
+        if (strcmp(n, "get_eulerAngles") == 0) return Quaternion_GetEuler(in, member, argc, args, ret);
+        if (strcmp(n, "get_identity") == 0) return Quaternion_Identity(in, member, argc, args, ret);
+        if (strcmp(n, "set_eulerAngles") == 0) return RetVoid(ret);
+    }
+    if (strcmp(type, "UnityEngine.SceneManagement.SceneManager") == 0) {
+        if (strcmp(n, "GetActiveScene") == 0) {
+            u32 st = in.Metadata().FindType("UnityEngine.SceneManagement.Scene");
+            Object* so = st ? in.AllocObjectWithSlots(st, 2) : 0;
+            if (so) {
+                so->Fields()[0] = in.NewStringAscii("level");
+                so->Fields()[1] = Value::I4(0);
+            }
+            if (ret) *ret = so ? Value::StructRef(so) : Value::Null();
+            return true;
+        }
+        if (strcmp(n, "LoadScene") == 0 || strcmp(n, "UnloadScene") == 0) return RetVoid(ret);
+    }
+    if (strcmp(type, "UnityEngine.SceneManagement.Scene") == 0) {
+        if (strcmp(n, "get_name") == 0) {
+            Object* so = QuatObject(args[0]);
+            if (ret) *ret = so && so->Fields()[0].tag == VT_STRING
+                ? so->Fields()[0] : in.NewStringAscii("level");
+            return true;
+        }
+        if (strcmp(n, "get_buildIndex") == 0) return RetI32V(ret, 0);
+        if (strcmp(n, "get_isLoaded") == 0) return RetBoolV(ret, true);
+    }
+    if (strcmp(type, "UnityEngine.Material") == 0) {
+        if (strcmp(n, "SetFloat") == 0 || strcmp(n, "SetColor") == 0 ||
+            strcmp(n, "SetTexture") == 0 || strcmp(n, "SetInt") == 0 ||
+            strcmp(n, "SetVector") == 0 || strcmp(n, "SetMatrix") == 0 ||
+            strcmp(n, "set_color") == 0) return RetVoid(ret);
+        if (strcmp(n, "get_mainTexture") == 0 || strcmp(n, "GetTexture") == 0) {
+            if (ret) *ret = Value::Null();
+            return true;
+        }
     }
     if (strcmp(type, "UnityEngine.Vector2") == 0) {
         if (strcmp(n, "op_Implicit") == 0) return Vector2_ImplicitV3(in, member, argc, args, ret);
