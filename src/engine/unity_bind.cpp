@@ -845,6 +845,73 @@ static bool Collider2D_GetAttachedRigidbody(Interpreter& in, const MemberRefInfo
 static bool MonoBehaviour_NoOp(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
     return RetVoid(ret);
 }
+
+static u32 g_rng_state = 0x2545F491u;
+static u32 NextRandom() {
+    g_rng_state = g_rng_state * 1664525u + 1013904223u;
+    return g_rng_state;
+}
+static bool Random_Range(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    if (a[0].tag == VT_R4 || a[0].tag == VT_R8 || a[1].tag == VT_R4 || a[1].tag == VT_R8) {
+        f32 lo = in.ToF32(a[0]);
+        f32 hi = in.ToF32(a[1]);
+        f32 t = (f32)(NextRandom() & 0xFFFFFFu) / 16777216.0f;
+        return RetF32Field(ret, lo + (hi - lo) * t);
+    }
+    s32 lo = in.ToI32(a[0]);
+    s32 hi = in.ToI32(a[1]);
+    if (hi <= lo) return RetI32V(ret, lo);
+    return RetI32V(ret, lo + (s32)(NextRandom() % (u32)(hi - lo)));
+}
+static bool Random_Value(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
+    return RetF32Field(ret, (f32)(NextRandom() & 0xFFFFFFu) / 16777216.0f);
+}
+static bool Random_InitState(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    g_rng_state = in.ToU32(a[0]) | 1u;
+    return RetVoid(ret);
+}
+
+static bool StringEqualsAscii(const Value& v, const char* text) {
+    if (v.tag != VT_STRING || !v.data.str) return false;
+    u32 n = (u32)strlen(text);
+    if (v.data.str->length != n) return false;
+    for (u32 i = 0; i < n; ++i) {
+        if (v.data.str->Chars()[i] != (u16)(u8)text[i]) return false;
+    }
+    return true;
+}
+
+// Temporary dialogue-content scaffold. The real dialoguer_data_object lives
+// in resources.assets (MonoBehaviour 1175) and is serialized as a large
+// nested graph. Until that graph is extracted into a runtime asset, return an
+// empty wrapper so save/player initialization can proceed.
+static bool Resources_Load(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    if (argc < 1 || !StringEqualsAscii(a[0], "dialoguer_data_object")) {
+        if (ret) *ret = Value::Null();
+        return true;
+    }
+    u32 wrapper_type = in.Metadata().FindType("DialoguerEditor.DialogueEditorMasterObjectWrapper");
+    u32 data_type = in.Metadata().FindType("DialoguerEditor.DialogueEditorMasterObject");
+    if (!wrapper_type || !data_type) {
+        if (ret) *ret = Value::Null();
+        return true;
+    }
+    Value data = in.NewObjectValue(data_type);
+    if (data.tag == VT_NULL) return false;
+    u32 ctor = in.Metadata().FindMethod(data_type, ".ctor");
+    if (ctor) {
+        Value args[1];
+        args[0] = data;
+        Value r;
+        if (!in.Invoke(ctor, args, 1, &r)) return false;
+    }
+    Value wrapper = in.NewObjectValue(wrapper_type);
+    if (wrapper.tag == VT_NULL) return false;
+    u32 data_field = in.Metadata().FindField(wrapper_type, "data");
+    if (data_field) in.SetField(data_field, wrapper, data);
+    if (ret) *ret = wrapper;
+    return true;
+}
 static Object* RectObject(const Value& v) {
     Value x = v;
     if (x.tag == VT_BYREF && x.data.ref) x = *x.data.ref;
@@ -1071,6 +1138,14 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "set_simulated") == 0) return Rigidbody2D_SetSimulated(in, member, argc, args, ret);
         if (strcmp(n, "get_freezeRotation") == 0) return Rigidbody2D_GetFreezeRotation(in, member, argc, args, ret);
         if (strcmp(n, "set_freezeRotation") == 0) return Rigidbody2D_SetFreezeRotation(in, member, argc, args, ret);
+    }
+    if (strcmp(type, "UnityEngine.Resources") == 0) {
+        if (strcmp(n, "Load") == 0) return Resources_Load(in, member, argc, args, ret);
+    }
+    if (strcmp(type, "UnityEngine.Random") == 0) {
+        if (strcmp(n, "Range") == 0) return Random_Range(in, member, argc, args, ret);
+        if (strcmp(n, "get_value") == 0) return Random_Value(in, member, argc, args, ret);
+        if (strcmp(n, "InitState") == 0) return Random_InitState(in, member, argc, args, ret);
     }
     if (strcmp(type, "UnityEngine.Rect") == 0) {
         if (strcmp(n, "get_x") == 0) return Rect_GetX(in, member, argc, args, ret);

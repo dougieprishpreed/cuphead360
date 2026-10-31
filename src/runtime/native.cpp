@@ -854,6 +854,36 @@ static bool Type_GetIsValueType(Interpreter& in, const MemberRefInfo&, u32, Valu
     return RetBool(ret, is_value);
 }
 
+static bool Native_Void(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
+    return RetVoid(ret);
+}
+static bool Native_Null(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
+    if (ret) *ret = Value::Null();
+    return true;
+}
+static bool Object_NewFromCtor(Interpreter& in, const MemberRefInfo& member, u32, Value*, Value* ret) {
+    if (ret) *ret = in.NewObjectValue(member.decl_id);
+    return true;
+}
+static bool StringWriter_ToString(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = (a[0].tag == VT_OBJECT) ? a[0].data.obj : 0;
+    if (o) {
+        Value v = o->Fields()[0];
+        if (v.tag == VT_STRING) { if (ret) *ret = v; return true; }
+    }
+    if (ret) *ret = in.NewStringAscii("");
+    return true;
+}
+static bool StringWriter_Write(Interpreter&, const MemberRefInfo&, u32, Value* a, Value* ret) {
+    Object* o = (a[0].tag == VT_OBJECT) ? a[0].data.obj : 0;
+    if (o && a[1].tag == VT_STRING) o->Fields()[0] = a[1];
+    return RetVoid(ret);
+}
+static bool StringReader_ReadToEnd(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    if (ret) *ret = in.NewStringAscii("");
+    return true;
+}
+
 static bool Enum_GetValues(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     u32 tid = (u32)Interpreter::ToI32(a[0]);
     if (!tid || tid > in.Metadata().TypeCount()) return false;
@@ -1052,6 +1082,16 @@ static const NativeEntry kEntries[] = {
     { "System.OverflowException", ".ctor", Exception_Ctor },
     { "System.IO.IOException", ".ctor", Exception_Ctor },
     { "System.Collections.Generic.KeyNotFoundException", ".ctor", Exception_Ctor },
+    { "System.Xml.Serialization.XmlSerializer", ".ctor", Object_NewFromCtor },
+    { "System.Xml.Serialization.XmlSerializer", "Serialize", Native_Void },
+    { "System.Xml.Serialization.XmlSerializer", "Deserialize", Native_Null },
+    { "System.IO.StringWriter", ".ctor", Object_NewFromCtor },
+    { "System.IO.StringWriter", "ToString", StringWriter_ToString },
+    { "System.IO.StringWriter", "Write", StringWriter_Write },
+    { "System.IO.StringWriter", "Dispose", Native_Void },
+    { "System.IO.StringReader", ".ctor", Object_NewFromCtor },
+    { "System.IO.StringReader", "ReadToEnd", StringReader_ReadToEnd },
+    { "System.IO.StringReader", "Dispose", Native_Void },
 };
 
 bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value* args, Value* ret) {
