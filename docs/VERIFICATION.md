@@ -125,16 +125,16 @@ Observed:
 [INFO] [stack] get_motor ok=1 type=LevelPlayerMotor PASS
 [INFO] [stack] player Awake PASS
 [INFO] [stack] prefab component Awakes 11/11
-[INFO] [stack] LevelInit method=15706
-[ERROR] [interp] execute failed ... DialoguerDataManager.Initialize
-[INFO] [stack] player LevelInit FAIL
+[INFO] [stack] player LevelInit PASS (last_error=0)
+[INFO] [stack] player LevelStart PASS
+[INFO] [stack] result=PASS
 ```
 
 This verifies generic `GetComponent<T>`, the entire player-prefab `Awake`
 chain (motor, animation, collider, weapon, damage, stats, camera), and the
-start of the original `LevelPlayerController.LevelInit`. It does not yet
-complete level initialization because save/dialogue content loading
-(`Resources.Load`) is not implemented.
+original `LevelPlayerController.LevelInit`/`LevelStart`. The dialogue database
+is an explicit empty scaffold for now; the real asset still needs extraction.
+The next gameplay step is running the original motor/input loop.
 
 ## Status
 

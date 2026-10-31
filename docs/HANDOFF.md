@@ -103,11 +103,13 @@ python tools\extract_scene.py --game game\Cuphead_Data ^
   --scene scene_level_tutorial --out work\extract_prefab --add-player-prefab
 ```
 
-Current observed state: `get_motor`, player `Awake`, and all 11 prefab
-component `Awake` methods pass. `LevelInit` stops in
-`PlayerStatsManager.LevelInit -> PlayerData -> Dialoguer` at
-`UnityEngine.Resources.Load`; save/dialogue content loading is the next
-blocker.
+Current observed state: `get_motor`, player `Awake`, all 11 prefab component
+`Awake` methods, `LevelInit` and `LevelStart` pass. The dialogue database is
+an explicit empty scaffold; the next gameplay step is driving the original
+motor and input loop.
+
+The `[NonSerialized]` field-flag fix and prefab PPtr offsetting were required
+for this; see `docs/UNITY_RUNTIME.md`.
 
 Command:
 

@@ -61,16 +61,29 @@ Observed on Windows:
 [INFO] [stack] get_motor ok=1 type=LevelPlayerMotor PASS
 [INFO] [stack] player Awake PASS
 [INFO] [stack] prefab component Awakes 11/11
-[INFO] [stack] LevelInit method=15706
-[ERROR] [interp] execute failed ... DialoguerDataManager.Initialize
-[INFO] [stack] player LevelInit FAIL
+[INFO] [stack] player LevelInit PASS
+[INFO] [stack] player LevelStart PASS
+[INFO] [stack] result=PASS
 ```
 
-All eleven player-prefab component `Awake` methods now run. `LevelInit`
-reaches `PlayerStatsManager.LevelInit -> PlayerData -> Dialoguer` and stops at
-the first missing content/runtime dependency (`Resources.Load`). This is the
-current blocker for the original player controller; it is not yet a playable
-original-logic level.
+All eleven player-prefab component `Awake` methods and the original
+`LevelPlayerController.LevelInit`/`LevelStart` now run. Reaching this
+required:
+
+- decoding MethodSpec generic calls (`GetComponent<T>`, `FindObjectsOfType<T>`);
+- delegates/events, `Dictionary<K,V>`, `List<T>` and array enumeration;
+- FieldRVA static-array initialization and enum constants;
+- fixing the `[NonSerialized]` (field flag `0x80`) serialized-field schema,
+  which had shifted every field after `preEnabled` by 4 bytes;
+- offsetting prefab-internal GameObject/component PPtrs into the scene ID
+  space.
+
+The dialogue database is currently an explicit scaffold: `Resources.Load`
+returns an empty `DialogueEditorMasterObjectWrapper` so save/player
+initialization can proceed. The real asset exists at
+`resources.assets` MonoBehaviour 1175 (87,612 bytes) and still needs its
+nested graph extracted. The next gameplay step is running the original motor
+and input loop.
 
 ## Verified
 
