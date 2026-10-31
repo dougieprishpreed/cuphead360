@@ -665,6 +665,117 @@ def relative_path(gos_by_id, root_id, go_id):
     return None
 
 
+
+def append_prefab(env, out, atlas_cache, field_builder, root_go_id=5401):
+    """Appends the Unity prefab subtree rooted at root_go_id to the scene."""
+    trs = {}
+    gos = {}
+    mb_readers = {}
+    for o in env.objects:
+        if o.type.name in ("Transform", "RectTransform"):
+            trs[o.path_id] = o.read()
+        elif o.type.name == "GameObject":
+            gos[o.path_id] = o.read()
+        elif o.type.name == "MonoBehaviour":
+            mb_readers[o.path_id] = o
+    root_tr = None
+    for tid, d in trs.items():
+        if d.m_GameObject and d.m_GameObject.m_PathID == root_go_id:
+            root_tr = (tid, d)
+            break
+    if root_tr is None:
+        print("player prefab root not found")
+        return []
+    id_base = 1000000
+    old_to_new = {}
+    objects = []
+    def walk(tid, parent_new):
+        d = trs.get(tid)
+        if d is None: return
+        gid = d.m_GameObject.m_PathID if d.m_GameObject else 0
+        if gid not in gos: return
+        new_id = gid + id_base
+        old_to_new[gid] = new_id
+        g = gos[gid]
+        comps = []
+        for cptr in g.m_Component:
+            cp = cptr.component
+            tn = cp.type.name
+            if tn in ("Transform", "RectTransform"):
+                continue
+            if tn == "MonoBehaviour":
+                try:
+                    reader = mb_readers.get(cp.path_id)
+                    if reader is None:
+                        raise LookupError("MonoBehaviour reader missing")
+                    h = reader.parse_monobehaviour_head()
+                    sc = h.m_Script.deref_parse_as_object()
+                    ns = str(sc.m_Namespace or ""); cn = str(sc.m_ClassName or "")
+                    full = ((ns+"."+cn) if ns else cn).replace("+","/")
+                    vals = parse_script_values(field_builder, full, reader.get_raw_data()) if field_builder else []
+                    comp = {"type":"MonoBehaviour","source_id":cp.path_id+id_base,"script":full}
+                    if vals: comp["values"]=vals
+                    comps.append(comp)
+                except Exception as e:
+                    print("prefab MB skip", type(e).__name__, e)
+                continue
+            try:
+                c = cp.read()
+            except Exception as e:
+                print("prefab component skip", tn, type(e).__name__, e)
+                continue
+            if tn == "SpriteRenderer":
+                spr = None
+                if c.m_Sprite:
+                    try: spr = c.m_Sprite.read()
+                    except Exception: pass
+                si = sprite_info(spr, atlas_cache, out["sprites"], out["textures"]) if spr else None
+                comps.append({"type":"SpriteRenderer","source_id":cp.path_id+id_base,
+                              "enabled":bool(c.m_Enabled),"sprite":si["name"] if si else "",
+                              "color":[float(c.m_Color.r),float(c.m_Color.g),float(c.m_Color.b),float(c.m_Color.a)],
+                              "flipX":bool(c.m_FlipX),"flipY":bool(c.m_FlipY),
+                              "sortingOrder":int(c.m_SortingOrder),"sortingLayer":int(c.m_SortingLayer),
+                              "sortingLayerName":str(getattr(c,"m_SortingLayerName","") or "")})
+            elif tn == "Animator":
+                cn = ""
+                try:
+                    if c.m_Controller: cn = c.m_Controller.read().m_Name
+                except Exception: pass
+                comps.append({"type":"Animator","source_id":cp.path_id+id_base,
+                              "enabled":bool(c.m_Enabled),"controller":cn})
+            elif tn in ("BoxCollider2D", "CircleCollider2D", "Rigidbody2D"):
+                try:
+                    if tn == "Rigidbody2D":
+                        comps.append({"type":"Rigidbody2D","source_id":cp.path_id+id_base,
+                                      "enabled":bool(c.m_Enabled)})
+                    else:
+                        comps.append({"type":tn,"source_id":cp.path_id+id_base,
+                                      "enabled":bool(c.m_Enabled),
+                                      "size":[float(c.m_Size.x),float(c.m_Size.y)] if hasattr(c,"m_Size") else [0,0],
+                                      "offset":[float(c.m_Offset.x),float(c.m_Offset.y)] if hasattr(c,"m_Offset") else [0,0]})
+                except Exception: pass
+        lp = d.m_LocalPosition
+        pos = [float(lp.x), float(lp.y), float(lp.z)]
+        if gid == root_go_id:
+            pos = [0.0, -180.0, 0.0]
+        obj = {"id":new_id,"name":g.m_Name,"active":bool(g.m_IsActive),
+               "transform":{"position":[float(pos[0]),float(pos[1]),float(pos[2])],
+                            "rotation":[float(d.m_LocalRotation.x),float(d.m_LocalRotation.y),float(d.m_LocalRotation.z),float(d.m_LocalRotation.w)],
+                            "scale":[float(d.m_LocalScale.x),float(d.m_LocalScale.y),float(d.m_LocalScale.z)],
+                            "parent":parent_new,"children":[]},
+               "components":comps}
+        objects.append(obj)
+        for ch in (d.m_Children or []):
+            walk(ch.m_PathID, new_id)
+    walk(root_tr[0], 0)
+    # Fix child lists from parent ids.
+    byid = {o["id"]:o for o in objects}
+    for o in objects:
+        p = o["transform"]["parent"]
+        if p in byid: byid[p]["transform"]["children"].append(o["id"])
+    out["gameobjects"].extend(objects)
+    return objects
+
 def extract_animations(env, out, atlas_cache, out_dir):
     gos_by_id = {g["id"]: g for g in out["gameobjects"]}
     # Controller name -> controller asset.
@@ -831,6 +942,7 @@ def main():
     ap.add_argument("--scene", default="scene_title")
     ap.add_argument("--out", required=True)
     ap.add_argument("--add-player", action="store_true")
+    ap.add_argument("--add-player-prefab", action="store_true")
     args = ap.parse_args()
 
     scenes = scene_index(args.game)
@@ -1003,6 +1115,8 @@ def main():
         else:
             cam["position"] = [0.0, 0.0, 0.0]
 
+    if args.add_player_prefab:
+        append_prefab(env, out, atlas_cache, field_builder)
     if args.add_player:
         bundle = os.path.join(bundle_dir, "atlas_player")
         if os.path.exists(bundle):
