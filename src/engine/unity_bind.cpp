@@ -3023,6 +3023,12 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "SetLayerWeight") == 0 || strcmp(n, "Update") == 0 ||
             strcmp(n, "ResetTrigger") == 0) return RetVoid(ret);
     }
+    if (strcmp(type, "UnityEngine.WaitForSeconds") == 0 ||
+        strcmp(type, "UnityEngine.WaitForSecondsRealtime") == 0 ||
+        strcmp(type, "UnityEngine.WaitForFixedUpdate") == 0 ||
+        strcmp(type, "UnityEngine.WaitForEndOfFrame") == 0) {
+        if (strcmp(n, ".ctor") == 0) return RetVoid(ret);
+    }
     if (strcmp(type, "UnityEngine.SystemInfo") == 0) {
         if (strcmp(n, "SupportsRenderTextureFormat") == 0) return RetBoolV(ret, false);
         if (strcmp(n, "get_graphicsMemorySize") == 0) return RetI32V(ret, 256);

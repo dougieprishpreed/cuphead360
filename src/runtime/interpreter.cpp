@@ -852,22 +852,20 @@ static u32 FindCoroutineCurrent(MetadataPackage& md, u32 type_id) {
 
 void Interpreter::UpdateCoroutines(f32 dt) {
     if (coroutines_.Empty()) return;
-    Buffer<CoroutineEntry> alive;
-    u32 guard = 0;
-    for (u32 i = 0; i < coroutines_.Size(); ++i) {
-        CoroutineEntry e = coroutines_[i];
-        if (!e.active) continue;
-        if (e.wait > 0.0f) {
-            e.wait -= dt;
-            if (e.wait > 0.0f) {
-                alive.PushBack(e);
-                continue;
-            }
+    u32 initial = coroutines_.Size();
+    u32 budget = 512;
+    for (u32 i = 0; i < initial; ++i) {
+        if (!coroutines_[i].active) continue;
+        if (coroutines_[i].wait > 0.0f) {
+            coroutines_[i].wait -= dt;
+            if (coroutines_[i].wait > 0.0f) continue;
         }
-        Object* en = (e.enumerator.tag == VT_OBJECT || e.enumerator.tag == VT_STRUCT)
-            ? e.enumerator.data.obj : 0;
-        if (!en) continue;
-        const TypeInfo& et = metadata_.Type(en->type_id);
+        if (budget == 0) break;
+        --budget;
+        Value enumerator = coroutines_[i].enumerator;
+        Object* en = (enumerator.tag == VT_OBJECT || enumerator.tag == VT_STRUCT)
+            ? enumerator.data.obj : 0;
+        if (!en) { coroutines_[i].active = 0; continue; }
         u32 move = 0;
         u32 cur = en->type_id;
         u32 h = 0;
@@ -875,14 +873,12 @@ void Interpreter::UpdateCoroutines(f32 dt) {
             move = metadata_.FindMethod(cur, "MoveNext");
             cur = metadata_.Type(cur).base_id;
         }
-        if (!move) continue;
-        Value self = e.enumerator;
+        if (!move) { coroutines_[i].active = 0; continue; }
+        Value self = enumerator;
         Value mr = Value::Bool(true);
         bool ok = Invoke(move, &self, 1, &mr);
-        if (!ok) continue;
-        if (mr.tag == VT_BOOL && mr.data.i32 == 0) continue;
-        if (++guard > 4096) {
-            alive.PushBack(e);
+        if (!ok || (mr.tag == VT_BOOL && mr.data.i32 == 0)) {
+            coroutines_[i].active = 0;
             continue;
         }
         u32 current = FindCoroutineCurrent(metadata_, en->type_id);
@@ -894,11 +890,16 @@ void Interpreter::UpdateCoroutines(f32 dt) {
                 if (ct.full_name && strstr(ct.full_name, "WaitForSeconds")) {
                     f32 seconds = cr.data.obj->slots > 0
                         ? ToF32(cr.data.obj->Fields()[0]) : 0.0f;
-                    if (seconds > 0.0f) e.wait = seconds;
+                    if (seconds > 0.0f) coroutines_[i].wait = seconds;
                 }
             }
         }
-        alive.PushBack(e);
+    }
+    // Compaction must happen after all MoveNext calls: a coroutine may have
+    // appended new entries (or reallocated coroutines_) while running.
+    Buffer<CoroutineEntry> alive;
+    for (u32 i = 0; i < coroutines_.Size(); ++i) {
+        if (coroutines_[i].active) alive.PushBack(coroutines_[i]);
     }
     coroutines_.Reset();
     for (u32 i = 0; i < alive.Size(); ++i) coroutines_.PushBack(alive[i]);
@@ -1021,6 +1022,7 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
     u8 last_op = 0;
     u32 last_pc = 0;
     u32 pending_constrained_type = 0;
+    u32 instruction_budget = 1000000;
 
 #define PUSH(v) do { if (sp >= kMaxStack) { ok = Fail("evaluation stack overflow", method_id); goto done; } stack[sp++] = (v); } while (0)
 #define POP(dst) do { if (sp == 0) { ok = Fail("evaluation stack underflow", method_id); goto done; } (dst) = stack[--sp]; } while (0)
@@ -1028,6 +1030,11 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
 #define BRANCH(off) do { pc = (u32)((s32)pc + (s32)(off)); } while (0)
 
     while (pc < code_size && !returned) {
+        if (instruction_budget == 0) {
+            ok = Fail("instruction budget exceeded", method_id);
+            goto done;
+        }
+        --instruction_budget;
         if (trace_) {
             LogDebug("il", "method=%u pc=%u op=%02x", method_id, pc, code[pc]);
         }
