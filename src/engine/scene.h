@@ -102,6 +102,7 @@ public:
     const ScriptValue& ScriptValueAt(u32 index) const { return script_values_[index]; }
 
     const SceneObject& Object(u32 index) const { return objects_[index]; }
+    SceneObject& MutableObject(u32 index) { return objects_[index]; }
     const SceneComponent& Component(u32 index) const { return components_[index]; }
     SceneComponent& MutableComponent(u32 index) { return components_[index]; }
     const SceneSprite& Sprite(u32 id) const;
@@ -110,6 +111,9 @@ public:
 
     const char* LastError() const { return last_error_; }
     const char* Directory() const { return directory_; }
+    u32 FindObjectByName(const char* name) const;
+    u32 FindSpriteByName(const char* name) const;
+    void SetMainCameraPosition(f32 x, f32 y);
     const u8* ScriptStrings() const { return script_strings_; }
     u32 ScriptStringsSize() const { return script_strings_size_; }
 

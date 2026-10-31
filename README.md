@@ -22,9 +22,12 @@ Foundation plus first executable vertical slices. The current build:
   game data and renders them with the same shared software renderer on
   Windows and Xbox 360;
 - binds scene GameObjects/Transforms/components to managed objects, recovers
-  serialized primitive component fields, and executes original
-  `TransformExtensions`, `AnimationHelper.Update`, and
-  `AbstractMonoBehaviour.Awake` logic against them.
+  serialized component fields, and executes original `TransformExtensions`,
+  `AnimationHelper.Update`, and `AbstractMonoBehaviour.Awake` logic against
+  them;
+- includes a playable tutorial movement slice (run, jump, dash, ground
+  collision, camera follow, real Cuphead sprites) driven partly by original
+  `VelocityManager` IL, verified on Windows and in Xenia.
 
 It is **not** yet a playable Cuphead port. See
 [docs/PROGRESS.md](docs/PROGRESS.md) for exactly what compiles, executes, and

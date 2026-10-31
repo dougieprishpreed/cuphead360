@@ -271,6 +271,36 @@ bool Scene::LoadTextures() {
     return true;
 }
 
+u32 Scene::FindObjectByName(const char* name) const {
+    if (!name) return 0xFFFFFFFFu;
+    for (u32 i = 0; i < objects_.Size(); ++i) {
+        if (strcmp(objects_[i].name, name) == 0) return i;
+    }
+    return 0xFFFFFFFFu;
+}
+
+u32 Scene::FindSpriteByName(const char* name) const {
+    if (!name) return 0;
+    for (u32 i = 0; i < sprites_.Size(); ++i) {
+        if (strcmp(sprites_[i].name, name) == 0) return i + 1;
+    }
+    return 0;
+}
+
+void Scene::SetMainCameraPosition(f32 x, f32 y) {
+    if (cameras_.Empty()) return;
+    SceneCamera& cam = cameras_[0];
+    for (u32 i = 0; i < objects_.Size(); ++i) {
+        if (objects_[i].id == cam.go_id) {
+            objects_[i].position[0] = x;
+            objects_[i].position[1] = y;
+            objects_[i].parent = 0;
+            break;
+        }
+    }
+    ComputeWorldTransforms();
+}
+
 void Scene::ComputeWorldTransforms() {
     // Iterate until parents are resolved (scenes are shallow).
     for (u32 pass = 0; pass < 8; ++pass) {

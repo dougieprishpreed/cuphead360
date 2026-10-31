@@ -63,8 +63,24 @@ components bound; `TransformExtensions.ResetLocalTransforms`,
 `AnimationHelper.Update`, and `AbstractMonoBehaviour.Awake` all PASS under
 Xenia big-endian.
 
-The currently committed XEX source boots `scene` mode (animated tutorial
-viewer, 120 frames, `game:\frame.bmp`).
+The currently committed XEX source boots `play` mode: a scripted 240-frame
+tutorial movement/dash/jump slice with D3D9 presentation and
+`game:\play.*.bmp` screenshots.
+
+Playable slice preparation and commands are in `docs/PLAYABLE_SLICE.md`:
+
+```
+python tools\extract_scene.py --game game\Cuphead_Data ^
+  --scene scene_level_tutorial --out work\extract_play --add-player
+```
+
+Windows automated play:
+
+```
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_play\scene.chs --play --frames 240 --headless ^
+  --screenshot work\extract_play\play --log build\logs\play.log
+```
 
 Unity-bridge test scene with full serialized-field recovery:
 `work\extract_tutorial_full4\scene.chs`. `--unity` verifies

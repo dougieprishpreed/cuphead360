@@ -11,6 +11,7 @@ static bool ArgEquals(const char* a, const char* b) {
 
 int main(int argc, char** argv) {
     ch360::AppConfig cfg;
+    bool explicit_mode = false;
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         if (ArgEquals(a, "--headless")) {
@@ -33,9 +34,15 @@ int main(int argc, char** argv) {
             cfg.command = "logic";
         } else if (ArgEquals(a, "--unity")) {
             cfg.command = "unity";
+            explicit_mode = true;
+        } else if (ArgEquals(a, "--play")) {
+            cfg.command = "play";
+            explicit_mode = true;
+        } else if (ArgEquals(a, "--manual")) {
+            cfg.auto_input = false;
         } else if (ArgEquals(a, "--scene") && i + 1 < argc) {
-            cfg.command = "scene";
             cfg.scene_path = argv[++i];
+            if (!explicit_mode) cfg.command = "scene";
         } else if (ArgEquals(a, "--screenshot") && i + 1 < argc) {
             cfg.screenshot_path = argv[++i];
         } else if (ArgEquals(a, "--anim-time") && i + 1 < argc) {
@@ -57,6 +64,8 @@ int main(int argc, char** argv) {
             printf("  --logic\n");
             printf("  --scene PATH\n");
             printf("  --unity\n");
+            printf("  --play\n");
+            printf("  --manual\n");
             printf("  --screenshot PATH\n");
             printf("  --anim-time SECONDS\n");
             printf("  --selftest\n");

@@ -830,6 +830,7 @@ def main():
     ap.add_argument("--game", required=True, help="Cuphead_Data directory")
     ap.add_argument("--scene", default="scene_title")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--add-player", action="store_true")
     args = ap.parse_args()
 
     scenes = scene_index(args.game)
@@ -1001,6 +1002,51 @@ def main():
             cam["position"] = g["transform"]["position"]
         else:
             cam["position"] = [0.0, 0.0, 0.0]
+
+    if args.add_player:
+        bundle = os.path.join(bundle_dir, "atlas_player")
+        if os.path.exists(bundle):
+            penv = UnityPy.load(bundle)
+            wanted = []
+            for o in penv.objects:
+                if o.type.name != "Sprite":
+                    continue
+                d = o.read()
+                n = getattr(d, "m_Name", "")
+                if n.startswith("cuphead_idle_") or n.startswith("cuphead_run_") or n.startswith("cuphead_jump_") or n.startswith("cuphead_dash_"):
+                    wanted.append((n, d))
+            wanted.sort(key=lambda x: x[0])
+            for n, d in wanted:
+                sprite_info(d, atlas_cache, out["sprites"], out["textures"])
+            pid = 9000001
+            player = {
+                "id": pid,
+                "name": "Player",
+                "active": True,
+                "transform": {
+                    "position": [0.0, -180.0, 0.0],
+                    "rotation": [0.0, 0.0, 0.0, 1.0],
+                    "scale": [1.0, 1.0, 1.0],
+                    "parent": 0,
+                    "children": [],
+                },
+                "components": [
+                    {
+                        "type": "SpriteRenderer",
+                        "source_id": pid + 1,
+                        "enabled": True,
+                        "sprite": "cuphead_idle_0001",
+                        "color": [1.0, 1.0, 1.0, 1.0],
+                        "flipX": False,
+                        "flipY": False,
+                        "sortingOrder": 500,
+                        "sortingLayer": 0,
+                        "sortingLayerName": "",
+                    }
+                ],
+            }
+            out["gameobjects"].append(player)
+            print("player sprites", len(wanted))
 
     anim = extract_animations(env, out, atlas_cache, args.out)
     with open(os.path.join(args.out, "scene.json"), "w", encoding="utf-8") as f:

@@ -6,6 +6,8 @@
 #include "core/mem.h"
 #include "platform/platform.h"
 #include "engine/animation.h"
+#include "game/player_slice.h"
+#include "platform/input.h"
 #include "engine/renderer_soft.h"
 #include "engine/scene.h"
 #include "platform/display.h"
@@ -390,6 +392,116 @@ static int RunUnityTest(MetadataPackage& pkg, const AppConfig& config) {
     return pass ? 0 : 1;
 }
 
+
+static int RunPlay(const AppConfig& config, MetadataPackage& pkg) {
+    if (!config.scene_path) {
+        LogError("play", "no scene path");
+        return 1;
+    }
+    Scene scene;
+    if (!scene.Load(config.scene_path)) return 1;
+    if (!scene.LoadTextures()) return 1;
+    Interpreter interp(pkg);
+    if (!interp.Init() || !interp.BindScene(scene)) return 1;
+    PlayerSlice player;
+    if (!player.Init(scene, interp)) {
+        LogError("play", "Player object not found; extract with --add-player");
+        return 1;
+    }
+    if (!DisplayInit(1280, 720, config.headless)) return 1;
+    InputInit();
+    SoftRenderer renderer(1280, 720);
+
+    // Scene lifecycle: run representative bound script methods before play.
+    u32 lp_type = pkg.FindType("LevelPlatform");
+    u32 lp_awake = pkg.FindMethod(lp_type, "Awake");
+    u32 pde_type = pkg.FindType("PlayerDeathEffect");
+    u32 pde_start = pkg.FindMethod(pde_type, "Start");
+    bool life_awake = false, life_start = false;
+    for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+        const SceneComponent& comp = scene.Component(ci);
+        if (comp.type != 4) continue;
+        Value obj = interp.ManagedComponent(ci);
+        if (!life_awake && lp_awake && strcmp(comp.controller, "LevelPlatform") == 0) {
+            Value a[1]; a[0] = obj; Value r;
+            life_awake = interp.Invoke(lp_awake, a, 1, &r);
+        }
+        if (!life_start && pde_start && strcmp(comp.controller, "PlayerDeathEffect") == 0) {
+            Value a[1]; a[0] = obj; Value r;
+            life_start = interp.Invoke(pde_start, a, 1, &r);
+        }
+    }
+    LogInfo("play", "scene lifecycle LevelPlatform.Awake=%d PlayerDeathEffect.Start=%d",
+            life_awake ? 1 : 0, life_start ? 1 : 0);
+    const u32 frames = config.frames ? config.frames : 240;
+    f32 start_x = player.X(), start_y = player.Y();
+    f32 max_x = start_x, min_y = start_y, max_y = start_y;
+    bool jumped = false, landed = false, dashed = false;
+    u32 saved = 0;
+    for (u32 i = 0; i < frames; ++i) {
+        InputState in = InputRead();
+        player.Update(scene, interp, config.fixed_dt, in, config.auto_input, i);
+        player.ApplyCamera(scene);
+        // Keep one bound AnimationHelper's original Update path alive.
+        {
+            static u32 ah_type = 0;
+            static u32 ah_update = 0;
+            if (!ah_type) {
+                ah_type = pkg.FindType("AnimationHelper");
+                if (ah_type) ah_update = pkg.FindMethod(ah_type, "Update");
+            }
+            if (ah_update) {
+                for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+                    const SceneComponent& comp = scene.Component(ci);
+                    if (comp.type == 4 && strcmp(comp.controller, "AnimationHelper") == 0) {
+                        Value obj = interp.ManagedComponent(ci);
+                        Value a[1]; a[0] = obj; Value r;
+                        interp.Invoke(ah_update, a, 1, &r);
+                        break;
+                    }
+                }
+            }
+        }
+        if (player.X() > max_x) max_x = player.X();
+        if (player.Y() < min_y) min_y = player.Y();
+        if (player.Y() > max_y) max_y = player.Y();
+        if (player.Y() > start_y + 80.0f) jumped = true;
+        if (jumped && player.Grounded()) landed = true;
+        if (player.DashCount() > 0) dashed = true;
+        if (i == 30 || i == 90 || i == 180) {
+            LogInfo("play", "frame=%u state=%s pos=%.1f,%.1f vel=%.1f,%.1f grounded=%d",
+                    i, player.StateName(), player.X(), player.Y(), player.VX(), player.VY(),
+                    player.Grounded() ? 1 : 0);
+        }
+        if (config.screenshot_path && saved < 3 && (i == 45 || i == 100 || i == 200)) {
+            char path[1024];
+            _snprintf(path, sizeof(path) - 1, "%s.%u.bmp", config.screenshot_path, i);
+            path[sizeof(path) - 1] = 0;
+            if (renderer.SaveBmp(path)) {
+                LogInfo("play", "screenshot=%s", path);
+                ++saved;
+            }
+        }
+        renderer.DrawScene(scene);
+        DisplayPresent(renderer.Pixels());
+        DisplayPump();
+        if (DisplayShouldQuit() || in.quit_pressed) break;
+        if (!config.headless) PlatformSleepMs(16);
+    }
+    if (config.screenshot_path) {
+        char path[1024];
+        _snprintf(path, sizeof(path) - 1, "%s.final.bmp", config.screenshot_path);
+        path[sizeof(path) - 1] = 0;
+        renderer.SaveBmp(path);
+    }
+    DisplayShutdown();
+    bool pass = jumped && landed && dashed && (max_x > start_x + 100.0f) && (max_y > start_y + 80.0f);
+    LogInfo("play", "result=%s start=%.1f,%.1f max_x=%.1f max_y=%.1f min_y=%.1f jumped=%d landed=%d dashes=%u",
+            pass ? "PASS" : "FAIL", start_x, start_y, max_x, max_y, min_y,
+            jumped ? 1 : 0, landed ? 1 : 0, player.DashCount());
+    return pass ? 0 : 1;
+}
+
 static void RunLogicTest(MetadataPackage& pkg) {
     Interpreter interp(pkg);
     if (!interp.Init()) {
@@ -613,7 +725,8 @@ int AppMain(const AppConfig& config) {
     bool wants_metadata = config.metadata_path != 0 ||
         (config.command && (strcmp(config.command, "inspect") == 0 ||
                             strcmp(config.command, "logic") == 0 ||
-                            strcmp(config.command, "unity") == 0));
+                            strcmp(config.command, "unity") == 0 ||
+                            strcmp(config.command, "play") == 0));
     const char* metadata_path = config.metadata_path;
 #if defined(_XBOX)
     if (!metadata_path && wants_metadata) metadata_path = "game:\\GameData\\metadata.chm";
@@ -633,6 +746,13 @@ int AppMain(const AppConfig& config) {
             result = 1;
         } else {
             InspectMetadata(metadata);
+        }
+    } else if (config.command && strcmp(config.command, "play") == 0) {
+        if (!metadata.IsLoaded()) {
+            LogError("play", "metadata required");
+            result = 1;
+        } else {
+            result = RunPlay(config, metadata);
         }
     } else if (config.command && strcmp(config.command, "unity") == 0) {
         if (!metadata.IsLoaded() || !config.scene_path) {

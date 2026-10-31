@@ -54,6 +54,8 @@
     <ClCompile Include="..\..\src\engine\renderer_soft.cpp" />
     <ClCompile Include="..\..\src\engine\scene.cpp" />
     <ClCompile Include="..\..\src\engine\unity_bind.cpp" />
+    <ClCompile Include="..\..\src\game\player_slice.cpp" />
+    <ClCompile Include="..\..\src\platform\input.cpp" />
     <ClCompile Include="..\..\src\runtime\interpreter.cpp" />
     <ClCompile Include="..\..\src\runtime\metadata.cpp" />
     <ClCompile Include="..\..\src\runtime\native.cpp" />

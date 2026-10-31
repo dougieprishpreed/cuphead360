@@ -70,6 +70,32 @@ rendered the real tutorial scene, and wrote `game:\frame.bmp` under Xenia.
 The D3D9 host-window contents could not be captured through PrintWindow
 (black capture); the framebuffer screenshot is the validated render output.
 
+## Playable tutorial slice
+
+Windows:
+
+```
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_play\scene.chs --play --frames 240 --headless ^
+  --screenshot work\extract_play\play --log build\logs\play8.log
+```
+
+Observed:
+
+```
+[INFO] [play] player object=185 component=276 idle=5 run=54 jump=22 dash=16
+[INFO] [play] scene lifecycle LevelPlatform.Awake=1 PlayerDeathEffect.Start=1
+[INFO] [play] frame=30 state=Jump ...
+[INFO] [play] frame=90 state=Run ...
+[INFO] [play] frame=180 state=Idle ...
+[INFO] [play] result=PASS ... jumped=1 landed=1 dashes=2
+```
+
+Xbox 360 XEX in Xenia produced the same state trace and a PASS result, and
+wrote `game:\play.45.bmp`, `play.100.bmp`, `play.200.bmp`, and
+`play.final.bmp` (real framebuffer renders of the tutorial scene with
+Cuphead).
+
 ## Status
 
 This verifies the runtime/metadata/scene/script foundation. It does **not**

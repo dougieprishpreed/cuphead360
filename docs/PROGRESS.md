@@ -88,6 +88,25 @@ XDK built / Xenia tested / Hardware tested**
 - [x] Verify all of the above on Windows and on the Xbox 360 XEX in Xenia.
 - [x] `AnimationHelper` serialized `speed`/`layer` values verified on both.
 
+### Playable tutorial vertical slice
+
+- [x] Added `--add-player` scene preparation using real `atlas_player`
+  Cuphead idle/run/jump/dash sprites.
+- [x] Added Windows/Xbox input backend (keyboard/XInput).
+- [x] Added a playable movement slice: run, jump (variable hold), gravity,
+  two dashes with cooldown, ground collision, camera follow, and
+  idle/run/jump/dash animation selection.
+- [x] Horizontal velocity target comes from the original
+  `LevelPlayerMotor/VelocityManager.get_Total` IL.
+- [x] Runs `LevelPlatform.Awake`, `PlayerDeathEffect.Start`, and
+  `AnimationHelper.Update` on bound scene scripts during the slice.
+- [x] Windows automated run PASS: moved >100, jump height >80, landed,
+  2 dashes.
+- [x] Xbox 360 XEX in Xenia PASS with the same state trace and screenshots.
+- [ ] The full original `LevelPlayerController`, weapon manager, damage,
+  enemies, audio, UI, saves, and original level colliders are not yet
+  integrated. See `PLAYABLE_SLICE.md`.
+
 ### Content pipeline and renderer
 
 - [x] Scene extractor for Unity 2017 serialized scenes:

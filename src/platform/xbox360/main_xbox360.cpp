@@ -8,12 +8,13 @@ void __cdecl main() {
     ch360::AppConfig cfg;
     // Development scene-viewer milestone. The logic validation mode is
     // selected by changing this command to "logic"; see docs/HANDOFF.md.
-    cfg.command = "scene";
+    cfg.command = "play";
     cfg.scene_path = "game:\\GameData\\scene.chs";
-    cfg.frames = 120;
+    cfg.frames = 240;
     cfg.headless = false;
     cfg.mute = true;
-    cfg.screenshot_path = "game:\\frame.bmp";
+    cfg.auto_input = true;
+    cfg.screenshot_path = "game:\\play";
     cfg.log_path = "game:\\cuphead360.log";
     ch360::AppMain(cfg);
 }
