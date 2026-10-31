@@ -587,6 +587,28 @@ static bool GameObject_GetTransform(Interpreter& in, const MemberRefInfo&, u32, 
     return true;
 }
 
+static bool Component_CompareTag(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    if (argc < 2 || a[1].tag != VT_STRING) return RetBoolV(ret, false);
+    const char* tag = in.StringUtf8(a[1]);
+    if (!tag) tag = "";
+    u32 oi = in.ManagedObjectIndexFor(a[0]);
+    Scene* scene = in.BoundScene();
+    bool match = false;
+    if (scene && oi < scene->ObjectCount()) {
+        const SceneObject& o = scene->Object(oi);
+        if (o.name && strstr(o.name, tag)) match = true;
+        if (!match) {
+            for (u32 c = 0; c < o.component_count && !match; ++c) {
+                u32 ci = o.component_start + c;
+                if (ci >= scene->ComponentCount()) break;
+                const SceneComponent& sc = scene->Component(ci);
+                if (sc.controller && strstr(sc.controller, tag)) match = true;
+            }
+        }
+    }
+    return RetBoolV(ret, match);
+}
+
 static bool Component_GetGameObject(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     if (ret) *ret = ManagedGameObjectForComponent(in, a[0]);
     return true;
@@ -2705,6 +2727,7 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, "set_enabled") == 0) return Behaviour_SetEnabled(in, member, argc, args, ret);
         if (strcmp(n, "get_enabled") == 0) return Behaviour_GetEnabled(in, member, argc, args, ret);
         if (strcmp(n, "set_useGUILayout") == 0 || strcmp(n, "get_useGUILayout") == 0) return RetVoid(ret);
+        if (strcmp(n, "CompareTag") == 0) return Component_CompareTag(in, member, argc, args, ret);
         if (strcmp(n, "get_tag") == 0 || strcmp(n, "set_tag") == 0) return RetVoid(ret);
         if (strcmp(n, "StartCoroutine") == 0) return MonoBehaviour_StartCoroutine(in, member, argc, args, ret);
         if (strcmp(n, ".ctor") == 0 && strcmp(type, "UnityEngine.GameObject") == 0) {
