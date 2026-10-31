@@ -117,6 +117,10 @@ public:
     const TypeRuntime& RuntimeType(u32 type_id) const;
     TypeRuntime& MutableTypeRuntime(u32 type_id);
 
+    // Minimal coroutine scheduler for original IEnumerator state machines.
+    bool StartCoroutineObject(const Value& enumerator);
+    void UpdateCoroutines(f32 dt);
+
 private:
     bool Fail(const char* message, u32 method_id = 0);
     bool BuildRuntimeTypes();
@@ -179,6 +183,13 @@ private:
         u32 component_index;
     };
     Buffer<ManagedBinding> bindings_;
+
+    struct CoroutineEntry {
+        Value enumerator;
+        f32 wait;
+        u8 active;
+    };
+    Buffer<CoroutineEntry> coroutines_;
 
     friend struct NativeContext;
 };

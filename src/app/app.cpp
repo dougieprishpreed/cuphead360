@@ -1,4 +1,4 @@
-#include "app/app.h"
+﻿#include "app/app.h"
 #include "core/containers.h"
 #include "core/endian.h"
 #include "core/file.h"
@@ -1102,7 +1102,6 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
             LogWarn("levelplay", "motor Start failed");
         }
     }
-
     if (!scene.LoadTextures()) {
         LogError("levelplay", "texture load failed");
         return 1;
@@ -1373,7 +1372,7 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
         } else {
             if (i >= 20 && i < 50) buttons |= 1u << 2;
             if (i == 100) buttons |= 1u << 7;
-            if (i >= 10) buttons |= 1u << 3; // shoot
+            if (i >= 10) buttons |= 1u << 4; // shoot (Rewired action 4)
         }
         SetRewiredInputState(ax, ay, buttons);
         Value args[1]; args[0] = motor; Value mr;
@@ -1468,6 +1467,7 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
             extra_update_seen[ci] = 1;
         }
         extra_update_failed.Resize(extra_update_cis.Size());
+        interp.UpdateCoroutines(config.fixed_dt);
         // Advance the extracted Animator default states before the native
         // player sprite bridge applies its locomotion frames.
         if (animations.Loaded()) anim_player.Update(scene, animations, config.fixed_dt);

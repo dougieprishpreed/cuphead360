@@ -2413,7 +2413,8 @@ static bool Animator_GetSpeed(Interpreter& in, const MemberRefInfo&, u32, Value*
     const SceneComponent* c = SceneComponentFor(in, a[0]);
     return RetF32Field(ret, c ? c->color[0] : 1.0f);
 }
-static bool MonoBehaviour_StartCoroutine(Interpreter&, const MemberRefInfo&, u32, Value*, Value* ret) {
+static bool MonoBehaviour_StartCoroutine(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
+    if (argc >= 2) in.StartCoroutineObject(a[1]);
     if (ret) *ret = Value::Null();
     return true;
 }

@@ -807,6 +807,88 @@ bool Interpreter::EnsureTypeInitialized(u32 type_id) {
     return true;
 }
 
+bool Interpreter::StartCoroutineObject(const Value& enumerator) {
+    if ((enumerator.tag != VT_OBJECT && enumerator.tag != VT_STRUCT) ||
+        !enumerator.data.obj) {
+        return false;
+    }
+    if (coroutines_.Size() >= 1024) return false;
+    CoroutineEntry e;
+    e.enumerator = CopyValue(enumerator);
+    e.wait = 0.0f;
+    e.active = 1;
+    return coroutines_.PushBack(e);
+}
+
+static u32 FindCoroutineCurrent(MetadataPackage& md, u32 type_id) {
+    u32 cur = type_id;
+    u32 guard = 0;
+    while (cur && guard++ < 64) {
+        const TypeInfo& t = md.Type(cur);
+        for (u32 i = 0; i < t.method_count; ++i) {
+            u32 mid = t.method_start + i;
+            const MethodInfo& m = md.Method(mid);
+            if (strstr(m.name, "get_Current") && m.il_size > 0) return mid;
+        }
+        cur = t.base_id;
+    }
+    return 0;
+}
+
+void Interpreter::UpdateCoroutines(f32 dt) {
+    if (coroutines_.Empty()) return;
+    Buffer<CoroutineEntry> alive;
+    u32 guard = 0;
+    for (u32 i = 0; i < coroutines_.Size(); ++i) {
+        CoroutineEntry e = coroutines_[i];
+        if (!e.active) continue;
+        if (e.wait > 0.0f) {
+            e.wait -= dt;
+            if (e.wait > 0.0f) {
+                alive.PushBack(e);
+                continue;
+            }
+        }
+        Object* en = (e.enumerator.tag == VT_OBJECT || e.enumerator.tag == VT_STRUCT)
+            ? e.enumerator.data.obj : 0;
+        if (!en) continue;
+        const TypeInfo& et = metadata_.Type(en->type_id);
+        u32 move = 0;
+        u32 cur = en->type_id;
+        u32 h = 0;
+        while (cur && h++ < 64 && !move) {
+            move = metadata_.FindMethod(cur, "MoveNext");
+            cur = metadata_.Type(cur).base_id;
+        }
+        if (!move) continue;
+        Value self = e.enumerator;
+        Value mr = Value::Bool(true);
+        bool ok = Invoke(move, &self, 1, &mr);
+        if (!ok) continue;
+        if (mr.tag == VT_BOOL && mr.data.i32 == 0) continue;
+        if (++guard > 4096) {
+            alive.PushBack(e);
+            continue;
+        }
+        u32 current = FindCoroutineCurrent(metadata_, en->type_id);
+        if (current) {
+            Value cr = Value::Null();
+            if (Invoke(current, &self, 1, &cr) &&
+                (cr.tag == VT_OBJECT || cr.tag == VT_STRUCT) && cr.data.obj) {
+                const TypeInfo& ct = metadata_.Type(cr.data.obj->type_id);
+                if (ct.full_name && strstr(ct.full_name, "WaitForSeconds")) {
+                    f32 seconds = cr.data.obj->slots > 0
+                        ? ToF32(cr.data.obj->Fields()[0]) : 0.0f;
+                    if (seconds > 0.0f) e.wait = seconds;
+                }
+            }
+        }
+        alive.PushBack(e);
+    }
+    coroutines_.Reset();
+    for (u32 i = 0; i < alive.Size(); ++i) coroutines_.PushBack(alive[i]);
+}
+
 bool Interpreter::Invoke(u32 method_id, Value* args, u32 arg_count, Value* ret) {
     if (ret) *ret = Value::Void();
     if (method_id == 0 || method_id > metadata_.MethodCount()) return Fail("bad method id");
