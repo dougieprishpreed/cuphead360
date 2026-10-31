@@ -1,3 +1,29 @@
+## Veggies boss scene boot (2026-10-31)
+
+Added coroutine liveness validation and a temporary safety filter for known
+unstable coroutine state machines. Extracted `scene_level_veggies` and ran:
+
+```
+python tools\extract_scene.py --game game\Cuphead_Data ^
+  --scene scene_level_veggies --out work\extract_veggies --add-level-resources
+
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_veggies\scene.chs --level --headless
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_veggies\scene.chs --levelplay --frames 30 --headless
+```
+
+Observed:
+
+```
+[INFO] [level] result=PASS
+[INFO] [levelplay] start=-370.0,-240.0 max_x=655.0 max_y=-137.2 min_y=-249.5 collisions=483 result=PASS
+```
+
+The safety filter currently skips Veggies boss, homing-projectile, UI and
+death-effect coroutines; the level boots and the player moves, but those
+skipped behaviors remain a known parity gap.
+
 ## Flower boss scene boot (2026-10-31)
 
 Added the generic `AbstractLevelProperties<TState,...>.CurrentState` getter
