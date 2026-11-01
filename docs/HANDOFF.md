@@ -1,6 +1,8 @@
 # Handoff
 
-Updated 2026-11-01. This is the canonical recovery state. Update this file and
+**PAUSED 2026-11-01 at the user's request.** The worker was interrupted; no
+further implementation, builds or tests are requested before continuation.
+This is the canonical recovery state. Update this file and
 [NEXT_SESSION_PROMPT.md](NEXT_SESSION_PROMPT.md) at the end of every round of
 changes. Keep test evidence in VERIFICATION.md and architecture decisions in
 PORT_REVIEW.md rather than creating more handoff documents.
@@ -14,9 +16,19 @@ PORT_REVIEW.md rather than creating more handoff documents.
 - Earlier references: `beb3a87` is the experimental source baseline;
   `694b9f0` is the fundamental audit; `bae43a8` is an intermediate docs commit.
   Inspect actual HEAD and working tree before assuming newer work is accepted.
-- **D1 correction r4 is active; D1 is not accepted or committed.** The same
-  sole DeepSeek writer `/root/cp1_corrections`, native thread
-  `01a194be-38be-7b20-8d15-c1ce11be350a`, was closed after r2 and reused for r4.
+- **D1 r4 is interrupted, partial, unvalidated and uncommitted.** The user
+  explicitly asked to interrupt the worker and wrap up now. The sole writer
+  `/root/cp1_corrections`, thread `01a194be-38be-7b20-8d15-c1ce11be350a`, was
+  interrupted with interrupt_agent. Do not resume this worker or the old split.
+- Preserved pause snapshot:
+  `work/restart-20261031/pause-opus-only-20261101T133312Z/` contains a manifest,
+  tracked diff and exact copies of partial source, both untracked D1 fixture
+  files and their docs. The working tree is the actual continuation state.
+- Interrupted source: interpreter.cpp SHA632D4A01..., interpreter.h0E6808CF...,
+  app.cpp4E242AD5..., fixture294B9942..., fixture build55FD9695.... Full hashes
+  are in the snapshot manifest. Existing EXE91DBF58D/XEXD4007458 are still r2:
+  **they do not validate the current r4 working tree**. No post-interrupt build
+  or test was run, and none is claimed.
 - Validated brief: `work/restart-20261031/opus-d1-review-request.json` (r4).
   Host clarification: `sol-d1-r4-dispatch-addendum.md`; validation:
   `d1-r4-request-validation.json`. New evidence: `d1-r4-builder/`; preserve the
@@ -37,10 +49,12 @@ PORT_REVIEW.md rather than creating more handoff documents.
 - The host is consolidating recovery docs and recording independent findings.
   Preserve its changes to HANDOFF, NEXT_SESSION_PROMPT, PORT_REVIEW and README.
   Do not overwrite the builder's active source, STATUS or VERIFICATION edits.
-- The earlier pause was revoked. Continue porting through acceptance and the
-  next agreed checkpoint; do not stop merely because a handoff exists.
+- **Latest user instruction: interrupt now and pause.** Do not finish r4,
+  start E0, launch another review or do further implementation in this session.
+  At resume, Opus5.5 alone takes over with full authority in NEXT_SESSION_PROMPT.
+  No workflow/toolchain rewrite was undertaken during wrap-up.
 
-## Required three-agent workflow
+## Historical: workflow used for the completed round
 
 | Responsibility | Exact model and route |
 | --- | --- |
@@ -53,6 +67,17 @@ Use the installed Codex on Crack skill and external-lead adapter. Do not
 substitute models/providers or add a review council. Workers must not delegate.
 Give bounded ownership; preserve other edits. Close every finished native child
 with interrupt_agent, then reuse the exact worker for appropriate follow-ups.
+
+**Next session supersedes the multi-agent arrangement above:** Opus5.5 is the
+only agent. The user authorizes Opus to reconsider/rewrite any code, tools,
+architecture, tests, plans or docs and adapt the project to a single-agent
+workflow to reach a playable alpha release candidate on console hardware.
+That adaptation is future work, not something to execute during this wrap-up.
+
+The user also requires the next-session prompt to state: once genuine in-game
+status is verified in Xenia with the XDK version, immediately begin using
+**xSDK and vulkan4xenon** to finish the port. The current native240-frame scaffold
+is not such original-gameplay verification. Hardware validation remains distinct.
 
 User authorization: **existing Max subscription quota only, $0 API spend**.
 The adapter's numeric budget reference0 is bookkeeping. Do not ask again or
@@ -72,7 +97,7 @@ Latest completed run:
 The comprehensive review is complete in PORT_REVIEW.md Part A. Sol challenged
 and corrected unsupported claims and independently checked key findings;
 `sol-release-review-acceptance.md` records the assessment. D1 still needs the
-single consolidated r4 correction, now dispatched. No Opus run is active.
+single consolidated r4 correction, now interrupted. No Opus run is active.
 Before resuming, choose the latest successfully completed run; never overwrite
 its output. Validate lead-authored requests before host dispatch. Reuse working
 routes and recorded evidence rather than repeating health checks.
@@ -117,32 +142,28 @@ evidence: `work/restart-20261031/cp1-final-narrow-builder/`,
   compilation only, with no new Xenia/hardware run. Historical foundation Xenia
   checks do not validate the current binary or opening flow.
 
-## Next actions and acceptance gates
+## Continuation actions (Opus5.5 only)
 
-1. Let the same D1 r4 writer finish. Close it immediately on completion. Honor
-   its stop condition if original regressions hit `interface dispatch::generic-base`:
-   report exact sites/types/counts and return the evidence to Opus; never hide it
-   through native fallback or weaken the guard.
-2. Independently review the r4 diff, synthetic mutations, counters, tests and
-   post-edit builds, then obtain Opus acceptance. D1 r2 passes do not validate
-   r4. Reuse trustworthy evidence and rerun concrete risks only.
-3. Commit the coherent accepted D1 source/docs checkpoint only after its gates.
-   Update this handoff and NEXT_SESSION_PROMPT at the end of the round.
-4. **Current project direction:** PORT_REVIEW.md Part A is the completed user-
-   requested shipping review of default.xex plus a standalone converter for
-   near-GOG gameplay/presentation on Xbox360. Source was reviewed at varying
-   depth with explicit coverage; original content was sampled, not certified.
-5. **E0 measurement is the next feature gate**, with a fresh bounded brief from
-   the project lead after accepted D1: content/dependency and MemberRef census,
-   runtime cost classes, allocation/clone behavior and a representative target
-   workload. Do not automatically dispatch the old A1 JSON.
-6. Proposed route after measurement: bind native calls once; repair game generic
-   types; implement indexed bounded pack volumes and atlas/mesh content; build
-   the GPU renderer with format/layout probes; serialization/lifecycle/exception/
-   numeric/GC checkpoints; original scene/Animator/physics/UI/audio/input/storage;
-   then M1 and content breadth. PORT_REVIEW A8 controls dependencies and go/no-go
-   gates. Each implementation brief stays bounded; the full release remains
-   unproven and no schedule estimate is established.
+1. Read the preserved partial r4 working tree, manifest and r4 request. Decide
+   whether to finish, revise or replace it using the user's full authority.
+   Do not assume it compiles or that r2 binaries validate it. No source since
+   CP1 is accepted. If continuing the bound, preserve visible generic-base
+   failures rather than hiding them through native fallback.
+2. Adapt the current project and documentation to a single-agent Opus workflow.
+   Previous lead/worker rules describe history; the latest user instruction
+   supersedes them. Do not spawn Sol/DeepSeek/other agents.
+3. PORT_REVIEW.md Part A is the completed engineering review, not a binding
+   design. Opus may reconsider any implementation, architecture, converter,
+   test, format, doc, plan or priority to reach a console alpha candidate.
+4. The review proposes measurement/content/API census, native binding, generic
+   runtime support, packed atlas/mesh data and GPU rendering before broad
+   gameplay systems. Opus may change this path when justified. No E0 work began.
+5. Verify genuine in-game status in Xenia with the XDK build, then immediately
+   begin using xSDK and vulkan4xenon to finish the port, as the user requires.
+   The existing finite native scaffold is not that verification. Final console
+   hardware acceptance remains separate.
+6. Maintain HANDOFF.md and NEXT_SESSION_PROMPT.md together at each round's end,
+   and keep explicit evidence/provenance for coherent source checkpoints.
 
 ## Playable goal and original semantics
 

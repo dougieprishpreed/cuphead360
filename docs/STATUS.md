@@ -6,20 +6,16 @@ playable alpha release candidate with no content or behavior gaps versus the
 Windows version. This document records exactly what is implemented, what has
 been validated, and what remains.
 
-Current-status paragraph: the CP1 coroutine/fault-accounting checkpoint now
-provides managed handles, receiver ownership, stop/disable behavior, joins,
-raw-child cancellation, explicit post-self-stop starts with observational
-NOTEs, rooted synchronous guards, managed caller ancestry, aggregated strict
-fault accounting, and visible unsupported stubs. Opus and the independent Sol
-host accepted CP1 on 2026-11-01 within its documented pilot limits. D1 interface
-dispatch is next; the opening flow is not accepted. Windows
-and Xbox 360 Release builds pass; Root Pack remains `NOT_PLAYABLE` at the
-chain-derived `Level/<startBattle_cr>c__Iterator2::MoveNext` fault. The
-frame-101 levelplay failures remain an inherited interface-slot misdispatch for
-the separate D1 checkpoint. See
-[`PORT_REVIEW.md`](PORT_REVIEW.md) for the architecture review and
-[`VERIFICATION.md`](VERIFICATION.md) for exact commands, exit codes, binary
-hashes, regressions, and unverified Unity semantics.
+Current status (2026-11-01): paused at the user's request during the partial
+D1 r4 interface-dispatch correction. The worker was interrupted; current source
+is unvalidated and uncommitted. Last accepted source is CP1 `4c40d42`. The last
+tested D1 r2 binaries and regressions do not validate this working tree. The
+comprehensive shipping review is in [PORT_REVIEW.md](PORT_REVIEW.md); the next
+session uses Opus5.5 alone with full authority to reconsider the project.
+See [HANDOFF.md](HANDOFF.md) for the exact preserved checkpoint and
+[NEXT_SESSION_PROMPT.md](NEXT_SESSION_PROMPT.md) for the continuation prompt.
+The opening flow, alpha release candidate and console-hardware feasibility
+remain unaccepted.
 
 ## Historical: 2026-10-31 player-damage engine checkpoint
 

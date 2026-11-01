@@ -1,3 +1,8 @@
+> Pause note (2026-11-01): the user interrupted partial D1 r4. The working
+> source has no post-interrupt build/test acceptance. D1 r2 evidence below is
+> versioned prior evidence, not validation of current r4 edits. Exact source
+> snapshot and hashes are in HANDOFF.md.
+
 ## 2026-11-01 accepted CP1 coroutine and fault-ledger checkpoint
 
 This checkpoint implements only the coroutine, ownership, join, and
@@ -324,6 +329,242 @@ nonterminal `UnityEngine.Color::Lerp` FAULT remains in `HitFlash::SetColor` and
 is a next-checkpoint visual-shim gap, not combat evidence.
 
 Logs are `t3-*.log` under `work/restart-20261031/cp1-final-narrow-builder/`.
+
+## 2026-11-01 D1 r2 interface-dispatch checkpoint
+
+Status: implementation and builder validation are complete; D1 acceptance
+remains with the host/lead. This checkpoint replaces interface-owned numeric
+slot indexing for in-assembly IL receivers with metadata-derived interface
+mapping. It does not claim MethodImpl, variance, default-interface methods,
+generic virtual methods, opening-flow completion, or gameplay acceptance.
+
+Source hashes:
+
+- `src/runtime/interpreter.cpp`:
+  `47FEDA840C9AF841A9253C8353341EFC555B508EC41F0111607F283230A2A9C2`
+- `src/runtime/interpreter.h`:
+  `89607A2454C3FA6280F13778ED5BFF1083722DC4EE896BA27E2CDCF42F564DE9`
+- `src/runtime/metadata.h`:
+  `B10FDE171A837E870EFD907316ADF495401FFD9F96AF23C2762CB381F0F98930`
+- `src/app/app.cpp`:
+  `3F894907595E9EBCB455D81F29EBD693FE42CBE6CC811498EA9B1908EA5C7393`
+- `tests/fixtures/D1DispatchFixture.cs`:
+  `1F2BB6314243928262F9742F69CC930B5FFE2F4BE476C3702E40741DFEBB4BF0`
+- `tests/fixtures/build_d1_fixture.bat`:
+  `4FC1A5F1C3FA3B9900943B95C9725924A58E4C35554644EDB398881103A819D5`
+
+Both Release artifacts postdate the final source edit:
+
+| Artifact | Bytes | UTC timestamp | SHA-256 |
+| --- | ---: | --- | --- |
+| `build/win32/Cuphead360.exe` | 431616 | `2026-11-01T12:10:55.8389015Z` | `91DBF58DFAB67AD02FAC6C9629FA3B53909B0F6184A85798444AD1C7B63273DE` |
+| `build/xbox360/default.xex` | 696320 | `2026-11-01T12:11:03.7185484Z` | `D400745846C2D0EBF28283B39BED2AB67B109677159DE316190FAB5BD98B4B6E` |
+
+Builds:
+
+```text
+scripts\build_win32.bat Release
+scripts\build_xbox360.bat Release
+```
+
+Both exited 0. Observed wall times were 6.123 s for Windows and 14.055 s for
+Xbox 360. Xbox validation is build-only; no Xenia or hardware replay is
+claimed.
+
+### Mapping and dispatch rule
+
+The runtime uses these bounds:
+
+- A call is an interface call for an in-assembly MethodDef whose declaring type
+  is an interface, or for a callvirt MemberRef whose declared TypeRef/TypeSpec
+  appears in the receiver class chain's direct InterfaceImpl list after
+  interface-base expansion only.
+- Mapping origin is the most-derived class that directly declares the
+  interface. A plain inherited implementation does not move the origin;
+  re-declared implementation does.
+- At the origin and then its IL bases, a matching explicit implementation wins
+  over a public implicit implementation. Explicit and implicit matching both
+  require the same exact, structurally compared signature.
+- A direct or final implementation is invoked directly. An overridable virtual
+  implementation is indexed through the receiver class's vtable using the
+  matched method's own class slot. Interface slots are never used.
+- MemberRef interface membership now uses the same class-chain origin search as
+  MethodDef calls. This reaches an inherited IL `IEnumerator<int>` without
+  treating ordinary external class MemberRefs as interface calls.
+- Class-level `VAR` substitution is supported for closed generic interfaces.
+  Multidimensional arrays, pointers, function pointers, custom modifiers,
+  unresolved nested parameters, `MVAR`, and generic interface methods produce
+  `interface dispatch::unsupported-signature` before any callee runs.
+- Supported compound types and nested generic arguments are fully validated
+  before equal-type-ID or substituted-VAR shortcuts. Array rank is part of
+  closed-type identity.
+- Unresolved, ambiguous, unsupported, and no-member cases fail closed. There is
+  no raw-slot fallback, padding, IL rewrite, or native success shim.
+- Resolution and failures are cached by receiver type, call kind, call id, and
+  interface identity. Cache hits re-emit a failure under the current ledger
+  root. No-origin failures now pass through the same bounded insertion path.
+  Cache state and counters reset on Interpreter initialization and shutdown.
+
+### Synthetic fixture
+
+`tests\fixtures\build_d1_fixture.bat` exited 0 and produced a 25312-byte
+`D1DispatchFixture.chm` with SHA-256
+`541D2D6F459BBD6865472263CB3EAF731058DD1F4B289DAE7AFCDBDB0D89BBB4`.
+The command below exited 0:
+
+```text
+build\win32\Cuphead360.exe --command dispatchtest --metadata work\restart-20261031\d1-builder\fixture\D1DispatchFixture.chm --headless --log work\restart-20261031\d1-builder\final-dispatchtest.log
+```
+
+The fixture asserts the method that actually ran using distinct markers:
+
+- same-arity interface-slot collisions: 110 and 120;
+- `M(int)`, `M(float)`, and `M(string)` overloads: 230, 231, and 232;
+- hiding without re-declaration: 240;
+- override below the mapping origin: 251;
+- re-declaration: 261;
+- interface call before a new virtual slot: 270, with ordinary class call
+  272 on the new chain;
+- inherited public implementation: 280 and a separately forced non-virtual
+  metadata control at 990;
+- inherited explicit implementation versus a derived public hider: 290;
+- same-class explicit-plus-implicit and explicit-only cases: 300, 301, and
+  310;
+- interface inheritance: 320;
+- closed game interface via `VAR`: 337;
+- explicit closed-generic name normalization: 347;
+- two receivers sharing one interface identity without cache aliasing: 401
+  and 402;
+- inherited external `IEnumerator<int>` consumed by `foreach`: 410, with two
+  IL `MoveNext` calls and one IL `get_Current` call;
+- native `List<int>` direct and foreach controls: 17 and 7;
+- ordinary non-interface class override: 431;
+- generic `MVAR` interface method: visible unsupported FAULT on both calls and
+  zero callee executions.
+
+Two nested controls also fail closed with visible unsupported-signature FAULTs
+and zero side effects: a re-declared `IBox<int[,]>` implementation that
+otherwise would select a rank-three overload, and an `IBox<List<int[,]>>`
+implementation whose nested generic graph exceeds the supported bounds. The
+fixture build clears csc's virtual-final promotion only for the synthetic
+`D1ExplicitBase.M` metadata row so the public non-virtual rule is exercised
+directly.
+
+Observed fixture explicit names include `D1IExplicit.M`,
+`D1IExplicitBox<System.Int32>.Unwrap`, and
+`System.Collections.IEnumerator.get_Current`. Their normalized forms are
+`D1IExplicit.M`, `D1IExplicitBox.Unwrap`, and
+`System.Collections.IEnumerator.get_Current`. Original mcs metadata contains
+both `System.Collections.Generic.IEnumerator<object>.get_Current` and
+`System.Collections.IEnumerator.get_Current`; the first normalizes to
+`System.Collections.Generic.IEnumerator.get_Current`, which remains distinct
+from the non-generic interface. Exact signature checks still decide the match.
+
+Final counters:
+
+```text
+resolved=22 cache_entries=24 cache_full=0 unresolved=0 ambiguous=0
+unsupported_signature=4 external_il_redirections=5 external_base_native=0
+```
+
+The ledger contained three groups and four observations: both nested signature
+faults plus two cached emissions for the generic method fault.
+
+### Negative controls
+
+Every temporary source reversion rebuilt successfully, made `dispatchtest`
+exit 1, and restored `interpreter.cpp` to
+`47FEDA840C9AF841A9253C8353341EFC555B508EC41F0111607F283230A2A9C2`.
+Evidence is under `work/restart-20261031/d1-builder/negative-controls/`.
+
+| Reversion | Exit | Distinguishing failure |
+| --- | ---: | --- |
+| raw interface slots | 1 | fixture markers select wrong/colliding methods |
+| name-only matching | 1 | overloads become ambiguous/wrong |
+| explicit lookup removed | 1 | implicit hiders replace explicit implementations |
+| receiver removed from cache key | 1 | second alias receiver reuses first receiver's method |
+| most-derived receiver search | 1 | `new` hider steals inherited interface mapping |
+| virtual-only implicit candidates | 1 | public non-virtual 990 control is rejected |
+| external detection via `is_interface` | 1 | inherited external iterator misses IL interception |
+| `VAR` substitution ignored | 1 | closed generic 337/347 controls fail |
+
+### CP1 preservation and original route
+
+The compact CP1 set used the accepted `CP1CoroutineFixture.chm` unchanged:
+
+```text
+build\win32\Cuphead360.exe --command coroutinetest ... --log work\restart-20261031\d1-builder\cp1-core.log
+build\win32\Cuphead360.exe --command coroutinetest-extended ... --log work\restart-20261031\d1-builder\cp1-extended.log
+build\win32\Cuphead360.exe --command coroutinetest --metadata work\metadata\metadata.chm --scene work\extract_level\scene.chs ... --log work\restart-20261031\d1-builder\cp1-original.log
+build\win32\Cuphead360.exe --command ledger-sites ... --log work\restart-20261031\d1-builder\cp1-ledger-positive.log
+build\win32\Cuphead360.exe --command ledger-sites ... --strict-faults CP1LedgerSites::FailZ ...
+build\win32\Cuphead360.exe --command ledger-sites ... --strict-faults Unrelated::Prefix ...
+build\win32\Cuphead360.exe --command ledger-deep ... --strict-faults CP1LedgerSites::DeepOuterOnly ...
+build\win32\Cuphead360.exe --command ledger-exhaust ... --strict-faults Never::Match ...
+build\win32\Cuphead360.exe --command coroutinetest-extended ... --strict-faults CP1GuardVictimIterator ...
+```
+
+The normal runs exited 0. The matching strict and exhaust controls exited 1,
+while the unrelated-prefix controls exited 0. The recursive guard stayed at
+the finite limit 32 with `CP1GuardVictimIterator/<Run>` retained as the
+offending root. The F2 victim body remained unrun; the 131072-step sibling path
+is source-reviewed because a finite reproduction is impractical.
+
+The same Release binary completed 120 frames with exit 0 on tutorial,
+platforming 1-1F, and Flower. Each log resolves the OnGrounded call as:
+
+```text
+receiver=OnlineInterfaceGog interface=OnlineInterface method=SetStat
+method_id=15043 mode=direct origin=OnlineInterfaceGog
+```
+
+This is package method 15043, with the four-value
+`PlayerId,string,float` call shape including the receiver. It is not
+`UnlockAchievement`; interface slot 23 and class slot 23 are no longer
+interchanged.
+
+| Log | Exit | Result |
+| --- | ---: | --- |
+| `t3-tutorial-levelplay-120.log` | 0 | PASS; max_x=406.7, min_y=-274.5, collisions=186 |
+| `t3-platform1-levelplay-120.log` | 0 | PASS; max_x=296.7, collisions=153 |
+| `t3-flower-levelplay-120.log` | 0 | PASS; max_x=375.0, collisions=194 |
+
+### Final regressions
+
+All five `--level` boot commands (tutorial, platforming 1-1F, Train, Frogs,
+and Flower) exited 0 with `result=PASS`. Train and Frogs `--levelplay
+--frames 120` also exited 0. Existing non-D1 Unity/native fault rows remain
+visible and are not treated as success.
+
+The 272-frame synthetic combat run exited 0. It retained the full damage
+sequence (`firstHit=1`, `sameDealerBlock=1`,
+`freshDealerIFrameBlock=1`, `postIFrameHit=1`, `lethal=1`,
+`finalHealth=0`), the tutorial target transition from health 20 to -4, and the
+unchanged `retry=UNPROVEN` result.
+
+The single final Root Pack 150-frame run exited 0 with the same accepted CP1
+chain behavior:
+
+- initial wait state 1, `UnityEngine.WaitForSeconds`, first change at frame
+  24, exactly 24 computed frames;
+- the owned fault remains frame 118 at
+  `Level/<startBattle_cr>c__Iterator2::MoveNext` with detail `ldfld on null`;
+- 104 starts, 148 ledger groups, 9839 observations, one faulted entry, zero
+  parked running entries, and zero start-after-self-stop NOTEs;
+- status remains `NOT_PLAYABLE`; this is outside D1;
+- dispatch counters were `resolved=15 cache_entries=10 cache_full=0
+  unresolved=0 ambiguous=0 unsupported_signature=0
+  external_il_redirections=0 external_base_native=1563`.
+
+The no-origin case cannot be authored as typed C# because the compiler rejects
+an interface call on a receiver that does not implement it. Its cached,
+current-root failure path is therefore a source-review boundary. External-base
+native classification is also source-reviewed and represented by nonzero
+`external_base_native` counters in the original runs. No metadata format or
+tool change was made.
+
+Detailed commands, timings, probe logs, source/binary hashes, and the compact
+evidence index are in `work/restart-20261031/d1-builder/`.
 
 ### Frame argument order control
 
