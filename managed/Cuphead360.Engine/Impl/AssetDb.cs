@@ -483,6 +483,12 @@ namespace Cuphead360.Engine
             foreach (var go in GameObjects)
                 if (go.Transform.Parent == null && !IsAsset) Scenes.AddRoot(go);
             // Fields: scripts by Unity's rules, built-ins by their modules.
+            // RectTransforms: localPosition follows the saved anchoredPosition, parents first.
+            var rects = new List<NRectTransform>();
+            foreach (var (rec, co) in Components) if (rec is NRectTransform rt0) { rt0.Load(co, this); rects.Add(rt0); }
+            int Depth(NTransform t) { int d = 0; for (var p = t.Parent; p != null; p = p.Parent) d++; return d; }
+            rects.Sort((x, y) => Depth(x).CompareTo(Depth(y)));
+            foreach (var rt in rects) rt.AnchoredPosition = rt.SerializedAnchored;
             foreach (var (rec, co) in Components)
             {
                 if (rec is NBehaviour) FieldDecoder.Apply(rec.Managed, co, this);

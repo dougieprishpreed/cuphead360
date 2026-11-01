@@ -82,7 +82,7 @@ namespace Cuphead360.Engine
             Invoke(typeof(SceneManager), "Internal_SceneLoaded", s, mode);
             if (!additive) Invoke(typeof(SceneManager), "Internal_ActiveSceneChanged", default(Scene), s);
             if (!additive)
-                foreach (var b in Engine.Objects.Live().OfType<NBehaviour>().ToArray())
+                foreach (var b in Typed.Behaviours.ToArray())
                     if (b.Messages.OnLevelWasLoaded != null && Behaviours.ActiveAndEnabled(b)) Behaviours.Send(b, b.Messages.OnLevelWasLoaded, index);
         }
 

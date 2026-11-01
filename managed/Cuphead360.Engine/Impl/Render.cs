@@ -511,7 +511,20 @@ namespace Cuphead360.Engine
             return c;
         }
 
-        public bool Has(int id) => Floats.ContainsKey(id) || Vectors.ContainsKey(id) || Textures.ContainsKey(id);
+        public bool Has(int id) => Floats.ContainsKey(id) || Vectors.ContainsKey(id) || Textures.ContainsKey(id) || ShaderDeclares(id);
+
+        // The shaders ship as name-only stubs, so the built-in UI shaders' property
+        // blocks are listed here (UGUI's masking checks HasProperty("_Stencil") etc.).
+        static readonly HashSet<int> uiProps = new HashSet<int>();
+        bool ShaderDeclares(int id)
+        {
+            string n = Objects.Of(Shader)?.Name;
+            if (n == null || !n.StartsWith("UI/", StringComparison.Ordinal)) return false;
+            if (uiProps.Count == 0)
+                foreach (var p in new[] { "_MainTex", "_Color", "_StencilComp", "_Stencil", "_StencilOp", "_StencilWriteMask", "_StencilReadMask", "_ColorMask", "_ClipRect", "_UseUIAlphaClip" })
+                    uiProps.Add(ShaderProps.Id(p));
+            return uiProps.Contains(id);
+        }
     }
 
     /// <summary>Shader property names and ids (Shader.PropertyToID), global shader state.</summary>
@@ -639,8 +652,8 @@ namespace Cuphead360.Engine
         public static List<NCamera> LiveCameras()
         {
             var list = new List<NCamera>();
-            foreach (var o in Objects.Live())
-                if (o is NCamera c && c.Enabled && c.GameObject != null && c.GameObject.ActiveInHierarchy) list.Add(c);
+            foreach (var c in Typed.Cameras)
+                if (c.Enabled && c.GameObject != null && c.GameObject.ActiveInHierarchy) list.Add(c);
             return list;
         }
 

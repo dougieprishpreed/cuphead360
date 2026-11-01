@@ -25,6 +25,14 @@ namespace Cuphead360.Player
                         Environment.Exit(rc);
                         return rc;
                     }
+                case "play":
+                    {
+                        // The playable Windows build: Run's boot with a window, XInput and the keyboard.
+                        int rc = Run(args.Skip(1).Concat(new[] { "--live", "1" }).ToArray());
+                        Console.Out.Flush();
+                        Environment.Exit(rc);
+                        return rc;
+                    }
                 case "fields": return Fields(args.Skip(1).ToArray());
                 case "resource": return Resource(args.Skip(1).ToArray());
             }
@@ -99,6 +107,7 @@ namespace Cuphead360.Player
         {
             string data = "work/GameData", save = "work/managed/save";
             int frames = 600, report = 60, seed = 360;
+            bool live = false;
             for (int i = 0; i + 1 < a.Length; i += 2)
                 switch (a[i])
                 {
@@ -112,6 +121,11 @@ namespace Cuphead360.Player
                         break;
                     case "--capture-every": Capture.Every = int.Parse(a[i + 1]); break;
                     case "--capture-out": Capture.Path = System.IO.Path.GetFullPath(a[i + 1]); break;
+                    case "--live": live = true; break;
+                    case "--shot": foreach (var f in a[i + 1].Split(',')) LiveHost.Shots.Add(int.Parse(f)); break;
+                    case "--max-frames": LiveHost.MaxFrames = int.Parse(a[i + 1]); break;
+                    case "--unlocked": LiveHost.Unlocked = a[i + 1] != "0"; break;
+                    case "--inspect": inspect = a[i + 1]; break;
                     case "--dump-at":
                         foreach (var f in a[i + 1].Split(',')) dumpAt.Add(int.Parse(f));
                         break;
@@ -145,10 +159,18 @@ namespace Cuphead360.Player
             AssetDb.Init(System.IO.Path.GetFullPath(data));
             Cuphead360.Engine.SceneLoader.Load(0, false);
             var sw = System.Diagnostics.Stopwatch.StartNew();
+            if (live)
+                return LiveHost.Play(f =>
+                {
+                    PlayerLoop.Frame(1f / 60f);
+                    if (Capture.Wanted(f)) { }
+                    return !Icalls.QuitRequested;
+                }, System.IO.Path.GetFullPath(data));
             for (int f = 1; f <= frames && !Icalls.QuitRequested; f++)
             {
                 PlayerLoop.Frame(1f / 60f);
                 if (dumpAt.Contains(f)) DumpState(f);
+                if (PlayerLoop.Profile && f % 600 == 0) Console.WriteLine($"frame {f} " + PlayerLoop.ProfileReport(600));
                 if (report > 0 && f % report == 0)
                     Console.WriteLine($"FRAME {f} t={UnityEngine.Time.time:0.00} scene={Cuphead360.Engine.Scenes.Active?.Name} objects={Objects.LiveCount} exceptions={Exceptions.Count} missing={Icall.MissingCount}");
             }
@@ -168,11 +190,61 @@ namespace Cuphead360.Player
         }
 
         static readonly HashSet<int> dumpAt = new HashSet<int>();
+        static string inspect;
 
         /// <summary>Debug report: time scale and every live Animator's state.</summary>
         static void DumpState(int frame)
         {
             Console.WriteLine($"DUMP frame {frame} scene={Cuphead360.Engine.Scenes.Active?.Name} timeScale={UnityEngine.Time.timeScale} dt={UnityEngine.Time.deltaTime}");
+            if (inspect != null)
+            {
+                foreach (var g in Typed.GameObjects)
+                {
+                    if (g.Name != inspect) continue;
+                    Console.WriteLine($"  active={g.ActiveInHierarchy}");
+                    string path = g.Name;
+                    for (var t = g.Transform.Parent; t != null; t = t.Parent) path = t.GameObject.Name + "/" + path;
+                    var rt = g.Transform as NRectTransform;
+                    Console.WriteLine($"  object {path} pos={g.Transform.Position} local={g.Transform.LocalPosition}" + (rt != null ? $" anchorMin={rt.AnchorMin} anchorMax={rt.AnchorMax} pivot={rt.Pivot} sizeDelta={rt.SizeDelta} rect={rt.Rect}" : ""));
+                    void Tree(NTransform t, string ind)
+                    {
+                        foreach (var ch in t.Children)
+                        {
+                            var cg = ch.GameObject; var crt = ch as NRectTransform;
+                            var names = new List<string>();
+                            foreach (var c in cg.Components) names.Add(c.Managed?.GetType().Name + (c is NBehaviour nb && !nb.Enabled ? "(off)" : ""));
+                            Console.WriteLine($"{ind}{cg.Name}{(cg.ActiveSelf ? "" : " [inactive]")} pos={ch.Position} scale={ch.LocalScale}" + (crt != null ? $" aMin={crt.AnchorMin} aMax={crt.AnchorMax} pivot={crt.Pivot} size={crt.SizeDelta} anch={crt.AnchoredPosition}" : "") + " {" + string.Join(",", names) + "}");
+                            foreach (var c in cg.Components)
+                                if (c is NBehaviour nb2 && (nb2.Managed is UnityEngine.UI.Text || nb2.Managed is UnityEngine.UI.LayoutElement || nb2.Managed is UnityEngine.UI.Image))
+                                    foreach (var fi in Serialization.Fields(nb2.Managed.GetType()))
+                                    {
+                                        object v = fi.GetValue(nb2.Managed);
+                                        if (v is UnityEngine.UI.FontData fd) v = $"font={fd.font} size={fd.fontSize} style={fd.fontStyle} bestFit={fd.bestFit} min={fd.minSize} max={fd.maxSize} align={fd.alignment} alignByGeom={fd.alignByGeometry} rich={fd.richText} hOverflow={fd.horizontalOverflow} vOverflow={fd.verticalOverflow} lineSpacing={fd.lineSpacing}";
+                                        string vs = v?.ToString() ?? "null";
+                                        if (vs.Length > 200) vs = vs.Substring(0, 200);
+                                        Console.WriteLine($"{ind}    .{fi.Name} = {vs}");
+                                    }
+                            Tree(ch, ind + "  ");
+                        }
+                    }
+                    for (var at = g.Transform.Parent; at != null; at = at.Parent)
+                        Console.WriteLine($"    ^ {at.GameObject.Name} local={at.LocalPosition} scale={at.LocalScale}" + (at is NRectTransform art ? $" aMin={art.AnchorMin} aMax={art.AnchorMax} pivot={art.Pivot} size={art.SizeDelta} anch={art.AnchoredPosition} rect={art.Rect}" : " (Transform)"));
+                    Tree(g.Transform, "    | ");
+                    foreach (var c in g.Components)
+                    {
+                        if (!(c is NBehaviour b)) { Console.WriteLine("    " + c.Managed.GetType().Name); continue; }
+                        Console.WriteLine("    " + b.Managed.GetType().FullName + (b.Enabled ? "" : " (disabled)"));
+                        foreach (var fi in Serialization.Fields(b.Managed.GetType()))
+                        {
+                            object v = fi.GetValue(b.Managed);
+                            string vs = v is UnityEngine.RectOffset ro ? $"RectOffset(l={ro.left} r={ro.right} t={ro.top} b={ro.bottom})" : v?.ToString() ?? "null";
+                            if (vs.Length > 120) vs = vs.Substring(0, 120);
+                            Console.WriteLine($"      {fi.Name} = {vs}");
+                        }
+                    }
+                }
+                return;
+            }
             foreach (var o in Objects.Live())
             {
                 if (!(o is NAnimator an) || an.GameObject == null) continue;

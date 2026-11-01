@@ -105,7 +105,9 @@ namespace Cuphead360.Engine
         public static UObject[] ObjectsOfType(Type type, bool includeAssets)
         {
             var result = new List<UObject>();
-            foreach (var o in Objects.Live())
+            IEnumerable<NObject> pool = typeof(MonoBehaviour).IsAssignableFrom(type) ? Typed.Behaviours.ToArray()
+                : type == typeof(GameObject) ? Typed.GameObjects.ToArray() : Objects.Live();
+            foreach (var o in pool)
             {
                 if (!type.IsInstanceOfType(o.Managed)) continue;
                 var go = o as NGameObject ?? (o as NComponent)?.GameObject;
@@ -122,8 +124,8 @@ namespace Cuphead360.Engine
         public static GameObject[] WithTag(string tag, bool first)
         {
             var r = new List<GameObject>();
-            foreach (var o in Objects.Live())
-                if (o is NGameObject g && g.Tag == tag && g.ActiveInHierarchy) { r.Add((GameObject)g.Managed); if (first) break; }
+            foreach (var g in Typed.GameObjects)
+                if (g.Tag == tag && g.ActiveInHierarchy) { r.Add((GameObject)g.Managed); if (first) break; }
             return r.ToArray();
         }
 
@@ -133,9 +135,9 @@ namespace Cuphead360.Engine
             if (string.IsNullOrEmpty(path)) return null;
             bool rooted = path.StartsWith("/");
             string[] parts = path.Trim('/').Split('/');
-            foreach (var o in Objects.Live())
+            foreach (var g in Typed.GameObjects)
             {
-                if (!(o is NGameObject g) || !g.ActiveInHierarchy) continue;
+                if (!g.ActiveInHierarchy) continue;
                 if (g.Name != parts[parts.Length - 1]) continue;
                 var t = g.Transform;
                 bool ok = true;
@@ -204,6 +206,7 @@ namespace Cuphead360.Engine
             if (srcGo == null) return CloneAsset(src);
 
             var map = new Dictionary<NObject, NObject>();
+            var srcLayout = NRectTransform.Snapshot(srcGo.Transform);
             var root = CloneTree(srcGo.Transform, map);
             root.GameObject.Name = srcGo.Name + "(Clone)";
             foreach (var c in root.GameObject.Components) c.Name = root.GameObject.Name;
@@ -234,6 +237,14 @@ namespace Cuphead360.Engine
                 MathX.Invert(parent.LocalToWorld, out var inv);
                 rt.LocalPosition = inv.MultiplyPoint3x4(sp.Position);
                 rt.LocalRotation = MathX.Inverse(parent.Rotation) * sp.Rotation;
+            }
+            // The copies keep the originals' anchored positions (Unity stores those),
+            // so rects follow the new parent's size; a root placed in world space keeps its pose.
+            bool rootPlaced = pos.HasValue || (parent != null && worldPositionStays);
+            for (int i = 0; i < srcLayout.Count; i++)
+            {
+                if (rootPlaced && srcLayout[i].t == srcGo.Transform) continue;
+                if (map.TryGetValue(srcLayout[i].t, out var copy) && copy is NRectTransform crt) crt.AnchoredPosition = srcLayout[i].ap;
             }
             rt.Invalidate();
             // Lifecycle of the copy: Awake/OnEnable for active objects, now.
@@ -369,6 +380,10 @@ namespace Cuphead360.Engine
                 return r;
             }
             if (t.IsValueType && t.Namespace == "UnityEngine") return v;
+            // Native-backed classes keep their state outside the managed fields: copy it through the API.
+            if (v is RectOffset ro) return new RectOffset(ro.left, ro.right, ro.top, ro.bottom);
+            if (v is AnimationCurve ac) return new AnimationCurve(ac.keys) { preWrapMode = ac.preWrapMode, postWrapMode = ac.postWrapMode };
+            if (v is Gradient gr) { var g = new Gradient { mode = gr.mode }; g.SetKeys(gr.colorKeys, gr.alphaKeys); return g; }
             // [Serializable] class or struct: copied by value, field by field.
             var copy = FieldDecoder.New(v.GetType());
             foreach (var f in Fields(v.GetType()))

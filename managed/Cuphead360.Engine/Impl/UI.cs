@@ -21,7 +21,11 @@ namespace Cuphead360.Engine
             var t = co.Tree;
             AnchorMin = Tree.Vec2(t, "m_AnchorMin"); AnchorMax = Tree.Vec2(t, "m_AnchorMax");
             SizeDelta = Tree.Vec2(t, "m_SizeDelta"); Pivot = Tree.Vec2(t, "m_Pivot");
+            SerializedAnchored = Tree.Vec2(t, "m_AnchoredPosition");
         }
+
+        /// <summary>The layout input as saved; localPosition is derived from it once the parents are laid out.</summary>
+        public Vector2 SerializedAnchored;
 
         public override void CopyFrom(NComponent src, Dictionary<NObject, NObject> map)
         {
@@ -70,21 +74,56 @@ namespace Cuphead360.Engine
         /// <summary>Change layout inputs keeping every child's anchoredPosition (Unity re-lays out children).</summary>
         public void Change(Action change)
         {
-            var kids = new List<(NRectTransform c, Vector2 ap)>();
-            foreach (var c in Children) if (c is NRectTransform rc) kids.Add((rc, rc.AnchoredPosition));
-            var ap = AnchoredPosition;
+            // The whole subtree is recorded first: a grandchild's anchoredPosition
+            // depends on its parent's rect, which this change may resize.
+            var snap = Snapshot(this);
             change();
-            AnchoredPosition = ap;
-            foreach (var (c, cap) in kids) c.Relayout(cap);
+            Restore(snap, 0, true);
         }
 
-        /// <summary>The parent's rect changed: keep anchoredPosition, then lay out the children.</summary>
-        void Relayout(Vector2 ap)
+        /// <summary>Unity's OnRectTransformDimensionsChange (UGUI graphics and layout react to it).</summary>
+        void DimensionsChanged()
         {
-            var kids = new List<(NRectTransform c, Vector2 ap)>();
-            foreach (var c in Children) if (c is NRectTransform rc) kids.Add((rc, rc.AnchoredPosition));
-            AnchoredPosition = ap;
-            foreach (var (c, cap) in kids) c.Relayout(cap);
+            if (GameObject == null || !GameObject.ActiveInHierarchy) return;
+            foreach (var c in GameObject.Components.ToArray())
+                if (c is NBehaviour b && Behaviours.ActiveAndEnabled(b))
+                {
+                    var m = MessageSet.Find(b.Managed.GetType(), "OnRectTransformDimensionsChange");
+                    if (m != null) Behaviours.Send(b, m);
+                }
+        }
+
+        /// <summary>
+        /// The anchored positions and sizes of every rect in a hierarchy, parents
+        /// first. Unity stores anchoredPosition, not localPosition, so a rect that
+        /// moves to another parent (SetParent, Instantiate under a parent) keeps
+        /// it and its local position follows the new parent's rect.
+        /// </summary>
+        public static List<(NRectTransform t, Vector2 ap, Vector2 size)> Snapshot(NTransform root)
+        {
+            var list = new List<(NRectTransform, Vector2, Vector2)>();
+            void Walk(NTransform t, bool top)
+            {
+                var r = t as NRectTransform;
+                if (r != null) list.Add((r, r.AnchoredPosition, r.Size));
+                // Only a stretching rect's size follows its parent, so only its children can move.
+                if (top || r == null || r.AnchorMin != r.AnchorMax)
+                    foreach (var c in t.Children) Walk(c, false);
+            }
+            Walk(root, true);
+            return list;
+        }
+
+        /// <summary>Re-apply a Snapshot (from entry <paramref name="from"/> on) after the hierarchy moved.</summary>
+        public static void Restore(List<(NRectTransform t, Vector2 ap, Vector2 size)> snap, int from, bool notify)
+        {
+            for (int i = from; i < snap.Count; i++)
+            {
+                var (t, ap, size) = snap[i];
+                t.AnchoredPosition = ap;
+                var s = t.Size;
+                if (notify && s != size) t.DimensionsChanged();
+            }
         }
     }
 
@@ -294,8 +333,8 @@ namespace Cuphead360.Engine
         /// <summary>Before rendering: fit root canvases, then let UGUI/TMP rebuild layout and meshes.</summary>
         public static void WillRender()
         {
-            foreach (var o in Objects.Live())
-                if (o is NCanvas c && c.Enabled && c.GameObject != null && c.GameObject.ActiveInHierarchy) c.FitRoot();
+            foreach (var c in Typed.Canvases.ToArray())
+                if (c.Enabled && c.GameObject != null && c.GameObject.ActiveInHierarchy) c.FitRoot();
             try { Canvas.SendWillRenderCanvases(); }
             catch (Exception e) { Exceptions.Report(e, null, "Canvas.willRenderCanvases"); }
         }
@@ -327,7 +366,13 @@ namespace Cuphead360.Engine
         public static void UnityEngine_RectTransform__INTERNAL_get_anchoredPosition(RectTransform self, out Vector2 value) => value = RT(self)?.AnchoredPosition ?? default;
         public static void UnityEngine_RectTransform__INTERNAL_set_anchoredPosition(RectTransform self, ref Vector2 value) { var t = RT(self); if (t != null) t.AnchoredPosition = value; }
         public static void UnityEngine_RectTransform__INTERNAL_get_sizeDelta(RectTransform self, out Vector2 value) => value = RT(self)?.SizeDelta ?? default;
-        public static void UnityEngine_RectTransform__INTERNAL_set_sizeDelta(RectTransform self, ref Vector2 value) { var t = RT(self); var v = value; t?.Change(() => t.SizeDelta = v); }
+        static readonly string traceRt = Environment.GetEnvironmentVariable("CH360_TRACE_RT");
+        public static void UnityEngine_RectTransform__INTERNAL_set_sizeDelta(RectTransform self, ref Vector2 value)
+        {
+            var t = RT(self); var v = value;
+            if (traceRt != null && t?.GameObject?.Name == traceRt) Log.Line($"TRACE rt {traceRt} sizeDelta {t.SizeDelta} -> {v} frame {Clock.FrameCount} {Environment.StackTrace}");
+            t?.Change(() => t.SizeDelta = v);
+        }
         public static void UnityEngine_RectTransform__INTERNAL_get_pivot(RectTransform self, out Vector2 value) => value = RT(self)?.Pivot ?? default;
         public static void UnityEngine_RectTransform__INTERNAL_set_pivot(RectTransform self, ref Vector2 value)
         {

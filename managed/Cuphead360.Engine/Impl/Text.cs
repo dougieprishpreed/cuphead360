@@ -483,19 +483,24 @@ namespace Cuphead360.Engine
             penX = 1; penY = 1; rowH = 0;
             Icalls.RuntimeTexture(Atlas, Width, Height, (int)TextureFormat.Alpha8);
             foreach (var k in keep) Get(k.c, k.size, k.style);
+            if (!Rebuilt) rebuilt.Add(this);
             Rebuilt = true;
         }
 
         /// <summary>After a rebuild Unity tells the UI (Font.textureRebuilt) so texts regenerate.</summary>
+        static readonly List<FontState> rebuilt = new List<FontState>();
+
         public static void NotifyRebuilds()
         {
-            foreach (var o in Objects.Live())
-                if (o.Managed is Font f && states.TryGetValue(f, out var s) && s.Rebuilt)
-                {
-                    s.Rebuilt = false;
-                    try { Font.InvokeTextureRebuilt_Internal(f); }
-                    catch (Exception e) { Exceptions.Report(e, null, "Font.textureRebuilt"); }
-                }
+            if (rebuilt.Count == 0) return;
+            var list = rebuilt.ToArray();
+            rebuilt.Clear();
+            foreach (var s in list)
+            {
+                s.Rebuilt = false;
+                try { Font.InvokeTextureRebuilt_Internal((Font)s.font); }
+                catch (Exception e) { Exceptions.Report(e, null, "Font.textureRebuilt"); }
+            }
         }
     }
 
@@ -633,7 +638,9 @@ namespace Cuphead360.Engine
             {
                 float x = ah == 0 ? left : ah == 1 ? left + (extX - r.Width) / 2 : left + extX - r.Width;
                 minX = Math.Min(minX, x); maxX = Math.Max(maxX, x + r.Width);
-                float baseline = cursorY - ascent;
+                // Unity puts the extra line spacing above each line, the first included
+                // (spacing under 1 clips the first line's top), so the block moves down.
+                float baseline = cursorY - lineGap - ascent;
                 Lines.Add(new UILineInfo { startCharIdx = r.Start, height = (int)Math.Round(lineH), topY = cursorY, leading = lineGap });
                 for (int i = r.Start; i < r.End; i++)
                 {

@@ -175,6 +175,7 @@ namespace Cuphead360.Engine
             for (var p = parent; p != null; p = p.Parent) if (p == t) return;   // no cycles
             bool wasActive = t.GameObject.ActiveInHierarchy;
             Vector3 wp = t.Position; Quaternion wr = t.Rotation; Vector3 ws = t.LossyScale;
+            var layout = NRectTransform.Snapshot(t);
             if (t.Parent != null) t.Parent.Children.Remove(t);
             else Scenes.RemoveRoot(t.GameObject);
             t.Parent = parent;
@@ -192,6 +193,9 @@ namespace Cuphead360.Engine
                     t.LocalScale = new Vector3(Div(ws.x, ps.x), Div(ws.y, ps.y), Div(ws.z, ps.z));
                 }
             }
+            // Rects keep their anchored positions under the new parent (the moved
+            // rect itself only when its local values stay).
+            NRectTransform.Restore(layout, worldPositionStays && layout.Count > 0 && layout[0].t == t ? 1 : 0, true);
             t.Invalidate();
             // Activation follows the hierarchy.
             bool nowActive = t.GameObject.ActiveInHierarchy;

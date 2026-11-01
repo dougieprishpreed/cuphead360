@@ -7,7 +7,7 @@ pressfor A 84 1700
 hold LX -1 300
 pressuntil scene_map_world_1 A 60 900
 wait 120
-goto Veggies 0.5 1800
+goto Veggies 0.6 3000
 press A
 wait 60
 press Left

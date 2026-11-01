@@ -77,6 +77,22 @@ namespace Cuphead360.Engine
             public int Sequence;
             public string Kind = "sprite";
             public int GoLayer;
+            /// <summary>Stencil state from the material (UGUI masks): ref, comp, op, readMask, writeMask, colorMask; null when off.</summary>
+            public int[] Stencil;
+        }
+
+        static readonly int stencilCompId = ShaderProps.Id("_StencilComp"), stencilId = ShaderProps.Id("_Stencil"), stencilOpId = ShaderProps.Id("_StencilOp"),
+            stencilReadId = ShaderProps.Id("_StencilReadMask"), stencilWriteId = ShaderProps.Id("_StencilWriteMask"), colorMaskId = ShaderProps.Id("_ColorMask");
+
+        /// <summary>The stencil test and writes a UI material asks for (CompareFunction / StencilOp codes), or null for none.</summary>
+        static int[] StencilOf(Material m)
+        {
+            var ms = MaterialState.Of(m);
+            if (ms == null) return null;
+            int F(int id, int def) => ms.Floats.TryGetValue(id, out float v) ? (int)v : def;
+            int comp = F(stencilCompId, 8), op = F(stencilOpId, 0), colorMask = F(colorMaskId, 15);
+            if ((comp == 8 || comp == 0) && op == 0 && colorMask == 15) return null;
+            return new[] { F(stencilId, 0), comp == 0 ? 8 : comp, op, F(stencilReadId, 255), F(stencilWriteId, 255), colorMask };
         }
 
         public sealed class View
@@ -98,11 +114,10 @@ namespace Cuphead360.Engine
             cams.Sort((a, b) => a.Depth.CompareTo(b.Depth));   // stable: creation order breaks ties
             var renderers = new List<NSpriteRenderer>();
             var canvases = new List<NCanvas>();
-            foreach (var o in Objects.Live())
-            {
-                if (o is NSpriteRenderer sr && sr.Enabled && sr.Sprite != null && sr.GameObject != null && sr.GameObject.ActiveInHierarchy) renderers.Add(sr);
-                else if (o is NCanvas cv && cv.Enabled && cv.GameObject != null && cv.GameObject.ActiveInHierarchy && cv.IsRoot) canvases.Add(cv);
-            }
+            foreach (var sr in Typed.SpriteRenderers)
+                if (sr.Enabled && sr.Sprite != null && sr.GameObject != null && sr.GameObject.ActiveInHierarchy) renderers.Add(sr);
+            foreach (var cv in Typed.Canvases)
+                if (cv.Enabled && cv.GameObject != null && cv.GameObject.ActiveInHierarchy && cv.IsRoot) canvases.Add(cv);
             if (Environment.GetEnvironmentVariable("CH360_TRACE_UI") == "1")
                 foreach (var cv in canvases)
                 {
@@ -176,12 +191,14 @@ namespace Cuphead360.Engine
             var tris = new int[info.Triangles.Length];
             for (int i = 0; i < tris.Length; i++) tris[i] = info.Triangles[i];
             var pos = sr.GameObject.Transform.Position;
+            float depth = cam.WorldToViewport(pos).z;
+            if (depth < cam.Near || depth > cam.Far) return null;   // outside the clip planes
             return new Item
             {
                 Name = sr.GameObject.Name + " [" + info.Name + "]", Texture = tex, Material = sr.Materials.Length > 0 ? sr.Materials[0] : null,
                 Screen = screen, Uv = uv, Triangles = tris, Tint = sr.Color,
                 Layer = SortingLayers.Index(sr.SortingLayerID), Order = sr.SortingOrder,
-                Depth = cam.WorldToViewport(pos).z, GoLayer = sr.GameObject.Layer,
+                Depth = depth, GoLayer = sr.GameObject.Layer,
             };
         }
 
@@ -191,10 +208,13 @@ namespace Cuphead360.Engine
             int depth = 0;
             int layer = SortingLayers.Index(root.SortingLayerID), order = root.SortingOrder;
             float d = cam != null ? cam.WorldToViewport(root.GameObject.Transform.Position).z : 0f;
+            // A canvas on or behind the camera's near plane (or past the far one) is clipped away.
+            if (cam != null && (d < cam.Near || d > cam.Far)) return list;
             void Walk(NTransform t)
             {
                 var go = t.GameObject;
                 if (!go.ActiveSelf) return;
+                List<Item> pops = null;
                 foreach (var c in go.Components)
                     if (c is NCanvasRenderer cr && !cr.Destroyed)
                     {
@@ -225,10 +245,21 @@ namespace Cuphead360.Engine
                             {
                                 Name = go.Name, Texture = tex, Material = mat, Screen = screen, Uv = uv, Colors = mesh.Colors,
                                 Triangles = mesh.SubMeshes[sm], Tint = tint, Layer = layer, Order = order, Depth = d, Kind = "ui", GoLayer = go.Layer,
+                                Stencil = StencilOf(mat),
                             });
                         }
+                        // Pop materials draw after the children (a Mask clearing its stencil).
+                        foreach (var pm in cr.PopMaterials)
+                            if (pm != null && mesh.SubMeshes.Count > 0)
+                                (pops ??= new List<Item>()).Add(new Item
+                                {
+                                    Name = go.Name + " (pop)", Texture = cr.Texture, Material = pm, Screen = screen, Uv = uv, Colors = mesh.Colors,
+                                    Triangles = mesh.SubMeshes[0], Tint = tint, Layer = layer, Order = order, Depth = d, Kind = "ui", GoLayer = go.Layer,
+                                    Stencil = StencilOf(pm),
+                                });
                     }
                 foreach (var ch in t.Children) Walk(ch);
+                if (pops != null) list.AddRange(pops);
             }
             Walk(root.GameObject.Transform);
             return list;
@@ -308,6 +339,7 @@ namespace Cuphead360.Engine
                         foreach (var kv in ms.Vectors) { if (!first) sb.Append(','); first = false; sb.Append(S(ShaderProps.Name(kv.Key))).Append(":[").Append(F(kv.Value.x)).Append(',').Append(F(kv.Value.y)).Append(',').Append(F(kv.Value.z)).Append(',').Append(F(kv.Value.w)).Append(']'); }
                         sb.Append('}');
                     }
+                    if (it.Stencil != null) sb.Append(",\"stencil\":[").Append(string.Join(",", it.Stencil)).Append(']');
                     sb.Append(",\"tint\":[").Append(F(it.Tint.r)).Append(',').Append(F(it.Tint.g)).Append(',').Append(F(it.Tint.b)).Append(',').Append(F(it.Tint.a)).Append(']')
                       .Append(",\"layer\":").Append(it.Layer).Append(",\"order\":").Append(it.Order).Append(",\"depth\":").Append(F(it.Depth));
                     sb.Append(",\"xy\":[");

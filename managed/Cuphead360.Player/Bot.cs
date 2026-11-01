@@ -122,10 +122,28 @@ namespace Cuphead360.Player
                             var me = PlayerPosition();
                             if (target == null || me == null) { if (t > timeout) { Next("TIMEOUT (no " + (target == null ? "target" : "player") + ")"); continue; } return f; }
                             var d = new Vector2(target.Value.x - me.Value.x, target.Value.y - me.Value.y);
-                            if (d.magnitude <= radius) { Next($"reached ({me.Value.x:0.00},{me.Value.y:0.00})"); continue; }
-                            if (t > timeout) { Next($"TIMEOUT at ({me.Value.x:0.00},{me.Value.y:0.00}), {d.magnitude:0.00} away"); continue; }
-                            var n = d.normalized;
+                            if (d.magnitude <= radius) { path = null; Next($"reached ({me.Value.x:0.00},{me.Value.y:0.00})"); continue; }
+                            if (t > timeout) { path = null; Next($"TIMEOUT at ({me.Value.x:0.00},{me.Value.y:0.00}), {d.magnitude:0.00} away"); continue; }
+                            // Walk a path around solid scenery (planned with the game's own colliders), replanned when stuck.
+                            var here = new Vector2(me.Value.x, me.Value.y);
+                            if (path == null || t - planned > 240 || (t - planned > 30 && (here - lastHere).magnitude < 0.002f && stuckFrames++ > 20))
+                            {
+                                path = Plan(here, new Vector2(target.Value.x, target.Value.y), radius);
+                                planned = t; stuckFrames = 0;
+                                if (path == null) { Console.WriteLine($"BOT no path from ({here.x:0.00},{here.y:0.00}) to {s[1]}"); path = new List<Vector2> { new Vector2(target.Value.x, target.Value.y) }; }
+                            }
+                            lastHere = here;
+                            Vector2 aim = new Vector2(target.Value.x, target.Value.y);
+                            if (path != null)
+                            {
+                                while (path.Count > 1 && (path[0] - here).magnitude < 0.12f) path.RemoveAt(0);
+                                aim = path[0];
+                            }
+                            var n = (aim - here).normalized;
                             p.LX = n.x; p.LY = n.y;
+                            // Not moving (a dialogue or prompt holds the player): advance it with A.
+                            if ((here - lastMoved).magnitude > 0.01f) { lastMoved = here; stillSince = t; }
+                            if (t - stillSince > 150 && d.magnitude > radius + 1f && (t - stillSince) % 45 < 6) p.Buttons |= PadButton.A;
                             return f;
                         }
                     case "fight":
@@ -144,6 +162,88 @@ namespace Cuphead360.Player
                 }
             }
             return f;
+        }
+
+        Vector2 lastMoved; int stillSince;
+        List<Vector2> path;
+        int planned, stuckFrames;
+        Vector2 lastHere;
+
+        /// <summary>A* on a grid around the start and goal, cells free when the player's collider fits there.</summary>
+        static List<Vector2> Plan(Vector2 from, Vector2 to, float goalRadius)
+        {
+            NCollider2D body = null;
+            foreach (var o in Objects.Live())
+                if (o is NBehaviour b && b.GameObject != null && b.GameObject.ActiveInHierarchy && Array.IndexOf(playerTypes, b.Managed.GetType().Name) >= 0)
+                    foreach (var c in b.GameObject.Components) if (c is NCollider2D col && !col.IsTrigger) { body = col; break; }
+            float r = 0.15f;
+            if (body != null) { body.Shapes(); r = Math.Max(body.AABB.width, body.AABB.height) * 0.5f; }
+            float cell = Math.Max(0.08f, r * 0.6f);
+            var solids = new List<NCollider2D>();
+            foreach (var c in Cuphead360.Engine.Physics.Colliders())
+                if (!c.IsTrigger && c != body && (body == null || c.Rigidbody != body.Rigidbody)
+                    && !c.GameObject.Components.Exists(k => k is NCamera))   // camera bounds move with the camera
+                { c.Shapes(); solids.Add(c); }
+            var free = new Dictionary<(int, int), bool>();
+            bool Free(int x, int y)
+            {
+                if (free.TryGetValue((x, y), out bool v)) return v;
+                var pt = from + new Vector2(x * cell, y * cell);
+                var probe = Shape.Circle(pt, r * 0.95f);
+                var pb = probe.Bounds();
+                v = true;
+                foreach (var c in solids)
+                {
+                    if (body != null && !Cuphead360.Engine.Physics.LayersCollide(body.GameObject.Layer, c.GameObject.Layer)) continue;
+                    if (!c.AABB.Overlaps(pb)) continue;
+                    foreach (var sh in c.World) if (Geometry.Overlap(sh, probe)) { v = false; break; }
+                    if (!v) break;
+                }
+                free[(x, y)] = v;
+                return v;
+            }
+            int gx = (int)Math.Round((to.x - from.x) / cell), gy = (int)Math.Round((to.y - from.y) / cell);
+            int reach = Math.Max(2, (int)(goalRadius / cell));
+            var open = new SortedSet<(float f, int id, int x, int y)>();
+            var g = new Dictionary<(int, int), float>();
+            var came = new Dictionary<(int, int), (int, int)>();
+            int ids = 0;
+            g[(0, 0)] = 0;
+            open.Add((Heur(0, 0), ids++, 0, 0));
+            float Heur(int x, int y) => (float)Math.Sqrt((x - gx) * (x - gx) + (y - gy) * (y - gy));
+            int expanded = 0;
+            (int, int)? end = null;
+            (int, int) closest = (0, 0); float closestH = Heur(0, 0);
+            while (open.Count > 0 && expanded++ < 60000)
+            {
+                var curr = open.Min; open.Remove(curr);
+                float hh = Heur(curr.x, curr.y);
+                if (hh < closestH) { closestH = hh; closest = (curr.x, curr.y); }
+                if (Math.Abs(curr.x - gx) <= reach && Math.Abs(curr.y - gy) <= reach) { end = (curr.x, curr.y); break; }
+                for (int dx = -1; dx <= 1; dx++)
+                    for (int dy = -1; dy <= 1; dy++)
+                    {
+                        if (dx == 0 && dy == 0) continue;
+                        int nx = curr.x + dx, ny = curr.y + dy;
+                        if (!Free(nx, ny)) continue;
+                        if (dx != 0 && dy != 0 && (!Free(curr.x + dx, curr.y) || !Free(curr.x, curr.y + dy))) continue;
+                        float ng = g[(curr.x, curr.y)] + (dx != 0 && dy != 0 ? 1.414f : 1f);
+                        if (g.TryGetValue((nx, ny), out float old) && old <= ng) continue;
+                        g[(nx, ny)] = ng; came[(nx, ny)] = (curr.x, curr.y);
+                        open.Add((ng + Heur(nx, ny), ids++, nx, ny));
+                    }
+            }
+            // The goal may sit inside a building's collider (map level entrances): go as close as the scenery allows.
+            if (end == null && closest != (0, 0) && closestH * cell < 2.5f) end = closest;
+            if (end == null) return null;
+            var cells = new List<(int, int)>();
+            for (var c = end.Value; ; c = came[c]) { cells.Add(c); if (!came.ContainsKey(c)) break; }
+            cells.Reverse();
+            var pts = new List<Vector2>();
+            for (int i = 1; i < cells.Count; i += 2) pts.Add(from + new Vector2(cells[i].Item1 * cell, cells[i].Item2 * cell));
+            if (end.Value == closest && closestH > reach) pts.Add(from + new Vector2(end.Value.Item1 * cell, end.Value.Item2 * cell));
+            else pts.Add(to);
+            return pts;
         }
 
         string fightScene;
@@ -226,10 +326,21 @@ namespace Cuphead360.Player
             if (t < dashUntil) p.Buttons |= PadButton.Y;   // Dash (Rewired map: gamepad template top row 2)
         }
 
+        /// <summary>A GameObject's position, or for a map entrance the point the game measures interaction from.</summary>
         static Vector3? FindObject(string name)
         {
             foreach (var o in Objects.Live())
-                if (o is NGameObject g && g.Name == name && g.ActiveInHierarchy) return g.Transform.Position;
+                if (o is NGameObject g && g.Name == name && g.ActiveInHierarchy)
+                {
+                    var pos = g.Transform.Position;
+                    foreach (var c in g.Components)
+                    {
+                        if (!(c is NBehaviour b)) continue;
+                        var fi = b.Managed.GetType().GetField("interactionPoint");
+                        if (fi != null && fi.FieldType == typeof(Vector2)) { var ip = (Vector2)fi.GetValue(b.Managed); return pos + new Vector3(ip.x, ip.y, 0); }
+                    }
+                    return pos;
+                }
             return null;
         }
 

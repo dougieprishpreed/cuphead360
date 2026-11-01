@@ -138,8 +138,12 @@ namespace Cuphead360.Engine
             ((int*)rec.Block)[0] = slot;
             ((int*)rec.Block)[1] = rec.InstanceId;
             managed.m_CachedPtr = rec.Block;
+            byId[rec.InstanceId] = rec;
+            Typed.Add(rec);
             return rec;
         }
+
+        static readonly Dictionary<int, NObject> byId = new Dictionary<int, NObject>();
 
         /// <summary>The record behind a live object, or null for null / destroyed objects.</summary>
         public static NObject Of(UObject o)
@@ -152,12 +156,7 @@ namespace Cuphead360.Engine
         public static NComponent Comp(UObject o) => Of(o) as NComponent;
         public static NTransform Tr(UObject o) => Of(o) as NTransform;
 
-        public static NObject ByInstanceId(int id)
-        {
-            for (int i = 1; i < table.Count; i++)
-                if (table[i] != null && table[i].InstanceId == id) return table[i];
-            return null;
-        }
+        public static NObject ByInstanceId(int id) => byId.TryGetValue(id, out var r) ? r : null;
 
         /// <summary>Final release: Unity's managed object becomes "fake null".</summary>
         public static void Release(NObject rec)
@@ -169,6 +168,8 @@ namespace Cuphead360.Engine
             rec.Block = IntPtr.Zero;
             table[rec.Slot] = null;
             freeSlots.Push(rec.Slot);
+            byId.Remove(rec.InstanceId);
+            Typed.Remove(rec);
         }
 
         public static IEnumerable<NObject> Live()
@@ -303,6 +304,43 @@ namespace Cuphead360.Engine
         {
             float n = MathF.Sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
             return n < 1e-9f ? Quaternion.identity : new Quaternion(q.x / n, q.y / n, q.z / n, q.w / n);
+        }
+    }
+
+    /// <summary>Live records of the types hot paths scan every frame (physics, rendering, animation).</summary>
+    public static class Typed
+    {
+        public static readonly List<NCollider2D> Colliders = new List<NCollider2D>();
+        public static readonly List<NSpriteRenderer> SpriteRenderers = new List<NSpriteRenderer>();
+        public static readonly List<NCanvas> Canvases = new List<NCanvas>();
+        public static readonly List<NCamera> Cameras = new List<NCamera>();
+        public static readonly List<NBehaviour> Behaviours = new List<NBehaviour>();
+        public static readonly List<NGameObject> GameObjects = new List<NGameObject>();
+
+        public static void Add(NObject r)
+        {
+            switch (r)
+            {
+                case NCollider2D c: Colliders.Add(c); break;
+                case NSpriteRenderer s: SpriteRenderers.Add(s); break;
+                case NCanvas cv: Canvases.Add(cv); break;
+                case NCamera cam: Cameras.Add(cam); break;
+                case NBehaviour b: Behaviours.Add(b); break;
+                case NGameObject g: GameObjects.Add(g); break;
+            }
+        }
+
+        public static void Remove(NObject r)
+        {
+            switch (r)
+            {
+                case NCollider2D c: Colliders.Remove(c); break;
+                case NSpriteRenderer s: SpriteRenderers.Remove(s); break;
+                case NCanvas cv: Canvases.Remove(cv); break;
+                case NCamera cam: Cameras.Remove(cam); break;
+                case NBehaviour b: Behaviours.Remove(b); break;
+                case NGameObject g: GameObjects.Remove(g); break;
+            }
         }
     }
 }

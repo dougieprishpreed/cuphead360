@@ -124,8 +124,17 @@ def composite(canvas, layer, x0, y0):
     region[...] = layer[..., :3] * a + region * (1 - a)
 
 
-def blend_recipe(shader, tex, col):
-    """Cuphead's sprite shaders by what they do (the converter keeps names only)."""
+def blend_recipe(shader, tex, col, ui=False):
+    """Cuphead's sprite shaders by what they do (the converter keeps names only).
+    On UI graphics the canvas alpha (folded into the colour) also fades the blend."""
+    out = _blend(shader, tex, col)
+    blend = any(k in shader for k in ("SpriteBlendDynamic/", "ScreenBlend", "MultiplyBlend", "OverlayBlend")) and "ScreenIgnoreColor" not in shader
+    if ui and blend:
+        out[..., 3:4] *= col[3]
+    return out
+
+
+def _blend(shader, tex, col):
     t, c = tex, col
     if "SpriteBlendDynamic/Screen" in shader or shader.endswith("/ScreenBlend"):
         rgb = 1 - (1 - t[..., :3]) * (1 - c[:3])
@@ -141,7 +150,7 @@ def blend_recipe(shader, tex, col):
     return t * c
 
 
-def draw_group(canvas, tex_img, pts, uvs, tris, tint, colors, view, H, sdf=None, shader=""):
+def draw_group(canvas, tex_img, pts, uvs, tris, tint, colors, view, H, sdf=None, shader="", ui=False):
     tw, th = tex_img.size if tex_img is not None else (1, 1)
     dpts = [(x, H - y) for x, y in pts]
     spts = [(u * tw, (1 - v) * th) for u, v in uvs] if uvs else [(0, 0)] * len(pts)
@@ -190,9 +199,25 @@ def draw_group(canvas, tex_img, pts, uvs, tris, tint, colors, view, H, sdf=None,
             rgb = np.where(alpha > 1e-6, rgb / np.maximum(fa + (oa - fa), 1e-6), 0)
             layer = np.concatenate([rgb.astype(np.float32), alpha.astype(np.float32)], axis=-1)
         else:
-            layer = blend_recipe(shader, warped, col)
+            layer = blend_recipe(shader, warped, col, ui)
         layer[..., 3:4] *= m
         composite(canvas, layer, x0, y0)
+
+
+STENCIL_CMP = {1: lambda r, s: np.zeros_like(s, bool), 2: lambda r, s: r < s, 3: lambda r, s: r == s, 4: lambda r, s: r <= s,
+               5: lambda r, s: r > s, 6: lambda r, s: r != s, 7: lambda r, s: r >= s, 8: lambda r, s: np.ones_like(s, bool)}
+
+
+def coverage(pts, tris, W, H):
+    """Pixels the item's triangles cover (rows top-down), for stencil writes and tests."""
+    from PIL import ImageDraw
+    m = Image.new("L", (W, H), 0)
+    d = ImageDraw.Draw(m)
+    for i in range(0, len(tris) - 2, 3):
+        tri = [(pts[k][0], H - pts[k][1]) for k in tris[i:i + 3] if k < len(pts)]
+        if len(tri) == 3:
+            d.polygon(tri, fill=255)
+    return np.asarray(m) > 0
 
 
 def render(frame, textures):
@@ -200,6 +225,7 @@ def render(frame, textures):
     canvas = np.zeros((H, W, 3), dtype=np.float32)
     for v in frame["views"]:
         rect = v["rect"]
+        stencil = np.zeros((H, W), dtype=np.uint8)   # each camera starts with a clear stencil (UGUI masks)
         if v["clear"] in (1, 2):
             bg = v.get("background", [0, 0, 0, 1])
             x0, y0, w, h = [int(round(c)) for c in rect]
@@ -229,7 +255,24 @@ def render(frame, textures):
                 sdf = (face, outline, float(p.get("_OutlineWidth", 0)), float(p.get("_FaceDilate", 0)))
             if img is None and tex is not None:
                 continue
-            draw_group(canvas, img, pts, uvs, it["tris"], it["tint"], colors, rect, H, sdf, it.get("shader") or "")
+            st = it.get("stencil")
+            ui = it.get("kind") == "ui"
+            if st is None:
+                draw_group(canvas, img, pts, uvs, it["tris"], it["tint"], colors, rect, H, sdf, it.get("shader") or "", ui)
+                continue
+            # ref, comp, op, readMask, writeMask, colorMask (Unity codes).
+            ref, comp, op, rmask, wmask, cmask = st
+            passed = STENCIL_CMP.get(comp, STENCIL_CMP[8])(np.uint8(ref & rmask), stencil & rmask)
+            if cmask:
+                before = canvas.copy()
+                draw_group(canvas, img, pts, uvs, it["tris"], it["tint"], colors, rect, H, sdf, it.get("shader") or "", ui)
+                canvas[:] = np.where(passed[..., None], canvas, before)
+            if op:
+                hit = passed & coverage(pts, it["tris"], W, H)
+                cur = stencil[hit].astype(np.int32)
+                new = {1: 0 * cur, 2: np.full_like(cur, ref), 3: np.minimum(cur + 1, 255), 4: np.maximum(cur - 1, 0),
+                       5: 255 - cur, 6: (cur + 1) & 255, 7: (cur - 1) & 255}.get(op, cur)
+                stencil[hit] = ((cur & ~wmask) | (new & wmask)).astype(np.uint8)
     return Image.fromarray((np.clip(canvas, 0, 1) * 255 + 0.5).astype(np.uint8), "RGB")
 
 

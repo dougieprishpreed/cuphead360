@@ -76,7 +76,7 @@ namespace Cuphead360.Engine
             Clock.DeltaTime = dt * Clock.TimeScale;
             Clock.Time += Clock.DeltaTime;
 
-            SceneLoader.Pump();
+            P(0); SceneLoader.Pump();
             Atlases.Flush();
             Inputs.Update();
             InputUpdate?.Invoke();
@@ -90,30 +90,51 @@ namespace Cuphead360.Engine
                 Clock.FixedTime += Clock.FixedDeltaTime;
                 Clock.FixedStepCount++;
                 Clock.FixedUnscaledTime += Clock.FixedDeltaTime;
-                RunStarts();
+                P(1); RunStarts();
                 ForEach(b => b.Messages.FixedUpdate, null);
                 Animators.FixedStep();
-                Physics.Step(Clock.FixedDeltaTime);
+                P(2); Physics.Step(Clock.FixedDeltaTime);
                 PhysicsStep?.Invoke();
-                ResumeCoroutines(fixedPhase: true, endOfFrame: false);
+                P(1); ResumeCoroutines(fixedPhase: true, endOfFrame: false);
             }
             Clock.InFixedTimeStep = false;
 
-            RunStarts();
+            P(3); RunStarts();
             ForEach(b => b.Messages.Update, null);
             RunInvokes();
             ResumeCoroutines(fixedPhase: false, endOfFrame: false);
             AnimationStep?.Invoke();
-            Animators.Step();
+            P(4); Animators.Step();
             Atlases.Flush();
-            RunStarts();
+            P(5); RunStarts();
             ForEach(b => b.Messages.LateUpdate, null);
-            UI.WillRender();
+            P(6); UI.WillRender();
             Atlases.Flush();
-            if (Capture.Wanted(Clock.FrameCount)) Capture.Write(Clock.FrameCount, RenderList.Build());
+            P(7); if (Capture.Wanted(Clock.FrameCount)) Capture.Write(Clock.FrameCount, RenderList.Build());
             RenderFrame?.Invoke();
             ResumeCoroutines(fixedPhase: false, endOfFrame: true);
             ProcessDestroys();
+            P(-1);
+        }
+
+        // Phase timing (CH360_PROFILE=1): load, fixed scripts, physics, update, animators, late, UI, render/destroy.
+        public static readonly bool Profile = Environment.GetEnvironmentVariable("CH360_PROFILE") == "1";
+        static readonly string[] phaseNames = { "pump", "fixed", "physics", "update", "animators", "late", "ui", "end" };
+        public static readonly double[] PhaseMs = new double[8];
+        static int phase = -1;
+        static long phaseStart;
+        static void P(int next)
+        {
+            if (!Profile) return;
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (phase >= 0) PhaseMs[phase] += (now - phaseStart) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            phase = next; phaseStart = now;
+        }
+        public static string ProfileReport(int frames)
+        {
+            var sb = new System.Text.StringBuilder("PROFILE ms/frame:");
+            for (int i = 0; i < 8; i++) { sb.Append(' ').Append(phaseNames[i]).Append('=').Append((PhaseMs[i] / Math.Max(1, frames)).ToString("0.00")); PhaseMs[i] = 0; }
+            return sb.ToString();
         }
 
         static void ForEach(Func<NBehaviour, System.Reflection.MethodInfo> pick, object arg)

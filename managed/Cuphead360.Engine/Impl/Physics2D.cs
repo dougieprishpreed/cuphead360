@@ -381,6 +381,32 @@ namespace Cuphead360.Engine
             return (p - (a + e * t)).magnitude;
         }
 
+        /// <summary>
+        /// Penetration of a into b: the translation that moves a out (zero if
+        /// they don't overlap). From the Minkowski difference a - b: the
+        /// nearest boundary point to the origin.
+        /// </summary>
+        public static Vector2 Separation(Shape a, Shape b)
+        {
+            var negB = new Shape { Pts = Array.ConvertAll(b.Pts, p => -p), R = b.R };
+            var md = Minkowski(a, negB);
+            if (md.Length < 3) return Vector2.zero;
+            float best = float.MaxValue; Vector2 bestN = Vector2.zero;
+            for (int i = 0; i < md.Length; i++)
+            {
+                var p0 = md[i]; var p1 = md[(i + 1) % md.Length];
+                var e = p1 - p0;
+                var n = new Vector2(e.y, -e.x);
+                float len = n.magnitude;
+                if (len < 1e-9f) continue;
+                n /= len;
+                float d = Vector2.Dot(p0, n);   // distance from the origin to this edge's line (positive: origin inside)
+                if (d < 0) return Vector2.zero;   // origin outside this edge: no overlap
+                if (d < best) { best = d; bestN = n; }
+            }
+            return best == float.MaxValue ? Vector2.zero : -bestN * best;
+        }
+
         /// <summary>Do two shapes overlap (touching counts)?</summary>
         public static bool Overlap(Shape a, Shape b)
         {
@@ -427,8 +453,8 @@ namespace Cuphead360.Engine
 
         public static List<NCollider2D> Colliders()
         {
-            var l = new List<NCollider2D>();
-            foreach (var o in Objects.Live()) if (o is NCollider2D c && c.Live) l.Add(c);
+            var l = new List<NCollider2D>(Typed.Colliders.Count);
+            foreach (var c in Typed.Colliders) if (c.Live) l.Add(c);
             return l;
         }
 
@@ -603,6 +629,8 @@ namespace Cuphead360.Engine
                     t.Invalidate();
                 }
             }
+            // Dynamic bodies are pushed out of the solid colliders they moved into.
+            Resolve();
             // Contacts.
             var cols = Colliders();
             foreach (var c in cols) c.Shapes();
@@ -647,6 +675,52 @@ namespace Cuphead360.Engine
         }
 
         static bool Alive(NCollider2D c) => !c.Destroyed && c.GameObject != null && !c.GameObject.Destroyed;
+
+        /// <summary>
+        /// Collision response for dynamic bodies against solid (non-trigger)
+        /// colliders: separate along the minimum translation vector and remove
+        /// the velocity into the surface. Static, kinematic and other bodies'
+        /// colliders all block; a few iterations settle corners.
+        /// </summary>
+        static void Resolve()
+        {
+            List<NCollider2D> all = null;
+            foreach (var b in bodies)
+            {
+                if (b.BodyType != RigidbodyType2D.Dynamic || !b.Simulated || !b.Enabled || b.GameObject == null || !b.GameObject.ActiveInHierarchy) continue;
+                all ??= Colliders();
+                var mine = all.FindAll(c => !c.IsTrigger && c.Rigidbody == b);
+                if (mine.Count == 0) continue;
+                var t = b.GameObject.Transform;
+                for (int iter = 0; iter < 4; iter++)
+                {
+                    Vector2 push = Vector2.zero;
+                    foreach (var c in mine)
+                    {
+                        c.Shapes();
+                        foreach (var o in all)
+                        {
+                            if (o.IsTrigger || o.Rigidbody == b || o.UsedByEffector) continue;
+                            if (!LayersCollide(c.GameObject.Layer, o.GameObject.Layer) || Ignored(c, o)) continue;
+                            o.Shapes();
+                            if (!c.AABB.Overlaps(o.AABB)) continue;
+                            foreach (var sa in c.World)
+                                foreach (var sb in o.World)
+                                {
+                                    var sep = Geometry.Separation(Moved(sa, push), sb);
+                                    if (sep.sqrMagnitude > 1e-12f) push += sep;
+                                }
+                        }
+                    }
+                    if (push.sqrMagnitude < 1e-12f) break;
+                    var p = t.Position;
+                    SetWorld(t, new Vector2(p.x, p.y) + push);
+                    var n = push.normalized;
+                    float into = Vector2.Dot(b.Velocity, n);
+                    if (into < 0) b.Velocity -= n * into;
+                }
+            }
+        }
 
         static void SetWorld(NTransform t, Vector2 p)
         {
