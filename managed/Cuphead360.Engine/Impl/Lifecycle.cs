@@ -181,6 +181,9 @@ namespace Cuphead360.Engine
         public static Action<NComponent, NComponent, Dictionary<NObject, NObject>> CopyStateHook;
         public static void CopyState(NComponent src, NComponent dst, Dictionary<NObject, NObject> map) => CopyStateHook?.Invoke(src, dst, map);
         public static Action<NObject, NObject> CopyAssetHook;
+        /// <summary>Scene/prefab load: a built-in component's converted fields.</summary>
+        public static Action<NComponent, ChobObject, SceneBuild> LoadedHook;
+        public static void OnLoaded(NComponent c, ChobObject co, SceneBuild b) => LoadedHook?.Invoke(c, co, b);
         public static void CopyAsset(NObject src, NObject dst) => CopyAssetHook?.Invoke(src, dst);
     }
 }

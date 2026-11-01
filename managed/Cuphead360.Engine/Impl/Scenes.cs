@@ -57,6 +57,8 @@ namespace Cuphead360.Engine
 
         public static void Forget(NGameObject go) => RemoveRoot(go);
 
+        public static void DropUnloaded() => scenes.RemoveAll(s => !s.Loaded);
+
         public static void MarkDontDestroy(NGameObject go)
         {
             // Only roots move; a child follows its root.

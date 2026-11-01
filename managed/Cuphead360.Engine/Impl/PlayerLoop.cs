@@ -76,6 +76,7 @@ namespace Cuphead360.Engine
             Clock.DeltaTime = dt * Clock.TimeScale;
             Clock.Time += Clock.DeltaTime;
 
+            SceneLoader.Pump();
             InputUpdate?.Invoke();
 
             // Fixed steps catch up with scaled time.

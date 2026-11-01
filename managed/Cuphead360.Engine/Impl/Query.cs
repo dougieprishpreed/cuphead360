@@ -305,7 +305,9 @@ namespace Cuphead360.Engine
         public static bool IsSerialized(FieldInfo fi)
         {
             if (fi.IsStatic || fi.IsInitOnly || fi.IsLiteral || fi.IsNotSerialized) return false;
-            if (!fi.IsPublic && fi.GetCustomAttribute<SerializeField>() == null) return false;
+            var dt = fi.DeclaringType.IsGenericType ? fi.DeclaringType.GetGenericTypeDefinition() : fi.DeclaringType;
+            bool wasPublic = fi.IsPublic && !Publicized.Fields.Contains(dt.FullName + "::" + fi.Name);
+            if (!wasPublic && fi.GetCustomAttribute<SerializeField>() == null) return false;
             return IsSerializableType(fi.FieldType);
         }
 
@@ -313,11 +315,22 @@ namespace Cuphead360.Engine
         {
             if (t.IsPrimitive || t.IsEnum || t == typeof(string)) return t != typeof(IntPtr) && t != typeof(UIntPtr);
             if (typeof(UObject).IsAssignableFrom(t)) return true;
+            if (typeof(Delegate).IsAssignableFrom(t)) return false;
+            if (t == typeof(object)) return false;
             if (t.IsArray) return t.GetArrayRank() == 1 && IsElementType(t.GetElementType());
             if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(List<>)) return IsElementType(t.GetGenericArguments()[0]);
             if (t.Namespace == "UnityEngine" && t.IsValueType) return true;   // Vector3, Color, Rect, ...
             if (t.IsGenericType || t.IsAbstract || t.IsInterface) return false;
             return t.GetCustomAttribute<SerializableAttribute>() != null || t.IsSerializable;
+        }
+
+        /// <summary>Unity stops serializing nested [Serializable] classes below depth 7.</summary>
+        public static bool DepthAllows(Type t, int depth)
+        {
+            if (depth <= 7) return true;
+            if (t.IsArray) t = t.GetElementType();
+            else if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(List<>)) t = t.GetGenericArguments()[0];
+            return t.IsPrimitive || t.IsEnum || t == typeof(string) || typeof(UObject).IsAssignableFrom(t) || (t.IsValueType && t.Namespace == "UnityEngine");
         }
 
         static bool IsElementType(Type e) => !(e.IsArray || (e.IsGenericType && e.GetGenericTypeDefinition() == typeof(List<>))) && IsSerializableType(e);
@@ -355,7 +368,7 @@ namespace Cuphead360.Engine
             }
             if (t.IsValueType && t.Namespace == "UnityEngine") return v;
             // [Serializable] class or struct: copied by value, field by field.
-            var copy = t.IsValueType ? Activator.CreateInstance(v.GetType()) : Activator.CreateInstance(v.GetType(), true);
+            var copy = FieldDecoder.New(v.GetType());
             foreach (var f in Fields(v.GetType()))
                 f.SetValue(copy, CopyValue(f.GetValue(v), f.FieldType, map, depth + 1));
             return copy;

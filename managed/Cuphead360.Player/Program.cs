@@ -17,6 +17,8 @@ namespace Cuphead360.Player
                 case "census": return Census(args.Skip(1).ToArray());
                 case "smoke": return Smoke();
                 case "selftest": return SelfTest.Run();
+                case "run": return Run(args.Skip(1).ToArray());
+                case "fields": return Fields(args.Skip(1).ToArray());
             }
             Console.Error.WriteLine("usage: Cuphead360.Player census [assembly...] | smoke");
             return 2;
@@ -79,6 +81,59 @@ namespace Cuphead360.Player
         }
 
         static void Count(Dictionary<string, int> d, string k) { d.TryGetValue(k, out int n); d[k] = n + 1; }
+
+        /// <summary>
+        /// Boot the original game from converted data: build scene 0, then the
+        /// player loop for --frames frames at 60 Hz. Saves and settings go to
+        /// --save (port-local; the installed game's saves are never touched).
+        /// </summary>
+        static int Run(string[] a)
+        {
+            string data = "work/GameData", save = "work/managed/save";
+            int frames = 600, report = 60;
+            for (int i = 0; i + 1 < a.Length; i += 2)
+                switch (a[i])
+                {
+                    case "--data": data = a[i + 1]; break;
+                    case "--save": save = a[i + 1]; break;
+                    case "--frames": frames = int.Parse(a[i + 1]); break;
+                    case "--report": report = int.Parse(a[i + 1]); break;
+                }
+            Platform.SaveRoot = System.IO.Path.GetFullPath(save);
+            Platform.Guard(Platform.SaveRoot);
+            AssetDb.Init(System.IO.Path.GetFullPath(data));
+            Cuphead360.Engine.SceneLoader.Load(0, false);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            for (int f = 1; f <= frames && !Icalls.QuitRequested; f++)
+            {
+                PlayerLoop.Frame(1f / 60f);
+                if (report > 0 && f % report == 0)
+                    Console.WriteLine($"FRAME {f} t={UnityEngine.Time.time:0.00} scene={Cuphead360.Engine.Scenes.Active?.Name} objects={Objects.LiveCount} exceptions={Exceptions.Count} missing={Icall.MissingCount}");
+            }
+            Console.WriteLine($"RUN done: {frames} frames in {sw.Elapsed.TotalSeconds:0.0} s; scene loads {Cuphead360.Engine.SceneLoader.Loads}; active scene {Cuphead360.Engine.Scenes.Active?.Name}; "
+                + $"exceptions {Exceptions.Count}; fields decoded {FieldDecoder.Decoded}, mismatched {FieldDecoder.Mismatched}; data problems {AssetDb.Problems.Count}; missing engine methods {Icall.MissingCount}");
+            foreach (var kv in Icall.Report()) Console.WriteLine("  missing " + kv.Key + " x" + kv.Value);
+            return 0;
+        }
+
+        /// <summary>Trace the field decode of one converted object: fields FILE PATHID [--data DIR].</summary>
+        static int Fields(string[] a)
+        {
+            string data = a.Length > 3 && a[2] == "--data" ? a[3] : "work/GameData";
+            Platform.SaveRoot = System.IO.Path.GetFullPath("work/managed/save");
+            AssetDb.Init(System.IO.Path.GetFullPath(data));
+            var f = AssetDb.File(a[0]);
+            var co = f.Objects[long.Parse(a[1])];
+            var raw = Tree.Get(co.Tree, "_raw") as byte[];
+            Console.WriteLine($"{co.Type} {Tree.Str(co.Tree, "m_Name")} raw={raw?.Length} script={AssetDb.ScriptType(co)}");
+            FieldDecoder.Trace = Console.WriteLine;
+            var t = AssetDb.ScriptType(co);
+            var inst = typeof(UnityEngine.ScriptableObject).IsAssignableFrom(t) || typeof(UnityEngine.MonoBehaviour).IsAssignableFrom(t)
+                ? System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(t) : null;
+            FieldDecoder.Apply(inst, co, null);
+            Console.WriteLine($"decoded {FieldDecoder.Decoded} mismatched {FieldDecoder.Mismatched}");
+            return 0;
+        }
 
         static int Smoke()
         {

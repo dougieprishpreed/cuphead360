@@ -37,10 +37,13 @@ namespace Cuphead360.Engine
         /// <summary>Scene handle; 0 after DontDestroyOnLoad.</summary>
         public int Scene;
         public bool DontDestroy;
+        /// <summary>Part of a prefab asset: never awake, updated or found as a scene object.</summary>
+        public bool IsAsset;
         public bool ActiveInHierarchy
         {
             get
             {
+                if (IsAsset) return false;
                 for (var t = Transform; t != null; t = t.Parent)
                     if (!t.GameObject.ActiveSelf) return false;
                 return true;
@@ -53,6 +56,8 @@ namespace Cuphead360.Engine
         public NGameObject GameObject;
         /// <summary>Behaviour.enabled (always true for non-Behaviour components).</summary>
         public bool Enabled = true;
+        /// <summary>The converted object this component was loaded from (null if made at run time).</summary>
+        public ChobObject Data;
     }
 
     public sealed class NTransform : NComponent
