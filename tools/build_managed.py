@@ -68,9 +68,29 @@ def stage_patcher(a):
     run(["dotnet", "build", os.path.join(MANAGED, "Cuphead360.Patcher"), "-c", "Release", "-o", os.path.join(OUT, "patcher"), "-v", "q"])
 
 
+DUMPED = os.path.join(OUT, "dumped")
+
+
 def stage_publicize(a):
+    # The game's Managed folder plus the assemblies the game decrypts and
+    # loads from bytes at run time (Rewired's platform layer), which the
+    # player dumps to work/managed/dumped the first time it meets them.
+    staging = os.path.join(OUT, "input")
+    shutil.rmtree(staging, ignore_errors=True)
+    shutil.copytree(managed_dir(a.game), staging)
+    if os.path.isdir(DUMPED):
+        for f in sorted(os.listdir(DUMPED)):
+            if f.endswith(".dll"):
+                shutil.copy2(os.path.join(DUMPED, f), os.path.join(staging, f))
+                print("publicize: + run-time assembly", f)
     shutil.rmtree(LIB_PUBLIC, ignore_errors=True)
-    patcher("publicize", "--in", managed_dir(a.game), "--out", LIB_PUBLIC)
+    patcher("publicize", "--in", staging, "--out", LIB_PUBLIC)
+    # Rewired's decryption helpers keep their visibility: Rewired finds their
+    # members by reflection with non-public binding flags.
+    if os.path.isdir(DUMPED):
+        for f in sorted(os.listdir(DUMPED)):
+            if f.startswith("Rewired_Config_Manager") and f.endswith(".dll"):
+                shutil.copy2(os.path.join(DUMPED, f), os.path.join(LIB_PUBLIC, f))
 
 
 def stage_gen(a):

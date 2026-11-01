@@ -211,6 +211,8 @@ namespace Cuphead360.Engine
             if (typeof(SpriteRenderer).IsAssignableFrom(t)) return new NSpriteRenderer();
             if (typeof(Renderer).IsAssignableFrom(t)) return new NRenderer();
             if (typeof(Animator).IsAssignableFrom(t)) return new NAnimator();
+            if (typeof(Collider2D).IsAssignableFrom(t)) return new NCollider2D { Kind = NCollider2D.KindOf(t) };
+            if (typeof(Rigidbody2D).IsAssignableFrom(t)) return new NRigidbody2D();
             if (typeof(Canvas).IsAssignableFrom(t)) return new NCanvas();
             if (typeof(CanvasGroup).IsAssignableFrom(t)) return new NCanvasGroup();
             if (typeof(CanvasRenderer).IsAssignableFrom(t)) return new NCanvasRenderer();

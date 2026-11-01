@@ -23,6 +23,38 @@ namespace Cuphead360.Engine
             return dir;
         }
 
+        /// <summary>Where Assembly.Load(byte[]) payloads are written the first time they are seen (build input).</summary>
+        public static string AssemblyDumpDir;
+
+        /// <summary>
+        /// Assembly.Load(byte[]) from game code (Rewired's platform library,
+        /// decrypted at run time). The patched copy built from an earlier dump
+        /// is loaded by name; without one the payload is dumped for the build
+        /// and loaded as is (its native calls are then unpatched).
+        /// </summary>
+        public static System.Reflection.Assembly LoadAssembly(byte[] raw)
+        {
+            Log.Line("PLATFORM Assembly.Load(byte[" + (raw?.Length ?? -1) + "])");
+            string name;
+            using (var pe = new System.Reflection.PortableExecutable.PEReader(new MemoryStream(raw)))
+                name = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader(pe).GetString(
+                    System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader(pe).GetAssemblyDefinition().Name);
+            foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+                if (a.GetName().Name == name && !a.IsDynamic && a.Location.Length > 0) return a;
+            // The patched copy ships next to the player (JIT) or is compiled in (AOT).
+            string local = Path.Combine(AppContext.BaseDirectory, name + ".dll");
+            if (File.Exists(local)) return System.Reflection.Assembly.LoadFrom(local);
+            try { return System.Reflection.Assembly.Load(new System.Reflection.AssemblyName(name)); }
+            catch (FileNotFoundException) { }
+            if (AssemblyDumpDir != null)
+            {
+                Directory.CreateDirectory(AssemblyDumpDir);
+                File.WriteAllBytes(Path.Combine(AssemblyDumpDir, name + ".dll"), raw);
+                Log.Line("PLATFORM dumped " + name + " (" + raw.Length + " bytes) for the build; loaded unpatched this run");
+            }
+            return System.Reflection.Assembly.Load(raw);
+        }
+
         public static string GetFolderPathOption(Environment.SpecialFolder folder, Environment.SpecialFolderOption option) => GetFolderPath(folder);
 
         /// <summary>Refuses any port folder that is (or is inside) a real special folder of this PC.</summary>

@@ -17,7 +17,14 @@ namespace Cuphead360.Player
                 case "census": return Census(args.Skip(1).ToArray());
                 case "smoke": return Smoke();
                 case "selftest": return SelfTest.Run();
-                case "run": return Run(args.Skip(1).ToArray());
+                case "run":
+                    {
+                        // Native input threads (Rewired) would keep the process alive.
+                        int rc = Run(args.Skip(1).ToArray());
+                        Console.Out.Flush();
+                        Environment.Exit(rc);
+                        return rc;
+                    }
                 case "fields": return Fields(args.Skip(1).ToArray());
                 case "resource": return Resource(args.Skip(1).ToArray());
             }
@@ -105,6 +112,21 @@ namespace Cuphead360.Player
                         break;
                     case "--capture-every": Capture.Every = int.Parse(a[i + 1]); break;
                     case "--capture-out": Capture.Path = System.IO.Path.GetFullPath(a[i + 1]); break;
+                    case "--dump-at":
+                        foreach (var f in a[i + 1].Split(',')) dumpAt.Add(int.Parse(f));
+                        break;
+                    case "--bot":
+                        {
+                            var bot = Bot.Load(a[i + 1]);
+                            Inputs.Source = bot.Step;
+                            break;
+                        }
+                    case "--input":
+                        {
+                            var script = InputScript.Load(a[i + 1]);
+                            Inputs.Source = script.At;
+                            break;
+                        }
                 }
             if ((Capture.Frames.Count > 0 || Capture.Every > 0) && Capture.Path == null) Capture.Path = System.IO.Path.GetFullPath("work/preview/capture.jsonl");
             if (Capture.Path != null)
@@ -116,22 +138,55 @@ namespace Cuphead360.Player
             Icalls.SeedRandom(seed);
             Platform.SaveRoot = System.IO.Path.GetFullPath(save);
             Platform.Guard(Platform.SaveRoot);
+            Platform.AssemblyDumpDir = System.IO.Path.GetFullPath("work/managed/dumped");
+            // Unity's dynamic fonts fall back to an OS font for characters no game font has.
+            string arial = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), "arial.ttf");
+            if (System.IO.File.Exists(arial)) FontState.OsFallback = new TrueType(System.IO.File.ReadAllBytes(arial));
             AssetDb.Init(System.IO.Path.GetFullPath(data));
             Cuphead360.Engine.SceneLoader.Load(0, false);
             var sw = System.Diagnostics.Stopwatch.StartNew();
             for (int f = 1; f <= frames && !Icalls.QuitRequested; f++)
             {
                 PlayerLoop.Frame(1f / 60f);
+                if (dumpAt.Contains(f)) DumpState(f);
                 if (report > 0 && f % report == 0)
                     Console.WriteLine($"FRAME {f} t={UnityEngine.Time.time:0.00} scene={Cuphead360.Engine.Scenes.Active?.Name} objects={Objects.LiveCount} exceptions={Exceptions.Count} missing={Icall.MissingCount}");
             }
             Console.WriteLine($"RUN done: {frames} frames in {sw.Elapsed.TotalSeconds:0.0} s; scene loads {Cuphead360.Engine.SceneLoader.Loads}; active scene {Cuphead360.Engine.Scenes.Active?.Name}; "
                 + $"exceptions {Exceptions.Count}; fields decoded {FieldDecoder.Decoded}, mismatched {FieldDecoder.Mismatched}; data problems {AssetDb.Problems.Count}; missing engine methods {Icall.MissingCount}");
+            try
+            {
+                Console.WriteLine($"INPUT Rewired ready={Rewired.ReInput.isReady}" + (Rewired.ReInput.isReady
+                    ? $" joysticks={Rewired.ReInput.controllers.joystickCount} keyboard={Rewired.ReInput.controllers.Keyboard != null} players={Rewired.ReInput.players.playerCount}" : ""));
+            }
+            catch (Exception e) { Console.WriteLine("INPUT Rewired state: " + e.GetType().Name + ": " + e.Message); }
             foreach (var kv in Icall.Report()) Console.WriteLine("  missing " + kv.Key + " x" + kv.Value);
             Console.WriteLine($"PROPS: {Props.Count} property accessors served from the property bag (state only)");
             foreach (var kv in Props.Report()) Console.WriteLine("  props " + kv.Key + " (" + kv.Value + ")");
             foreach (var p in AssetDb.Problems) Console.WriteLine("  data " + p);
             return 0;
+        }
+
+        static readonly HashSet<int> dumpAt = new HashSet<int>();
+
+        /// <summary>Debug report: time scale and every live Animator's state.</summary>
+        static void DumpState(int frame)
+        {
+            Console.WriteLine($"DUMP frame {frame} scene={Cuphead360.Engine.Scenes.Active?.Name} timeScale={UnityEngine.Time.timeScale} dt={UnityEngine.Time.deltaTime}");
+            foreach (var o in Objects.Live())
+            {
+                if (!(o is NAnimator an) || an.GameObject == null) continue;
+                string path = an.GameObject.Name;
+                for (var t = an.GameObject.Transform.Parent; t != null; t = t.Parent) path = t.GameObject.Name + "/" + path;
+                string st = "-";
+                if (an.Data != null && an.Layers.Length > 0)
+                {
+                    var l = an.Layers[0];
+                    var s0 = an.StateAt(0, l.Current.State);
+                    st = (s0 == null ? "?" : an.Data.NameOf(s0.PathId)) + $" t={l.Current.Time:0.00} n={an.Normalized(0, l.Current):0.00}" + (l.Next != null ? " ->" + an.Data.NameOf(an.StateAt(0, l.Next.State)?.PathId ?? 0) : "");
+                }
+                Console.WriteLine($"  animator {path} active={an.GameObject.ActiveInHierarchy} enabled={an.Enabled} mode={an.UpdateMode} speed={an.Speed} init={an.Initialized} state={st}");
+            }
         }
 
         /// <summary>Trace the field decode of one converted object: fields FILE PATHID [--data DIR].</summary>

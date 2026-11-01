@@ -1,0 +1,5 @@
+# Title -> slot select: press A on pad 0 once the title accepts joins (t > 8.5 s).
+connect pad0
+600 pad0 A 6
++120 pad0 A 6
++120 pad0 A 6

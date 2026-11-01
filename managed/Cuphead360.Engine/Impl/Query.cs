@@ -321,6 +321,7 @@ namespace Cuphead360.Engine
             if (t.IsArray) return t.GetArrayRank() == 1 && IsElementType(t.GetElementType());
             if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(List<>)) return IsElementType(t.GetGenericArguments()[0]);
             if (t.Namespace == "UnityEngine" && t.IsValueType) return true;   // Vector3, Color, Rect, ...
+            if (t == typeof(AnimationCurve) || t == typeof(Gradient) || t == typeof(RectOffset)) return true;   // native serialized classes
             if (t.IsGenericType || t.IsAbstract || t.IsInterface) return false;
             return t.GetCustomAttribute<SerializableAttribute>() != null || t.IsSerializable;
         }

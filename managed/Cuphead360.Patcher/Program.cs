@@ -154,7 +154,8 @@ internal static class Program
                         found.Add(new EngineMethod
                         {
                             Method = m, Assembly = asm.Name.Name, Kind = kind,
-                            Id = t.FullName + "::" + m.Name,
+                            Id = t.FullName + "::" + m.Name + (m.IsPInvokeImpl && m.PInvokeInfo != null
+                                ? " [" + m.PInvokeInfo.Module.Name + "!" + (string.IsNullOrEmpty(m.PInvokeInfo.EntryPoint) ? m.Name : m.PInvokeInfo.EntryPoint) + "]" : ""),
                             Name = Mangle(t.FullName) + "__" + Mangle(m.Name),
                         });
             list.AddRange(found);
@@ -395,6 +396,9 @@ internal static class Program
     {
         ["System.String System.Environment::GetFolderPath(System.Environment/SpecialFolder)"] = "GetFolderPath",
         ["System.String System.Environment::GetFolderPath(System.Environment/SpecialFolder,System.Environment/SpecialFolderOption)"] = "GetFolderPathOption",
+        // Rewired decrypts its platform assembly and loads it from bytes; the
+        // port loads the patched copy instead (and AOT can't load bytes at all).
+        ["System.Reflection.Assembly System.Reflection.Assembly::Load(System.Byte[])"] = "LoadAssembly",
     };
 
     static int ReplaceCalls(List<AssemblyDefinition> assemblies, AssemblyDefinition engine)

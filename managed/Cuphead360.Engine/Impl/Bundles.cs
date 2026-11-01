@@ -120,7 +120,20 @@ namespace Cuphead360.Engine
             var b = Of(bundle);
             if (b == null) return;
             loaded.Remove(b.BundleName);
-            // Loaded assets stay alive unless all = true (then they become null).
+            // Loaded assets stay alive unless all = true (then they are destroyed);
+            // either way the next load of this bundle makes new objects.
+            string dir = Path.Combine(AssetDb.Root, "objects", "bundles", b.BundleName);
+            if (Directory.Exists(dir))
+                foreach (var fpath in Directory.GetFiles(dir, "*.chob"))
+                {
+                    var cf = AssetDb.File(Path.GetFileNameWithoutExtension(fpath));
+                    if (cf == null) continue;
+                    if (all)
+                        foreach (var o in cf.Ordered)
+                            if (AssetDb.TryBuilt(cf, o.PathId, out var obj) && Objects.Of(obj) is NObject rec && !rec.Destroyed && !(rec is NComponent) && !(rec is NGameObject))
+                                Lifecycle.DestroyNow(rec);
+                    AssetDb.Forget(cf);
+                }
             Objects.Release(b);
         }
 

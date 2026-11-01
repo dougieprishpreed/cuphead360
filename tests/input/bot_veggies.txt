@@ -1,0 +1,21 @@
+# New game -> intro -> Elder Kettle's house -> world map -> the Root Pack (Simple) -> fight to the end -> back to the map.
+# Run with a fresh port save folder (run --save <empty dir>).
+wait 594
+pressuntil scene_cutscene_intro A 108 3000
+pressuntil scene_level_house_elder_kettle A 84 6000
+pressfor A 84 1700
+hold LX -1 300
+pressuntil scene_map_world_1 A 60 900
+wait 120
+goto Veggies 0.5 1800
+press A
+wait 60
+press Left
+wait 20
+press A
+waitscene scene_level_veggies 1200
+wait 180
+fight 36000
+waitscene scene_win 600
+pressuntil scene_map_world_1 A 120 3000
+wait 300

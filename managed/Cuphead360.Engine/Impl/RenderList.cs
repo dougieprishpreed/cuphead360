@@ -7,6 +7,52 @@ using UnityEngine;
 
 namespace Cuphead360.Engine
 {
+    /// <summary>Minimal RGBA PNG writer (zlib via .NET).</summary>
+    public static class Png
+    {
+        static readonly uint[] crcTable = BuildCrc();
+        static uint[] BuildCrc()
+        {
+            var t = new uint[256];
+            for (uint n = 0; n < 256; n++) { uint c = n; for (int k = 0; k < 8; k++) c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1; t[n] = c; }
+            return t;
+        }
+
+        static void Chunk(Stream s, string type, byte[] data)
+        {
+            var len = new byte[] { (byte)(data.Length >> 24), (byte)(data.Length >> 16), (byte)(data.Length >> 8), (byte)data.Length };
+            s.Write(len, 0, 4);
+            var tb = Encoding.ASCII.GetBytes(type);
+            s.Write(tb, 0, 4);
+            s.Write(data, 0, data.Length);
+            uint c = 0xFFFFFFFFu;
+            foreach (var b in tb) c = crcTable[(c ^ b) & 0xFF] ^ (c >> 8);
+            foreach (var b in data) c = crcTable[(c ^ b) & 0xFF] ^ (c >> 8);
+            c ^= 0xFFFFFFFFu;
+            s.Write(new[] { (byte)(c >> 24), (byte)(c >> 16), (byte)(c >> 8), (byte)c }, 0, 4);
+        }
+
+        public static void Write(string path, byte[] rgba, int w, int h)
+        {
+            using var f = File.Create(path);
+            f.Write(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }, 0, 8);
+            var ihdr = new byte[13];
+            ihdr[0] = (byte)(w >> 24); ihdr[1] = (byte)(w >> 16); ihdr[2] = (byte)(w >> 8); ihdr[3] = (byte)w;
+            ihdr[4] = (byte)(h >> 24); ihdr[5] = (byte)(h >> 16); ihdr[6] = (byte)(h >> 8); ihdr[7] = (byte)h;
+            ihdr[8] = 8; ihdr[9] = 6;
+            Chunk(f, "IHDR", ihdr);
+            using (var ms = new MemoryStream())
+            {
+                using (var z = new System.IO.Compression.ZLibStream(ms, System.IO.Compression.CompressionLevel.Fastest, true))
+                {
+                    for (int y = 0; y < h; y++) { z.WriteByte(0); z.Write(rgba, y * w * 4, w * 4); }
+                }
+                Chunk(f, "IDAT", ms.ToArray());
+            }
+            Chunk(f, "IEND", new byte[0]);
+        }
+    }
+
     /// <summary>
     /// What a frame draws: cameras in depth order, each with its visible
     /// sprites and UI meshes sorted the way Unity sorts transparent 2D
@@ -30,6 +76,7 @@ namespace Cuphead360.Engine
             public float Depth;
             public int Sequence;
             public string Kind = "sprite";
+            public int GoLayer;
         }
 
         public sealed class View
@@ -56,6 +103,12 @@ namespace Cuphead360.Engine
                 if (o is NSpriteRenderer sr && sr.Enabled && sr.Sprite != null && sr.GameObject != null && sr.GameObject.ActiveInHierarchy) renderers.Add(sr);
                 else if (o is NCanvas cv && cv.Enabled && cv.GameObject != null && cv.GameObject.ActiveInHierarchy && cv.IsRoot) canvases.Add(cv);
             }
+            if (Environment.GetEnvironmentVariable("CH360_TRACE_UI") == "1")
+                foreach (var cv in canvases)
+                {
+                    var t = cv.GameObject.Transform;
+                    Log.Line($"TRACE canvas {cv.GameObject.Name} mode={cv.Mode} cam={Objects.Of(cv.WorldCamera)?.Name} plane={cv.PlaneDistance} sf={cv.ScaleFactor} layer={cv.GameObject.Layer} pos={t.Position} scale={t.LossyScale} parent={t.Parent?.GameObject.Name} rect={(t as NRectTransform)?.Rect}");
+                }
             foreach (var cam in cams)
             {
                 if (cam.Target != null) continue;   // render textures: not drawn by the preview yet
@@ -128,7 +181,7 @@ namespace Cuphead360.Engine
                 Name = sr.GameObject.Name + " [" + info.Name + "]", Texture = tex, Material = sr.Materials.Length > 0 ? sr.Materials[0] : null,
                 Screen = screen, Uv = uv, Triangles = tris, Tint = sr.Color,
                 Layer = SortingLayers.Index(sr.SortingLayerID), Order = sr.SortingOrder,
-                Depth = cam.WorldToViewport(pos).z,
+                Depth = cam.WorldToViewport(pos).z, GoLayer = sr.GameObject.Layer,
             };
         }
 
@@ -160,10 +213,18 @@ namespace Cuphead360.Engine
                             if (mesh.SubMeshes[sm].Length == 0) continue;
                             var mat = sm < cr.Materials.Length ? cr.Materials[sm] : null;
                             var tex = sm == 0 && cr.Texture != null ? cr.Texture : MainTexture(mat);
+                            if (tex == null && Environment.GetEnvironmentVariable("CH360_TRACE_UI") == "1")
+                                foreach (var c2 in go.Components)
+                                    if (c2.Managed != null && c2.Managed.GetType().Name == "Image")
+                                    {
+                                        var sp = c2.Managed.GetType().GetField("m_Sprite", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public)?.GetValue(c2.Managed) as Sprite;
+                                        var si = Sprites.Of(sp);
+                                        Log.Line($"TRACE untextured {go.Name}: sprite={(sp == null ? "null" : si?.Name)} tags={string.Join(",", si?.AtlasTags ?? new string[0])} included={si?.IncludedAtlas != null} key={si?.RenderKey} bound={Sprites.Binding(sp, out _, out _, out _)}");
+                                    }
                             list.Add(new Item
                             {
                                 Name = go.Name, Texture = tex, Material = mat, Screen = screen, Uv = uv, Colors = mesh.Colors,
-                                Triangles = mesh.SubMeshes[sm], Tint = tint, Layer = layer, Order = order, Depth = d, Kind = "ui",
+                                Triangles = mesh.SubMeshes[sm], Tint = tint, Layer = layer, Order = order, Depth = d, Kind = "ui", GoLayer = go.Layer,
                             });
                         }
                     }
@@ -180,6 +241,26 @@ namespace Cuphead360.Engine
     /// <summary>Writes RenderList frames as JSON lines for tools/preview.py.</summary>
     public static class Capture
     {
+        static readonly Dictionary<(int id, int version), string> written = new Dictionary<(int, int), string>();
+
+        /// <summary>A run-time texture (font atlas, solid colour) as a PNG next to the capture file.</summary>
+        static string RuntimePng(Texture t, RuntimePixels.Entry e)
+        {
+            int id = Objects.Of(t)?.InstanceId ?? 0;
+            if (written.TryGetValue((id, e.Version), out var name)) return name;
+            name = "runtime_" + (id < 0 ? "m" + (-id) : id.ToString()) + "_" + e.Version + ".png";
+            var rgba = new byte[e.W * e.H * 4];
+            for (int i = 0; i < e.W * e.H; i++)
+            {
+                if (e.Channels == 1) { rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = 255; rgba[i * 4 + 3] = e.Data[i]; }
+                else Buffer.BlockCopy(e.Data, i * 4, rgba, i * 4, 4);
+            }
+            // Pixels are stored top row first, which is PNG order.
+            Png.Write(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(Path), name), rgba, e.W, e.H);
+            written[(id, e.Version)] = name;
+            return name;
+        }
+
         public static string Path;
         public static HashSet<int> Frames = new HashSet<int>();
         public static int Every;
@@ -201,18 +282,20 @@ namespace Cuphead360.Engine
                 var c = v.Camera;
                 sb.Append("{\"camera\":").Append(S(c?.GameObject.Name ?? "<overlay>"))
                   .Append(",\"rect\":[").Append(F(v.PixelRect.x)).Append(',').Append(F(v.PixelRect.y)).Append(',').Append(F(v.PixelRect.width)).Append(',').Append(F(v.PixelRect.height)).Append(']')
-                  .Append(",\"clear\":").Append(c == null ? 4 : (int)c.ClearFlags);
+                  .Append(",\"clear\":").Append(c == null ? 4 : (int)c.ClearFlags).Append(",\"mask\":").Append(c == null ? -1 : c.CullingMask);
                 if (c != null) sb.Append(",\"background\":[").Append(F(c.Background.r)).Append(',').Append(F(c.Background.g)).Append(',').Append(F(c.Background.b)).Append(',').Append(F(c.Background.a)).Append(']');
                 sb.Append(",\"items\":[");
                 for (int ii = 0; ii < v.Items.Count; ii++)
                 {
                     var it = v.Items[ii];
                     if (ii > 0) sb.Append(',');
-                    sb.Append("{\"name\":").Append(S(it.Name)).Append(",\"kind\":").Append(S(it.Kind));
+                    sb.Append("{\"name\":").Append(S(it.Name)).Append(",\"kind\":").Append(S(it.Kind)).Append(",\"goLayer\":").Append(it.GoLayer);
                     var tsrc = (Objects.Of(it.Texture) as NAsset)?.Source;
                     if (tsrc != null)
                         sb.Append(",\"texture\":{\"file\":").Append(S(tsrc.File.Path)).Append(",\"path\":").Append(tsrc.PathId)
                           .Append(",\"name\":").Append(S(Tree.Str(tsrc.Tree, "m_Name"))).Append(",\"size\":[").Append(Icalls.TextureWidth(it.Texture)).Append(',').Append(Icalls.TextureHeight(it.Texture)).Append("]}");
+                    else if (RuntimePixels.Get(it.Texture) is RuntimePixels.Entry rp)
+                        sb.Append(",\"texture\":{\"png\":").Append(S(RuntimePng(it.Texture, rp))).Append(",\"size\":[").Append(rp.W).Append(',').Append(rp.H).Append("]}");
                     else if (it.Texture != null) sb.Append(",\"texture\":{\"runtime\":").Append(S(Objects.Of(it.Texture)?.Name)).Append('}');
                     var ms = MaterialState.Of(it.Material);
                     sb.Append(",\"material\":").Append(S(Objects.Of(it.Material)?.Name)).Append(",\"shader\":").Append(S(Objects.Of(ms?.Shader)?.Name));

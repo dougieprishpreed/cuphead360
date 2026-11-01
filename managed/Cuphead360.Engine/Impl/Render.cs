@@ -175,6 +175,8 @@ namespace Cuphead360.Engine
             if (Sprite != null) Atlases.Touch(Sprite);
         }
 
+        public override void Activated(bool on) { if (on && Sprite != null) Atlases.Touch(Sprite); }
+
         public override void CopyFrom(NComponent src, Dictionary<NObject, NObject> map)
         {
             base.CopyFrom(src, map);
@@ -203,6 +205,8 @@ namespace Cuphead360.Engine
             public Vector2 TextureRectOffset;
             public Vector4 UvTransform;                        // texel = vertex * (x, z) + (y, w)
             public int SettingsRaw;
+            public SpriteAtlas IncludedAtlas;                  // atlas shipped in the build (no late binding)
+            public ChobFile AtlasFile; public PPtr AtlasPtr;
         }
 
         static readonly ConditionalWeakTable<Sprite, Info> infos = new ConditionalWeakTable<Sprite, Info>();
@@ -245,6 +249,8 @@ namespace Cuphead360.Engine
             for (int k = 0; k < tags.Count; k++) i.AtlasTags[k] = tags[k] as string ?? "";
             var rd = Tree.Get(t, "m_RD");
             i.Texture = AssetDb.Resolve(co.File, Tree.Ptr(rd, "texture")) as Texture2D;
+            var atlasPtr = Tree.Ptr(t, "m_SpriteAtlas");
+            if (!atlasPtr.IsNull) { i.AtlasFile = co.File; i.AtlasPtr = atlasPtr; i.IncludedAtlas = AssetDb.Resolve(co.File, atlasPtr) as SpriteAtlas; }
             ReadBinding(rd, out i.TextureRect, out i.TextureRectOffset, out i.UvTransform, out i.SettingsRaw);
             ReadMesh(rd, i);
             return i;
@@ -364,12 +370,21 @@ namespace Cuphead360.Engine
         static readonly HashSet<string> requested = new HashSet<string>(StringComparer.Ordinal);
         static readonly List<string> pending = new List<string>();
         static readonly HashSet<string> unheard = new HashSet<string>(StringComparer.Ordinal);
+        static readonly bool Trace = Environment.GetEnvironmentVariable("CH360_TRACE_ATLAS") == "1";
 
         /// <summary>A sprite was loaded or assigned: request its atlas if it isn't here.</summary>
         public static void Touch(Sprite s)
         {
             var i = Sprites.Of(s);
             if (i == null || i.Texture != null) return;
+            // An atlas included in the build binds its sprites when it loads.
+            if (i.IncludedAtlas != null)
+            {
+                // Unloaded since: the next load is a new atlas object.
+                if (!(Objects.Of(i.IncludedAtlas) is NAsset ia) || ia.Destroyed) i.IncludedAtlas = AssetDb.Resolve(i.AtlasFile, i.AtlasPtr) as SpriteAtlas;
+                if (i.IncludedAtlas != null && (!byKey.TryGetValue(i.RenderKey ?? "", out var cur) || cur.atlas != i.IncludedAtlas)) Register(i.IncludedAtlas);
+                return;
+            }
             foreach (var tag in i.AtlasTags)
                 if (!Live(tag) && requested.Add(tag)) pending.Add(tag);
         }
@@ -386,6 +401,7 @@ namespace Cuphead360.Engine
             {
                 if (Live(tag)) continue;
                 bool heard;
+                if (Trace) Log.Line($"TRACE atlas request {tag} frame {Clock.FrameCount}");
                 try { heard = SpriteAtlasManager.RequestAtlas(tag); }
                 catch (Exception e) { Exceptions.Report(e, null, "SpriteAtlasManager.atlasRequested"); heard = true; }
                 if (!heard)
@@ -401,7 +417,9 @@ namespace Cuphead360.Engine
             var src = (Objects.Of(atlas) as NAsset)?.Source;
             if (src == null) return;
             string tag = Tree.Str(src.Tree, "m_Tag");
+            if (Trace) Log.Line($"TRACE atlas register {tag} id={Objects.Of(atlas)?.InstanceId} destroyed={Objects.Of(atlas)?.Destroyed} frame {Clock.FrameCount}");
             byTag[tag] = atlas;
+            requested.Remove(tag);   // answered: if this atlas is unloaded later, sprites ask again
             foreach (var e in Tree.List(src.Tree, "m_RenderDataMap"))
                 if (e is List<object> pair && pair.Count == 2)
                 {
@@ -816,6 +834,20 @@ namespace Cuphead360.Engine
             return s;
         }
 
+        /// <summary>GameObject.CreatePrimitive: a GameObject with a MeshFilter, MeshRenderer and the matching collider.</summary>
+        public static GameObject UnityEngine_GameObject__CreatePrimitive(PrimitiveType type)
+        {
+            var managed = Lifecycle.NewManaged<GameObject>();
+            var go = Lifecycle.CreateGameObject(managed, type.ToString());
+            Lifecycle.AddComponent(go, typeof(MeshFilter));
+            Lifecycle.AddComponent(go, typeof(MeshRenderer));
+            var col = type == PrimitiveType.Sphere ? typeof(SphereCollider) : type == PrimitiveType.Capsule ? typeof(CapsuleCollider)
+                : type == PrimitiveType.Quad || type == PrimitiveType.Plane ? typeof(MeshCollider) : typeof(BoxCollider);
+            Lifecycle.AddComponent(go, col);
+            Scenes.AddRoot(go);
+            return managed;
+        }
+
         // ------------------------------------------------------------ SpriteAtlas
 
         public static void UnityEngine_U2D_SpriteAtlasManager__Register(SpriteAtlas spriteAtlas) { if (spriteAtlas != null) Atlases.Register(spriteAtlas); }
@@ -878,6 +910,61 @@ namespace Cuphead360.Engine
         public static TextureFormat UnityEngine_Texture2D__get_format(Texture2D self)
             => runtimeTextures.TryGetValue(self, out var d) ? (TextureFormat)d[2] : (TextureFormat)Tree.Int((Objects.Of(self) as NAsset)?.Source?.Tree, "m_TextureFormat", 4);
         public static int UnityEngine_Texture2D__get_mipmapCount(Texture2D self) => (int)Tree.Int((Objects.Of(self) as NAsset)?.Source?.Tree, "m_MipCount", 1);
+
+        static Texture2D white, black;
+        static Texture2D SolidTexture(string name, byte v, byte a)
+        {
+            var t = Lifecycle.NewManaged<Texture2D>();
+            Objects.Register(t, new NAsset(), name, persistent: true);
+            RuntimeTexture(t, 4, 4, (int)TextureFormat.RGBA32);
+            var px = new byte[4 * 4 * 4];
+            for (int i = 0; i < 16; i++) { px[i * 4] = v; px[i * 4 + 1] = v; px[i * 4 + 2] = v; px[i * 4 + 3] = a; }
+            RuntimePixels.Set(t, px, 4, 4, 4, 1);
+            return t;
+        }
+        public static Texture2D UnityEngine_Texture2D__get_whiteTexture() => white ??= SolidTexture("UnityWhite", 255, 255);
+        public static Texture2D UnityEngine_Texture2D__get_blackTexture() => black ??= SolidTexture("UnityBlack", 0, 255);
+
+        // UI.Image geometry helpers (Sprites.DataUtility).
+        public static void UnityEngine_Sprites_DataUtility__INTERNAL_CALL_GetOuterUV(Sprite sprite, out Vector4 value)
+        {
+            value = new Vector4(0, 0, 1, 1);
+            if (!Sprites.Binding(sprite, out var tex, out var tr, out _) || tex == null) return;
+            float w = TextureWidth(tex), h = TextureHeight(tex);
+            if (w > 0 && h > 0) value = new Vector4(tr.xMin / w, tr.yMin / h, tr.xMax / w, tr.yMax / h);
+        }
+        public static void UnityEngine_Sprites_DataUtility__INTERNAL_CALL_GetInnerUV(Sprite sprite, out Vector4 value)
+        {
+            UnityEngine_Sprites_DataUtility__INTERNAL_CALL_GetOuterUV(sprite, out var o);
+            var i = Sprites.Of(sprite);
+            value = o;
+            if (i == null || !Sprites.Binding(sprite, out var tex, out var tr, out _) || tex == null) return;
+            float w = TextureWidth(tex), h = TextureHeight(tex);
+            var b = i.Border;   // left, bottom, right, top (pixels)
+            value = new Vector4((tr.xMin + b.x) / w, (tr.yMin + b.y) / h, (tr.xMax - b.z) / w, (tr.yMax - b.w) / h);
+        }
+        public static void UnityEngine_Sprites_DataUtility__INTERNAL_CALL_GetPadding(Sprite sprite, out Vector4 value)
+        {
+            value = default;
+            var i = Sprites.Of(sprite);
+            if (i == null || !Sprites.Binding(sprite, out _, out var tr, out _)) return;
+            // Transparent margins trimmed by tight packing: left, bottom, right, top.
+            var off = i.TextureRectOffset;
+            value = new Vector4(off.x, off.y, i.Rect.width - tr.width - off.x, i.Rect.height - tr.height - off.y);
+        }
+        public static void UnityEngine_Sprites_DataUtility__Internal_GetMinSize(Sprite sprite, out Vector2 output)
+        {
+            var b = Sprites.Of(sprite)?.Border ?? default;
+            output = new Vector2(b.x + b.z, b.y + b.w);
+        }
+        public static void UnityEngine_Matrix4x4__INTERNAL_CALL_Perspective(float fov, float aspect, float zNear, float zFar, out Matrix4x4 value)
+        {
+            float f = 1f / (float)Math.Tan(fov * Math.PI / 360.0);
+            value = new Matrix4x4();
+            value.m00 = f / aspect; value.m11 = f;
+            value.m22 = (zFar + zNear) / (zNear - zFar); value.m23 = 2f * zFar * zNear / (zNear - zFar);
+            value.m32 = -1f;
+        }
         public static void UnityEngine_Texture2D__Internal_Create(Texture2D mono, int width, int height, TextureFormat format, bool mipmap, bool linear, IntPtr nativeTex)
         {
             if (Objects.Of(mono) == null) Objects.Register(mono, new NAsset(), "");

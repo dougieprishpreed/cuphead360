@@ -146,21 +146,33 @@ namespace Cuphead360.Engine
             rt.Change(() =>
             {
                 rt.AnchorMin = Vector2.zero; rt.AnchorMax = Vector2.zero; rt.SizeDelta = size;
+                rt.Pivot = new Vector2(0.5f, 0.5f);   // driven by the canvas
             });
+            Vector3 pos; Quaternion rot; float scale;
             if (cam == null)
             {
-                rt.LocalPosition = new Vector3(px.x + px.width * rt.Pivot.x, px.y + px.height * rt.Pivot.y, 0);
-                rt.LocalRotation = Quaternion.identity;
-                rt.LocalScale = new Vector3(sf, sf, sf);
+                pos = new Vector3(px.x + px.width * rt.Pivot.x, px.y + px.height * rt.Pivot.y, 0);
+                rot = Quaternion.identity;
+                scale = sf;
             }
             else
             {
                 var ct = cam.GameObject.Transform;
                 float worldHeight = cam.Ortho ? cam.OrthoSize * 2f : 2f * PlaneDistance * Mathf.Tan(cam.Fov * 0.5f * Mathf.Deg2Rad);
-                float scale = size.y > 0 ? worldHeight / size.y : 1f;
-                rt.LocalRotation = ct.Rotation;
-                rt.LocalPosition = ct.Position + ct.Rotation * new Vector3(0, 0, PlaneDistance);
-                rt.LocalScale = new Vector3(scale, scale, scale);
+                scale = size.y > 0 ? worldHeight / size.y : 1f;
+                rot = ct.Rotation;
+                pos = ct.Position + ct.Rotation * new Vector3(0, 0, PlaneDistance);
+            }
+            // The world pose goes through the parent (root canvases may sit under another object).
+            var parent = rt.Parent;
+            if (parent == null) { rt.LocalPosition = pos; rt.LocalRotation = rot; rt.LocalScale = new Vector3(scale, scale, scale); }
+            else
+            {
+                MathX.Invert(parent.LocalToWorld, out var inv);
+                rt.LocalPosition = inv.MultiplyPoint3x4(pos);
+                rt.LocalRotation = MathX.Inverse(parent.Rotation) * rot;
+                var ps = parent.LossyScale;
+                rt.LocalScale = new Vector3(ps.x != 0 ? scale / ps.x : scale, ps.y != 0 ? scale / ps.y : scale, ps.z != 0 ? scale / ps.z : scale);
             }
             rt.Invalidate();
         }

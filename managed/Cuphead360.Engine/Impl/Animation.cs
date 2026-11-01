@@ -446,6 +446,7 @@ namespace Cuphead360.Engine
             public float Weight;
             public StatePlay Current = new StatePlay();
             public StatePlay Next;      // during a transition
+            public readonly List<StatePlay> Retired = new List<StatePlay>();   // left this update: their events still fire
             public ControllerData.Transition Transition;
             public float TransitionTime, TransitionLength;
             public (int state, float normalizedTime)? PendingPlay;
@@ -478,6 +479,7 @@ namespace Cuphead360.Engine
         /// <summary>Bind the controller: default states at time 0, default parameter values, captured defaults.</summary>
         public void Rebind(bool keepState)
         {
+            if (TraceName != null && GameObject != null && GameObject.Name.Contains(TraceName)) Log.Line($"TRACE animator {GameObject.Name} Rebind(keep={keepState}) frame {Clock.FrameCount} {Environment.StackTrace}");
             RestoreDefaults();
             targets.Clear();
             controlled.Clear();
@@ -599,6 +601,8 @@ namespace Cuphead360.Engine
 
         // ---------------------------------------------------------------- update
 
+        public static string TraceName = Environment.GetEnvironmentVariable("CH360_TRACE_ANIM");
+
         public void Update(float dt)
         {
             if (!Initialized) { Rebind(false); if (!Initialized) return; }
@@ -643,7 +647,7 @@ namespace Cuphead360.Engine
             {
                 l.Next.Time += dt * StateSpeed(li, l.Next.State);
                 l.TransitionTime += Math.Abs(dt);
-                if (l.TransitionTime >= l.TransitionLength) { l.Current = l.Next; l.Next = null; l.Transition = null; }
+                if (l.TransitionTime >= l.TransitionLength) { l.Retired.Add(l.Current); l.Current = l.Next; l.Next = null; l.Transition = null; }
                 return;   // no interruptions (Cuphead's transitions use none)
             }
             var m = Data.Machines[Data.Layers[li].Machine];
@@ -684,6 +688,7 @@ namespace Cuphead360.Engine
             float start = fire.Offset * StateLength(li, dest);
             if (length <= 0f)
             {
+                l.Retired.Add(l.Current);
                 l.Current = new StatePlay();
                 Enter(l, l.Current, dest, start + over * StateSpeed(li, dest));
                 l.Current.Prev = start;
@@ -717,7 +722,10 @@ namespace Cuphead360.Engine
                 if (!exitReached) return false;
             }
             else if (tr.Conditions.Length == 0) return false;   // no exit time and no conditions never fires
-            return ConditionsHold(tr.Conditions, triggers, n1, exitReached);
+            bool held = ConditionsHold(tr.Conditions, triggers, n1, exitReached);
+            if (TraceName != null && GameObject != null && GameObject.Name.Contains(TraceName) && Clock.FrameCount % 60 == 0)
+                Log.Line($"TRACE animator {GameObject.Name} transition ->{tr.Destination} conds={tr.Conditions.Length} c0=({tr.Conditions[0].Mode},{tr.Conditions[0].Param}) param={ParamIndex(tr.Conditions[0].Param)} bool={(ParamIndex(tr.Conditions[0].Param) >= 0 ? Bools[ParamIndex(tr.Conditions[0].Param)] : false)} held={held}");
+            return held;
         }
 
         // ---------------------------------------------------------------- pose
@@ -734,14 +742,119 @@ namespace Cuphead360.Engine
             public UObject Obj;
             public bool Written;
             public string Unbound;
+            // Generic property access (script fields, RectTransform, CanvasGroup, ...).
+            public Action<float> Set;
+            public Action<UObject> SetObj;
+            public NBehaviour Notify;   // gets OnDidApplyAnimationProperties after a write
+        }
+
+        static readonly string[] subNames = { "x", "y", "z", "w" }, colorNames = { "r", "g", "b", "a" };
+
+        /// <summary>Script field bindings: plain values, object references, and struct members ("m_Color.a").</summary>
+        bool BindScriptField(Target tg, NComponent comp)
+        {
+            var obj = comp.Managed;
+            foreach (var f in Serialization.Fields(obj.GetType()))
+            {
+                var ft = f.FieldType;
+                if (Icalls.Crc32(f.Name) == tg.B.Attribute)
+                {
+                    if (tg.B.IsPPtr && typeof(UObject).IsAssignableFrom(ft))
+                    {
+                        tg.DefaultObj = f.GetValue(obj) as UObject;
+                        tg.SetObj = o => { if (o == null || ft.IsInstanceOfType(o)) f.SetValue(obj, o); };
+                        return true;
+                    }
+                    if (ft == typeof(float) || ft == typeof(int) || ft == typeof(bool))
+                    {
+                        tg.Field = f;
+                        tg.Default[0] = Convert.ToSingle(f.GetValue(obj));
+                        return true;
+                    }
+                }
+                string[] parts = ft == typeof(Color) ? colorNames : ft == typeof(Vector2) ? new[] { "x", "y" } : ft == typeof(Vector3) ? new[] { "x", "y", "z" } : ft == typeof(Vector4) ? subNames : null;
+                if (parts == null) continue;
+                for (int k = 0; k < parts.Length; k++)
+                {
+                    if (Icalls.Crc32(f.Name + "." + parts[k]) != tg.B.Attribute) continue;
+                    int idx = k;
+                    tg.Default[0] = Component(f.GetValue(obj), idx);
+                    tg.Set = v => f.SetValue(obj, WithComponent(f.GetValue(obj), idx, v));
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static float Component(object o, int i) => o switch
+        {
+            Color c => c[i], Vector2 v2 => v2[i], Vector3 v3 => v3[i], Vector4 v4 => v4[i], _ => 0f,
+        };
+
+        static object WithComponent(object o, int i, float v)
+        {
+            switch (o)
+            {
+                case Color c: c[i] = v; return c;
+                case Vector2 v2: v2[i] = v; return v2;
+                case Vector3 v3: v3[i] = v; return v3;
+                case Vector4 v4: v4[i] = v; return v4;
+                default: return o;
+            }
+        }
+
+        static readonly Dictionary<uint, (string field, int k)> rectProps = BuildRectProps();
+        static Dictionary<uint, (string, int)> BuildRectProps()
+        {
+            var d = new Dictionary<uint, (string, int)>();
+            foreach (var f in new[] { "m_AnchoredPosition", "m_SizeDelta", "m_AnchorMin", "m_AnchorMax", "m_Pivot" })
+                for (int k = 0; k < 2; k++) d[Icalls.Crc32(f + "." + subNames[k])] = (f, k);
+            foreach (var f in new[] { "m_LocalPosition", "m_LocalScale" })
+                for (int k = 0; k < 3; k++) d[Icalls.Crc32(f + "." + subNames[k])] = (f, k);
+            return d;
+        }
+
+        bool BindRect(Target tg, NRectTransform rt)
+        {
+            if (!rectProps.TryGetValue(tg.B.Attribute, out var p)) return false;
+            int k = p.k;
+            Vector2 Get2() => p.field == "m_AnchoredPosition" ? rt.AnchoredPosition : p.field == "m_SizeDelta" ? rt.SizeDelta : p.field == "m_AnchorMin" ? rt.AnchorMin : p.field == "m_AnchorMax" ? rt.AnchorMax : rt.Pivot;
+            if (p.field == "m_LocalPosition" || p.field == "m_LocalScale")
+            {
+                tg.Default[0] = p.field == "m_LocalPosition" ? rt.LocalPosition[k] : rt.LocalScale[k];
+                tg.Set = v =>
+                {
+                    if (p.field == "m_LocalPosition") { var lp = rt.LocalPosition; lp[k] = v; rt.LocalPosition = lp; }
+                    else { var ls = rt.LocalScale; ls[k] = v; rt.LocalScale = ls; }
+                    rt.Invalidate();
+                };
+                return true;
+            }
+            tg.Default[0] = Get2()[k];
+            tg.Set = v =>
+            {
+                var cur = Get2(); cur[k] = v;
+                switch (p.field)
+                {
+                    case "m_AnchoredPosition": rt.AnchoredPosition = cur; break;
+                    case "m_SizeDelta": rt.Change(() => rt.SizeDelta = cur); break;
+                    case "m_AnchorMin": rt.Change(() => rt.AnchorMin = cur); break;
+                    case "m_AnchorMax": rt.Change(() => rt.AnchorMax = cur); break;
+                    default: rt.Change(() => rt.Pivot = cur); break;
+                }
+            };
+            return true;
         }
 
         static readonly uint IsActiveHash = Icalls.Crc32("m_IsActive");
         static readonly uint EnabledHash = Icalls.Crc32("m_Enabled");
+        static readonly uint AlphaHash = Icalls.Crc32("m_Alpha");
         static readonly Dictionary<uint, string> spriteRendererProps = new Dictionary<uint, string>
         {
             [Icalls.Crc32("m_Color.r")] = "r", [Icalls.Crc32("m_Color.g")] = "g", [Icalls.Crc32("m_Color.b")] = "b", [Icalls.Crc32("m_Color.a")] = "a",
             [Icalls.Crc32("m_FlipX")] = "flipX", [Icalls.Crc32("m_FlipY")] = "flipY",
+            [Icalls.Crc32("m_Size.x")] = "sizeX", [Icalls.Crc32("m_Size.y")] = "sizeY",
+            [Icalls.Crc32("m_SortingOrder")] = "order",
         };
         static readonly HashSet<string> unboundLogged = new HashSet<string>();
 
@@ -795,7 +908,8 @@ namespace Cuphead360.Engine
                         if (b.IsPPtr) tg.DefaultObj = sr.Sprite;
                         else if (b.Attribute == EnabledHash) tg.Default[0] = sr.Enabled ? 1 : 0;
                         else if (spriteRendererProps.TryGetValue(b.Attribute, out var prop))
-                            tg.Default[0] = prop == "r" ? sr.Color.r : prop == "g" ? sr.Color.g : prop == "b" ? sr.Color.b : prop == "a" ? sr.Color.a : prop == "flipX" ? (sr.FlipX ? 1 : 0) : (sr.FlipY ? 1 : 0);
+                            tg.Default[0] = prop == "r" ? sr.Color.r : prop == "g" ? sr.Color.g : prop == "b" ? sr.Color.b : prop == "a" ? sr.Color.a : prop == "flipX" ? (sr.FlipX ? 1 : 0)
+                                : prop == "sizeX" ? sr.Size.x : prop == "sizeY" ? sr.Size.y : prop == "order" ? sr.SortingOrder : (sr.FlipY ? 1 : 0);
                         else tg.Unbound = "SpriteRenderer attribute " + b.Attribute;
                         break;
                     }
@@ -805,11 +919,47 @@ namespace Cuphead360.Engine
                         tg.Component = comp;
                         if (comp == null) { tg.Unbound = "no script " + b.Script; break; }
                         if (b.Attribute == EnabledHash) { tg.Default[0] = comp.Enabled ? 1 : 0; break; }
-                        foreach (var f in Serialization.Fields(comp.Managed.GetType()))
-                            if (Icalls.Crc32(f.Name) == b.Attribute && (f.FieldType == typeof(float) || f.FieldType == typeof(int) || f.FieldType == typeof(bool)))
-                            { tg.Field = f; break; }
-                        if (tg.Field == null) { tg.Unbound = "script field " + b.Attribute + " on " + b.Script; break; }
-                        tg.Default[0] = Convert.ToSingle(tg.Field.GetValue(comp.Managed));
+                        if (!BindScriptField(tg, comp)) { tg.Unbound = "script field " + b.Attribute + " on " + b.Script; break; }
+                        tg.Notify = comp as NBehaviour;
+                        break;
+                    }
+                case 224:
+                    if (tr is NRectTransform rt && BindRect(tg, rt)) break;
+                    tg.Unbound = "RectTransform attribute " + b.Attribute;
+                    break;
+                case 61:
+                case 58:
+                case 60:
+                case 68:
+                case 70:
+                    {
+                        var col = go.Components.Find(c => c is NCollider2D nc && Icalls.ClassId(nc.Managed.GetType()) == b.TypeId) as NCollider2D;
+                        tg.Component = col;
+                        if (col == null) { tg.Unbound = "no collider " + b.TypeId; break; }
+                        if (b.Attribute == EnabledHash) { tg.Default[0] = col.Enabled ? 1 : 0; break; }
+                        if (b.Attribute == Icalls.Crc32("m_IsTrigger")) { tg.Default[0] = col.IsTrigger ? 1 : 0; tg.Set = v => col.IsTrigger = v > 0.5f; break; }
+                        if (b.Attribute == Icalls.Crc32("m_Radius")) { tg.Default[0] = col.Radius; tg.Set = v => { col.Radius = v; col.Version++; }; break; }
+                        bool bound = false;
+                        foreach (var (fname, k) in new[] { ("m_Size", 0), ("m_Size", 1), ("m_Offset", 0), ("m_Offset", 1) })
+                            if (b.Attribute == Icalls.Crc32(fname + "." + subNames[k]))
+                            {
+                                int kk = k; bool size = fname == "m_Size";
+                                tg.Default[0] = size ? col.Size[k] : col.Offset[k];
+                                tg.Set = v => { if (size) { var s2 = col.Size; s2[kk] = v; col.Size = s2; } else { var o2 = col.Offset; o2[kk] = v; col.Offset = o2; } col.Version++; };
+                                bound = true;
+                                break;
+                            }
+                        if (!bound) tg.Unbound = "collider attribute " + b.Attribute;
+                        break;
+                    }
+                case 225:
+                    {
+                        var cg = go.Components.Find(c => c is NCanvasGroup) as NCanvasGroup;
+                        tg.Component = cg;
+                        if (cg == null) { tg.Unbound = "no CanvasGroup"; break; }
+                        if (b.Attribute == AlphaHash) { tg.Default[0] = cg.Alpha; tg.Set = v => cg.Alpha = v; }
+                        else if (b.Attribute == EnabledHash) tg.Default[0] = cg.Enabled ? 1 : 0;
+                        else tg.Unbound = "CanvasGroup attribute " + b.Attribute;
                         break;
                     }
                 default:
@@ -877,6 +1027,7 @@ namespace Cuphead360.Engine
             }
             bool writeDefaults = true;
             if (Layers.Length > 0) { var s = StateAt(0, Layers[0].Current.State); if (s != null) writeDefaults = s.WriteDefaults; }
+            HashSet<NBehaviour> notify = null;
             foreach (var tg in controlled)
             {
                 if (!tg.Written)
@@ -886,12 +1037,22 @@ namespace Cuphead360.Engine
                     tg.Obj = tg.DefaultObj;
                 }
                 Write(tg);
+                if (tg.Notify != null) (notify ??= new HashSet<NBehaviour>()).Add(tg.Notify);
             }
+            // Unity tells scripts whose serialized fields the animation wrote (UGUI marks itself dirty).
+            if (notify != null)
+                foreach (var nb in notify)
+                {
+                    var m = MessageSet.Find(nb.Managed.GetType(), "OnDidApplyAnimationProperties");
+                    if (m != null && !nb.Destroyed) Behaviours.Send(nb, m);
+                }
         }
 
         void Write(Target tg)
         {
             var b = tg.B; var v = tg.Value;
+            if (tg.SetObj != null) { tg.SetObj(tg.Obj); if (tg.Obj is Sprite sp) Atlases.Touch(sp); return; }
+            if (tg.Set != null) { tg.Set(v[0]); return; }
             switch (b.TypeId)
             {
                 case 4:
@@ -917,7 +1078,11 @@ namespace Cuphead360.Engine
                             var prop = spriteRendererProps[b.Attribute];
                             var c = sr.Color;
                             if (prop == "r") c.r = v[0]; else if (prop == "g") c.g = v[0]; else if (prop == "b") c.b = v[0]; else if (prop == "a") c.a = v[0];
-                            else if (prop == "flipX") sr.FlipX = v[0] > 0.5f; else sr.FlipY = v[0] > 0.5f;
+                            else if (prop == "flipX") sr.FlipX = v[0] > 0.5f;
+                            else if (prop == "sizeX") sr.Size = new Vector2(v[0], sr.Size.y);
+                            else if (prop == "sizeY") sr.Size = new Vector2(sr.Size.x, v[0]);
+                            else if (prop == "order") sr.SortingOrder = (int)Math.Round(v[0]);
+                            else sr.FlipY = v[0] > 0.5f;
                             sr.Color = c;
                         }
                         break;
@@ -948,6 +1113,13 @@ namespace Cuphead360.Engine
 
         void FireEvents(int li)
         {
+            var lr = Layers[li];
+            if (lr.Retired.Count > 0)
+            {
+                // A state left this update fires its events up to the point it was left.
+                foreach (var old in lr.Retired) { old.Fresh = false; FireEvents(li, old, 1f); }
+                lr.Retired.Clear();
+            }
             var l = Layers[li];
             float w = l.Next != null && l.TransitionLength > 0f ? Math.Min(1f, l.TransitionTime / l.TransitionLength) : 0f;
             FireEvents(li, l.Current, 1f - w);
@@ -1062,6 +1234,7 @@ namespace Cuphead360.Engine
             [typeof(GameObject)] = 1, [typeof(Transform)] = 4, [typeof(Camera)] = 20, [typeof(Animator)] = 95, [typeof(AudioSource)] = 82,
             [typeof(SpriteRenderer)] = 212, [typeof(MonoBehaviour)] = 114, [typeof(BoxCollider2D)] = 61, [typeof(CircleCollider2D)] = 58,
             [typeof(PolygonCollider2D)] = 60, [typeof(Rigidbody2D)] = 50, [typeof(MeshRenderer)] = 23, [typeof(ParticleSystem)] = 198,
+            [typeof(EdgeCollider2D)] = 68, [typeof(CapsuleCollider2D)] = 70, [typeof(RectTransform)] = 224, [typeof(CanvasGroup)] = 225,
         };
 
         public static int ClassId(Type t)
@@ -1229,7 +1402,12 @@ namespace Cuphead360.Engine
         public static void UnityEngine_Animator__SetIntegerString(Animator self, string name, int value) => UnityEngine_Animator__SetIntegerID(self, (int)Crc32(name ?? ""), value);
         public static int UnityEngine_Animator__GetIntegerID(Animator self, int id) { var a = Ready(self); int i = Param(a, id, null, "GetInteger"); return i >= 0 ? a.Ints[i] : 0; }
         public static int UnityEngine_Animator__GetIntegerString(Animator self, string name) => UnityEngine_Animator__GetIntegerID(self, (int)Crc32(name ?? ""));
-        public static void UnityEngine_Animator__SetBoolID(Animator self, int id, bool value) { var a = Ready(self); int i = Param(a, id, null, "SetBool"); if (i >= 0) a.Bools[i] = value; }
+        public static void UnityEngine_Animator__SetBoolID(Animator self, int id, bool value)
+        {
+            var a = Ready(self); int i = Param(a, id, null, "SetBool");
+            if (NAnimator.TraceName != null && a?.GameObject != null && a.GameObject.Name.Contains(NAnimator.TraceName)) Log.Line($"TRACE animator {a.GameObject.Name} SetBool/Trigger {id}={value} index {i} frame {Clock.FrameCount}");
+            if (i >= 0) a.Bools[i] = value;
+        }
         public static void UnityEngine_Animator__SetBoolString(Animator self, string name, bool value) => UnityEngine_Animator__SetBoolID(self, (int)Crc32(name ?? ""), value);
         public static bool UnityEngine_Animator__GetBoolID(Animator self, int id) { var a = Ready(self); int i = Param(a, id, null, "GetBool"); return i >= 0 && a.Bools[i]; }
         public static bool UnityEngine_Animator__GetBoolString(Animator self, string name) => UnityEngine_Animator__GetBoolID(self, (int)Crc32(name ?? ""));

@@ -34,6 +34,7 @@ from PIL import Image, ImageDraw
 import UnityPy
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+capture_path = ""
 
 
 class Textures:
@@ -82,8 +83,11 @@ class Textures:
                 continue
             obj = sf.objects.get(tex["path"])
             if obj is not None:
-                img = obj.read().image
-                return img.convert("RGBA")
+                data = obj.read()
+                if not hasattr(data, "image"):   # a RenderTexture: drawn by the game at run time
+                    print("preview: %s is a %s (not drawn)" % (tex.get("name"), type(data).__name__), file=sys.stderr)
+                    return None
+                return data.image.convert("RGBA")
         print("preview: texture %s not found in %s" % (tex, path), file=sys.stderr)
         return None
 
@@ -120,7 +124,24 @@ def composite(canvas, layer, x0, y0):
     region[...] = layer[..., :3] * a + region * (1 - a)
 
 
-def draw_group(canvas, tex_img, pts, uvs, tris, tint, colors, view, H, sdf=None):
+def blend_recipe(shader, tex, col):
+    """Cuphead's sprite shaders by what they do (the converter keeps names only)."""
+    t, c = tex, col
+    if "SpriteBlendDynamic/Screen" in shader or shader.endswith("/ScreenBlend"):
+        rgb = 1 - (1 - t[..., :3]) * (1 - c[:3])
+        return np.concatenate([rgb, t[..., 3:4] * (c[3] if "SpriteBlendDynamic" not in shader else 1)], axis=-1)
+    if "ScreenIgnoreColor" in shader:
+        return t
+    if "SpriteBlendDynamic/Multiply" in shader or shader.endswith("/MultiplyBlend"):
+        return np.concatenate([t[..., :3] * c[:3], t[..., 3:4]], axis=-1)
+    if "SpriteBlendDynamic/Overlay" in shader or shader.endswith("/OverlayBlend"):
+        a, b = t[..., :3], c[:3]
+        rgb = np.where(a < 0.5, 2 * a * b, 1 - 2 * (1 - a) * (1 - b))
+        return np.concatenate([rgb, t[..., 3:4]], axis=-1)
+    return t * c
+
+
+def draw_group(canvas, tex_img, pts, uvs, tris, tint, colors, view, H, sdf=None, shader=""):
     tw, th = tex_img.size if tex_img is not None else (1, 1)
     dpts = [(x, H - y) for x, y in pts]
     spts = [(u * tw, (1 - v) * th) for u, v in uvs] if uvs else [(0, 0)] * len(pts)
@@ -169,7 +190,7 @@ def draw_group(canvas, tex_img, pts, uvs, tris, tint, colors, view, H, sdf=None)
             rgb = np.where(alpha > 1e-6, rgb / np.maximum(fa + (oa - fa), 1e-6), 0)
             layer = np.concatenate([rgb.astype(np.float32), alpha.astype(np.float32)], axis=-1)
         else:
-            layer = warped * col
+            layer = blend_recipe(shader, warped, col)
         layer[..., 3:4] *= m
         composite(canvas, layer, x0, y0)
 
@@ -185,7 +206,15 @@ def render(frame, textures):
             canvas[H - y0 - h:H - y0, x0:x0 + w] = bg[:3]
         for it in v["items"]:
             tex = it.get("texture")
-            img = textures.get(tex) if tex and "file" in tex else None
+            img = None
+            if tex and "file" in tex:
+                img = textures.get(tex)
+            elif tex and "png" in tex:
+                key = "png:" + tex["png"]
+                if key not in textures.mem:
+                    fn = os.path.join(os.path.dirname(capture_path), tex["png"])
+                    textures.mem[key] = Image.open(fn).convert("RGBA") if os.path.exists(fn) else None
+                img = textures.mem[key]
             pts = list(zip(it["xy"][0::2], it["xy"][1::2]))
             uvs = list(zip(it["uv"][0::2], it["uv"][1::2]))
             colors = None
@@ -200,7 +229,7 @@ def render(frame, textures):
                 sdf = (face, outline, float(p.get("_OutlineWidth", 0)), float(p.get("_FaceDilate", 0)))
             if img is None and tex is not None:
                 continue
-            draw_group(canvas, img, pts, uvs, it["tris"], it["tint"], colors, rect, H, sdf)
+            draw_group(canvas, img, pts, uvs, it["tris"], it["tint"], colors, rect, H, sdf, it.get("shader") or "")
     return Image.fromarray((np.clip(canvas, 0, 1) * 255 + 0.5).astype(np.uint8), "RGB")
 
 
@@ -214,6 +243,8 @@ def main():
     a = ap.parse_args()
     if os.path.abspath(a.out).startswith(os.path.abspath(a.game)):
         sys.exit("--out must be outside the game folder")
+    global capture_path
+    capture_path = a.capture
     want = set(int(x) for x in a.frames.split(",")) if a.frames else None
     textures = Textures(a.game, os.path.join(a.out, "tex"))
     shots = []

@@ -51,6 +51,14 @@ namespace Cuphead360.Engine
                         try { Walk(Assembly.Load(r)); } catch (Exception) { }
             }
             Walk(Assembly.Load("Assembly-CSharp"));
+            // Unity loads every assembly of the player's Managed folder at
+            // startup; Rewired looks for its platform library among them.
+            foreach (var dll in Directory.GetFiles(AppContext.BaseDirectory, "*.dll"))
+            {
+                string an = Path.GetFileNameWithoutExtension(dll);
+                if (!(an.StartsWith("Rewired") || an.StartsWith("UnityEngine") || an.StartsWith("Assembly-CSharp") || an.StartsWith("Galaxy"))) continue;
+                if (seen.Add(an)) try { Walk(Assembly.Load(an)); } catch (Exception) { }
+            }
             string objects = Path.Combine(gameData, "objects");
             foreach (var f in Directory.GetFiles(objects, "*.chob", SearchOption.AllDirectories))
             {
@@ -95,6 +103,12 @@ namespace Cuphead360.Engine
                         break;
                     case "PlayerSettings":
                         PlayerSettings = o.Tree;
+                        break;
+                    case "InputManager":
+                        Inputs.LoadAxes(o.Tree);
+                        break;
+                    case "Physics2DSettings":
+                        Physics.LoadSettings(o.Tree);
                         break;
                 }
             }
@@ -149,6 +163,17 @@ namespace Cuphead360.Engine
         }
 
         public static bool TryBuilt(ChobFile f, long pathId, out UObject o) => built.TryGetValue((f, pathId), out o);
+
+        /// <summary>
+        /// A bundle was unloaded: objects already loaded from it stay alive but
+        /// are no longer its objects; loading from the bundle again makes new ones.
+        /// </summary>
+        public static void Forget(ChobFile f)
+        {
+            var keys = new List<(ChobFile, long)>();
+            foreach (var k in built.Keys) if (k.Item1 == f) keys.Add(k);
+            foreach (var k in keys) built.Remove(k);
+        }
         public static void SetBuilt(ChobFile f, long pathId, UObject o) => built[(f, pathId)] = o;
 
         /// <summary>The managed object for a PPtr (an asset is built on first use).</summary>
@@ -158,7 +183,12 @@ namespace Cuphead360.Engine
             var f = Target(from, p);
             if (f == null) { Problem("unresolved external file " + p + " from " + from.Name); return null; }
             if (scene != null && f == scene.File && scene.Objects.TryGetValue(p.PathId, out var so)) return so;
-            if (built.TryGetValue((f, p.PathId), out var o)) return o;
+            if (built.TryGetValue((f, p.PathId), out var o))
+            {
+                // A destroyed asset (an unloaded atlas, Resources.UnloadAsset) loads as a new object.
+                if (!(Engine.Objects.Of(o) is NObject rec) || !rec.Destroyed) return o;
+                built.Remove((f, p.PathId));
+            }
             if (!f.Objects.TryGetValue(p.PathId, out var co)) { Problem("missing object " + p.PathId + " in " + f.Name); return null; }
             return BuildAsset(co);
         }
@@ -218,6 +248,8 @@ namespace Cuphead360.Engine
                         Objects.Register(managed, new NAsset { Source = co }, Tree.Str(co.Tree, "m_Name"), persistent: true);
                         built[(co.File, co.PathId)] = managed;
                         Assets.OnBuilt?.Invoke(managed, co);
+                        // Unity binds a sprite to its atlas when the sprite loads (or asks for a late-bound one).
+                        if (managed is Sprite sprite) Atlases.Touch(sprite);
                         return managed;
                     }
             }

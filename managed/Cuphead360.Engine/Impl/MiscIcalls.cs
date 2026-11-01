@@ -80,26 +80,25 @@ namespace Cuphead360.Engine
             => UnityEngine_Font__Internal_CreateFont(_font, _names != null && _names.Length > 0 ? _names[0] : "");
         public static string[] UnityEngine_Font__GetOSInstalledFontNames() => new string[0];
 
-        // ------------------------------------------------------------ legacy Input
-        // The console has no keyboard, mouse or touch. Pads reach the game
-        // through Rewired, not UnityEngine.Input.
-        public static bool UnityEngine_Input__GetKeyInt(int key) => false;
-        public static bool UnityEngine_Input__GetKeyString(string name) => false;
-        public static bool UnityEngine_Input__GetKeyUpInt(int key) => false;
-        public static bool UnityEngine_Input__GetKeyUpString(string name) => false;
-        public static bool UnityEngine_Input__GetKeyDownInt(int key) => false;
-        public static bool UnityEngine_Input__GetKeyDownString(string name) => false;
-        public static bool UnityEngine_Input__GetButton(string buttonName) => false;
-        public static bool UnityEngine_Input__GetButtonDown(string buttonName) => false;
-        public static bool UnityEngine_Input__GetButtonUp(string buttonName) => false;
-        public static float UnityEngine_Input__GetAxis(string axisName) => 0f;
-        public static float UnityEngine_Input__GetAxisRaw(string axisName) => 0f;
-        public static bool UnityEngine_Input__get_mousePresent() => false;
-        public static void UnityEngine_Input__INTERNAL_get_mousePosition(out Vector3 value) => value = Vector3.zero;
-        public static string[] UnityEngine_Input__GetJoystickNames() => new string[0];
-        public static bool UnityEngine_Input__get_touchSupported() => false;
-        public static int UnityEngine_Input__get_touchCount() => 0;
-        public static bool UnityEngine_Input__get_anyKey() => false;
-        public static bool UnityEngine_Input__get_anyKeyDown() => false;
+        // List<T> internals, as Unity's NoAllocHelpers reach them natively.
+        public static Array UnityEngine_NoAllocHelpers__ExtractArrayFromList(object list)
+            => list?.GetType().GetField("_items", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.GetValue(list) as Array;
+        public static void UnityEngine_NoAllocHelpers__ResizeList(object list, int size)
+        {
+            if (list == null) return;
+            var t = list.GetType();
+            var bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            var items = t.GetField("_items", bf);
+            var arr = items.GetValue(list) as Array;
+            if (arr == null || arr.Length < size)
+            {
+                var n = Array.CreateInstance(t.GetGenericArguments()[0], size);
+                if (arr != null) Array.Copy(arr, n, arr.Length);
+                items.SetValue(list, n);
+            }
+            t.GetField("_size", bf).SetValue(list, size);
+            var ver = t.GetField("_version", bf);
+            if (ver != null) ver.SetValue(list, (int)ver.GetValue(list) + 1);
+        }
     }
 }
