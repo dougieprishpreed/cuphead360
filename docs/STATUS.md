@@ -6,16 +6,15 @@ playable alpha release candidate with no content or behavior gaps versus the
 Windows version. This document records exactly what is implemented, what has
 been validated, and what remains.
 
-Current status (2026-11-01): paused at the user's request during the partial
-D1 r4 interface-dispatch correction. The worker was interrupted; current source
-is unvalidated and uncommitted. Last accepted source is CP1 `4c40d42`. The last
-tested D1 r2 binaries and regressions do not validate this working tree. The
-comprehensive shipping review is in [PORT_REVIEW.md](PORT_REVIEW.md); the next
-session uses Opus5.5 alone with full authority to reconsider the project.
-See [HANDOFF.md](HANDOFF.md) for the exact preserved checkpoint and
-[NEXT_SESSION_PROMPT.md](NEXT_SESSION_PROMPT.md) for the continuation prompt.
-The opening flow, alpha release candidate and console-hardware feasibility
-remain unaccepted.
+Current status (2026-11-01, single-agent round 1): the custom IL interpreter
+is retired. The game's own assemblies run as original IL on .NET with Unity's
+engine methods redirected into a C# engine, and the console build goes through
+NativeAOT-LLVM -> wasm -> w2c2 -> C ([MANAGED_PLAYER.md](MANAGED_PLAYER.md)).
+On Windows the original boot scene runs through `Cuphead.Init` and stops at
+the unimplemented AssetBundle API. Nothing renders yet; no console build of
+the new player exists. See [HANDOFF.md](HANDOFF.md) for the checkpoint and
+next steps. The sections below describe the retired interpreter and are
+history.
 
 ## Historical: 2026-10-31 player-damage engine checkpoint
 

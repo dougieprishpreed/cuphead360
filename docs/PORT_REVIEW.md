@@ -1,5 +1,13 @@
 # Cuphead360 port review
 
+> **2026-11-01 decision:** the interpreter strategy reviewed here is retired.
+> The game's IL now runs on .NET with a C# Unity engine and is compiled for
+> the console through NativeAOT-LLVM -> wasm -> w2c2 -> C
+> ([MANAGED_PLAYER.md](MANAGED_PLAYER.md)). Part A's content, memory,
+> texture, renderer and measurement sections (A4, A6, A7) still apply; its
+> execution-strategy, CLR-gap and D1/G1 sections (A3, A5 item 4, A8 steps
+> 0-3, A11 F1/F2/F5/F7/F11) describe the retired runtime.
+
 This is the canonical technical review.
 - **Part A** is the shipping end-state review dated 2026-11-01. It was revised the same day
   after a source and tool coverage pass and the host's release-review feedback. It

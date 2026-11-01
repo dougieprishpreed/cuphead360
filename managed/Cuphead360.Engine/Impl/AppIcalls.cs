@@ -126,7 +126,7 @@ namespace Cuphead360.Engine
                 sb.Append(t).Append('\t').Append(Escape(kv.Key)).Append('\t').Append(Escape(v)).Append('\n');
             }
             string tmp = PrefsPath + ".tmp";
-            File.WriteAllText(tmp, sb.ToString(), Encoding.UTF8);
+            File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(false));
             File.Move(tmp, PrefsPath, true);
         }
 

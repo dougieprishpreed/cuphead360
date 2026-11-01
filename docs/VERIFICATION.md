@@ -1,7 +1,26 @@
-> Pause note (2026-11-01): the user interrupted partial D1 r4. The working
-> source has no post-interrupt build/test acceptance. D1 r2 evidence below is
-> versioned prior evidence, not validation of current r4 edits. Exact source
-> snapshot and hashes are in HANDOFF.md.
+## 2026-11-01 managed player, round 1 (single-agent)
+
+Architecture: [MANAGED_PLAYER.md](MANAGED_PLAYER.md). Source: `5b4ef49`,
+`9126b86` and the docs commit that follows them. Windows, .NET 10.0.401 JIT
+unless noted; one run each.
+
+| Command | Result |
+| --- | --- |
+| `python tools/build_managed.py` (patcher, publicize, gen, engine, redirect, jit, census, selftest) | `BUILD_MANAGED OK`; publicize 960 types / 5,986 fields / 7,940 methods; gen 7,946 engine methods (6,113 icall, 1,833 P/Invoke); redirect 7,946 patched, 0 left native, 2 `GetFolderPath` calls redirected |
+| `Cuphead360.Player census` | 8,438 types (0 failed), 60,077 methods compiled (0 failed) |
+| `Cuphead360.Player selftest` | `SELFTEST PASS: 23 passed, 0 failed` |
+| `dotnet publish -r wasi-wasm -p:CupheadWasm=true` (ILCompiler.LLVM 10.0.0-rc.1.26357.1, wasi-sdk 29) | exit 0; `Cuphead360.Player.wasm` 26,400,236 bytes, core module (`0061736d01000000`) |
+| w2c2 `-f 2000` + Spire360 `w2c2_fix_tables.py` / `w2c2_imports.py` | 40 C files, 186 MB; 64 imports, 30 implemented by srt, 34 missing (all `wasi:http`/`wasi:io` streams) |
+| `python -I tools/convert_objects.py --game game --out work/GameData` | 161 files, 178,326 objects, 0 errors, 38.4 s |
+| `Cuphead360.Player run --frames 300` (`work/managed/run3.log`) | scene_start loaded (2 GameObjects, 7 components); original `CupheadStartScene.Awake` -> `Cuphead.Init` instantiates `Core/CupheadCore`; fields decoded 496, mismatched 0; 22 exceptions and 9 missing engine methods, all at unimplemented AssetBundle/audio/font/JsonUtility calls; no scene after scene_start |
+| `%APPDATA%\Cuphead` SHA-256 before/after all runs | unchanged (3 files) |
+
+Not covered: rendering, audio, input, later scenes, the XDK compile or any run
+of the translated C, Xenia, hardware, performance, memory.
+
+Interpreter-era note: the interrupted D1 r4 source was committed unvalidated
+to branch `interpreter-d1-r4-wip`; its fixture build fails the T4 mutation
+assertion. The interpreter is retired; the entries below are history.
 
 ## 2026-11-01 accepted CP1 coroutine and fault-ledger checkpoint
 

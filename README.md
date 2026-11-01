@@ -12,6 +12,14 @@ locally generated `GameData/` directory.
 
 ## Status
 
+**2026-11-01:** the port now runs the game's own C# on .NET with a
+reimplemented Unity engine (`managed/`), compiled for the console through
+NativeAOT-LLVM -> WebAssembly -> w2c2 -> C. It boots the original start scene
+on Windows; it does not render or play yet. See
+[docs/MANAGED_PLAYER.md](docs/MANAGED_PLAYER.md) and
+[docs/HANDOFF.md](docs/HANDOFF.md). The notes below describe the earlier
+interpreter foundation, which is retired.
+
 Development foundation with experimental vertical slices. Earlier foundation
 checkpoints demonstrated the following; their Xenia results do not validate
 the latest binary or the playable opening flow:
