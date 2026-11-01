@@ -5,6 +5,8 @@ evidence. Its checklist and next steps are not current acceptance claims.
 Use [STATUS.md](STATUS.md) and [VERIFICATION.md](VERIFICATION.md) for current
 results, [HANDOFF.md](HANDOFF.md) for recovery state, and
 [NEXT_SESSION_PROMPT.md](NEXT_SESSION_PROMPT.md) to continue in a new session.
+The old claim below that the game has no generic types or methods is incorrect;
+see the corrected census in REVERSE_ENGINEERING.md and PORT_REVIEW.md §A11 F1.
 
 Status legend: **Not investigated / Recovered / Implemented / Windows tested /
 XDK built / Xenia tested / Hardware tested**

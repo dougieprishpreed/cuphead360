@@ -14,14 +14,26 @@ PORT_REVIEW.md rather than creating more handoff documents.
 - Earlier references: `beb3a87` is the experimental source baseline;
   `694b9f0` is the fundamental audit; `bae43a8` is an intermediate docs commit.
   Inspect actual HEAD and working tree before assuming newer work is accepted.
-- **D1 r2 interface dispatch is in progress**, assigned to the same sole
-  DeepSeek writer, `/root/cp1_corrections`, native thread
-  `01a194be-38be-7b20-8d15-c1ce11be350a`. Its previous CP1 passes finished and
-  were closed; this is a new bounded follow-up, not accepted D1 source.
-- Validated brief: `work/restart-20261031/opus-d1-request.json`.
-  Authoritative mapping rule: `opus-d1-contract-decision.md`; host constraints:
-  `sol-d1-dispatch-addendum.md`; validation: `d1-r2-request-validation.json`.
-  D1 evidence belongs under `work/restart-20261031/d1-builder/`.
+- **D1 correction r4 is active; D1 is not accepted or committed.** The same
+  sole DeepSeek writer `/root/cp1_corrections`, native thread
+  `01a194be-38be-7b20-8d15-c1ce11be350a`, was closed after r2 and reused for r4.
+- Validated brief: `work/restart-20261031/opus-d1-review-request.json` (r4).
+  Host clarification: `sol-d1-r4-dispatch-addendum.md`; validation:
+  `d1-r4-request-validation.json`. New evidence: `d1-r4-builder/`; preserve the
+  r2 baseline evidence in `d1-builder/`.
+- Independent Sol boundary probes found inherited external-interface detection
+  and unsupported generic-array dispatch failures after the initial positive
+  fixture passed. The same writer corrected them, extended the permanent
+  fixture and reran final builds/controls/regressions before review.
+  Read `work/restart-20261031/sol-d1-source-findings.md` and the isolated
+  `sol-d1-boundary-probe/` .NET/port logs. Do not trust the earlier candidate as
+  final source. No production files were edited by the host for those probes.
+- Last tested r2 candidate: interpreter SHA47FEDA84, EXE91DBF58D, XEXD4007458 (full hashes in
+  VERIFICATION.md and d1-builder/INDEX.md). Host independently rehashed them,
+  ran dispatchtest0, scoped D1 strict1 and CP1 victim-root strict1. Tutorial,
+  platforming,Flower/Train/Frogs120 and combat272 pass. RootPack150 remains
+  NOT_PLAYABLE at the same frame118 null-intro fault. Formal review questions
+  and exact provenance are in sol-d1-final-review-context.md.
 - The host is consolidating recovery docs and recording independent findings.
   Preserve its changes to HANDOFF, NEXT_SESSION_PROMPT, PORT_REVIEW and README.
   Do not overwrite the builder's active source, STATUS or VERIFICATION edits.
@@ -55,12 +67,15 @@ Native turn_context/upstream evidence corroborates DeepSeek/max/opencode-go;
 the header's separate openai label is a known metadata discrepancy.
 
 Opus uses Claude session `7af156a8-bc69-488c-aa67-4e588bf3c329`, files-only.
-Latest completed run at this update:
-`work/restart-20261031/opus-opening-prerequisite-review-run`.
-Its decision is `opus-opening-prerequisite-decision.md`.
-Before resuming, select the latest successfully completed run; never overwrite
-its output. Validate lead-authored requests with lead.mjs before host dispatch.
-See private adapter records for exact lifecycle, not a repeated health probe.
+Latest completed run:
+`work/restart-20261031/opus-release-review-completion-run`.
+The comprehensive review is complete in PORT_REVIEW.md Part A. Sol challenged
+and corrected unsupported claims and independently checked key findings;
+`sol-release-review-acceptance.md` records the assessment. D1 still needs the
+single consolidated r4 correction, now dispatched. No Opus run is active.
+Before resuming, choose the latest successfully completed run; never overwrite
+its output. Validate lead-authored requests before host dispatch. Reuse working
+routes and recorded evidence rather than repeating health checks.
 
 ## What is accepted, and what is still broken
 
@@ -91,32 +106,43 @@ evidence: `work/restart-20261031/cp1-final-narrow-builder/`,
   dialogue/UI, map geometry, audio and save behavior remain incomplete. Other
   audited CLR gaps remain in PORT_REVIEW. CP1/D1 are not full CLR/Unity parity.
 - Sprite extraction is visibly wrong; eager Root Pack textures exceed1.4GiB.
-  A1 addresses sprite correctness and hard-bounded pixel residency. This alone
-  cannot prove512MiB total Xbox fit, adequate frame time or GPU support.
+  The old A1 crop/LRU shipping plan is superseded by atlas pages plus original
+  sprite meshes and a GPU path. Pack/texture/layout choices and484MiB planning
+  budgets require target probes; no console fit or frame-time claim is proven.
+- The shipping review confirmed game-defined generic types are exported as
+  external composites and some boss-state/event logic takes native substitutes.
+  A host census found27generic type definitions and74generic method definitions.
+  R4 only adds fail-visible interface bounds; G1 is the later structural repair.
 - Current Xbox source uses fixed240-frame scripted play. Latest CP1 evidence is
   compilation only, with no new Xenia/hardware run. Historical foundation Xenia
   checks do not validate the current binary or opening flow.
 
 ## Next actions and acceptance gates
 
-1. Let the healthy D1 writer finish. Honor its stop conditions if existing
-   metadata cannot express a correct map. Close it immediately on completion.
-2. Independently review the actual diff, untracked synthetic fixture and final
-   evidence; `sol-d1-review-checklist.md` records material checks. Send one
-   consolidated result to Opus. Reuse valid tests; rerun concrete risks only.
-3. Accept and commit a coherent D1 source/docs checkpoint only after its gates.
-   Update this handoff and NEXT_SESSION_PROMPT in that round.
-4. Validate/review and dispatch the existing A1 request
-   `work/restart-20261031/opus-next-checkpoint.json` (rev3) only after accepted D1.
-   Earlier A1 UV/cache/placement constraints remain mandatory. It is not yet
-   implemented or accepted.
-5. Opus confirmed the generic empty-object defect and placed S1 serialized
-   object-graph fidelity after A1 and before common lifecycle. Follow with
-   bounded exception/semantic repairs, S2 port-local filesystem storage, scene
-   pump, Animator/events, dialogue/UI/map and the actual opening flow. S1/S2 are
-   architecture decisions, not dispatched requests. Their future briefs must
-   validate decoder eligibility/consumption, binding paths, version compatibility
-   and reference semantics before implementation. Avoid an omnibus CLR rewrite.
+1. Let the same D1 r4 writer finish. Close it immediately on completion. Honor
+   its stop condition if original regressions hit `interface dispatch::generic-base`:
+   report exact sites/types/counts and return the evidence to Opus; never hide it
+   through native fallback or weaken the guard.
+2. Independently review the r4 diff, synthetic mutations, counters, tests and
+   post-edit builds, then obtain Opus acceptance. D1 r2 passes do not validate
+   r4. Reuse trustworthy evidence and rerun concrete risks only.
+3. Commit the coherent accepted D1 source/docs checkpoint only after its gates.
+   Update this handoff and NEXT_SESSION_PROMPT at the end of the round.
+4. **Current project direction:** PORT_REVIEW.md Part A is the completed user-
+   requested shipping review of default.xex plus a standalone converter for
+   near-GOG gameplay/presentation on Xbox360. Source was reviewed at varying
+   depth with explicit coverage; original content was sampled, not certified.
+5. **E0 measurement is the next feature gate**, with a fresh bounded brief from
+   the project lead after accepted D1: content/dependency and MemberRef census,
+   runtime cost classes, allocation/clone behavior and a representative target
+   workload. Do not automatically dispatch the old A1 JSON.
+6. Proposed route after measurement: bind native calls once; repair game generic
+   types; implement indexed bounded pack volumes and atlas/mesh content; build
+   the GPU renderer with format/layout probes; serialization/lifecycle/exception/
+   numeric/GC checkpoints; original scene/Animator/physics/UI/audio/input/storage;
+   then M1 and content breadth. PORT_REVIEW A8 controls dependencies and go/no-go
+   gates. Each implementation brief stays bounded; the full release remains
+   unproven and no schedule estimate is established.
 
 ## Playable goal and original semantics
 

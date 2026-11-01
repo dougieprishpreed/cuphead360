@@ -30,8 +30,11 @@ maps, and save fields in the same assembly.
 
 - `Assembly-CSharp.dll` — 5,600,768 bytes, 5,640 TypeDefs, 34,747
   MethodDefs, 37,524 FieldDefs, 34,266 methods with IL, 2,590,233 bytes of
-  IL. No generic method definitions and no generic type definitions in game
-  code; generics are confined to BCL/Unity/third-party assemblies.
+  IL. A read-only GenericParam owner-table census on 2026-11-01 found **27
+  generic type definitions and 74 generic method definitions** in this assembly,
+  including AssetLoader, AbstractLevelProperties, AbstractLevelState and
+  PlayerEvent families. Earlier claims that generics were confined to external
+  assemblies were incorrect. See PORT_REVIEW.md §A11 F1.
 - `Assembly-CSharp-firstpass.dll` — Steamworks/GOG Galaxy glue.
 - `Rewired_Core.dll`, `Rewired_Windows_Lib.dll` — input.
 - `GalaxyCSharp.dll`, `GalaxyCSharpGlue.dll`, `Galaxy64.dll` — GOG Galaxy.
@@ -136,13 +139,14 @@ bundle sprites and serialized scene/animation data.
 
 ## Implications for the port
 
-1. Game logic can be recovered exactly from IL; no behavioural guessing is
-   required for gameplay systems.
+1. Original IL is the authoritative reference for game rules. The converter
+   rewrites metadata tokens; correct execution and engine semantics still need
+   verification rather than an assumption of preserved behaviour.
 2. The scripting backend is Mono, so there is no IL2CPP-generated C++ to
    reuse. A custom execution/translation layer is required.
-3. Cuphead's logic uses no user-defined generics, which removes a large class
-   of CLR runtime complexity. BCL generics (`List<T>`, `Dictionary<K,V>`) can
-   be implemented natively.
+3. Game-defined generic types and methods require proper instantiation context,
+   inheritance, interfaces and statics. Current native substitutions for some
+   game generic families are a parity gap, separate from BCL collection services.
 4. The game is coroutine-heavy (~2,500 `StartCoroutine` sites). The runtime
    must support C# iterator state machines correctly from the start.
 5. All serialized data and IL are little-endian; Xbox 360 is big-endian. Every
