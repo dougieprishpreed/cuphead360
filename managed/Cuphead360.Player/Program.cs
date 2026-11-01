@@ -90,7 +90,7 @@ namespace Cuphead360.Player
         static int Run(string[] a)
         {
             string data = "work/GameData", save = "work/managed/save";
-            int frames = 600, report = 60;
+            int frames = 600, report = 60, seed = 360;
             for (int i = 0; i + 1 < a.Length; i += 2)
                 switch (a[i])
                 {
@@ -98,7 +98,10 @@ namespace Cuphead360.Player
                     case "--save": save = a[i + 1]; break;
                     case "--frames": frames = int.Parse(a[i + 1]); break;
                     case "--report": report = int.Parse(a[i + 1]); break;
+                    case "--seed": seed = int.Parse(a[i + 1]); break;
                 }
+            // Unity seeds Random from the clock; runs here are reproducible.
+            Icalls.SeedRandom(seed);
             Platform.SaveRoot = System.IO.Path.GetFullPath(save);
             Platform.Guard(Platform.SaveRoot);
             AssetDb.Init(System.IO.Path.GetFullPath(data));
@@ -113,6 +116,9 @@ namespace Cuphead360.Player
             Console.WriteLine($"RUN done: {frames} frames in {sw.Elapsed.TotalSeconds:0.0} s; scene loads {Cuphead360.Engine.SceneLoader.Loads}; active scene {Cuphead360.Engine.Scenes.Active?.Name}; "
                 + $"exceptions {Exceptions.Count}; fields decoded {FieldDecoder.Decoded}, mismatched {FieldDecoder.Mismatched}; data problems {AssetDb.Problems.Count}; missing engine methods {Icall.MissingCount}");
             foreach (var kv in Icall.Report()) Console.WriteLine("  missing " + kv.Key + " x" + kv.Value);
+            Console.WriteLine($"PROPS: {Props.Count} property accessors served from the property bag (state only)");
+            foreach (var kv in Props.Report()) Console.WriteLine("  props " + kv.Key + " (" + kv.Value + ")");
+            foreach (var p in AssetDb.Problems) Console.WriteLine("  data " + p);
             return 0;
         }
 

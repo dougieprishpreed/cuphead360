@@ -100,12 +100,18 @@ dotnet work/managed/jit/Cuphead360.Player.dll run --frames 300
 Not verified: anything rendered, audio, input, any scene after scene_start,
 the C compiled by the XDK, anything on Xenia or hardware, performance.
 
+Round 2 added asset bundles (420 converted, engine API), JsonUtility,
+QualitySettings, Random, Font, legacy Input and the property bag (`Props`):
+plain `get_X`/`set_X` accessors of Unity objects keep state seeded from the
+converted data and are listed in a PROPS ledger, so state-only behaviour stays
+visible. The boot now runs the full `Cuphead.Init` and stops at the GOG Galaxy
+SDK boundary.
+
 ## Gaps, in the order the boot meets them
 
-1. AssetBundle API + converting bundle contents (`convert_objects.py --bundles`,
-   4.9 GB of bundles; atlases, audio, Texture2D[] "screen_fx").
-2. `JsonUtility` (settings/save data), Font, AudioSource/AudioClip/AudioMixer
-   state, QualitySettings, `library/unity default resources`.
+1. GOG Galaxy SDK boundary: the original offline/unavailable path, with local
+   stats/achievement bookkeeping intact.
+2. AudioMixer state, Rewired initialization, `library/unity default resources`.
 3. scene_title via the original `LoadSceneAsync(1)`; then slot select and the
    opening flow (OPENING_FLOW.md).
 4. Rendering: SpriteRenderer/Camera/sorting snapshot -> Windows preview

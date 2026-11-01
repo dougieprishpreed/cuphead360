@@ -206,6 +206,27 @@ internal static class Program
         return false;
     }
 
+    /// <summary>"get"/"set" for an instance property accessor of a UnityEngine.Object class, else null.</summary>
+    static string? PropertyAccessor(EngineMethod e)
+    {
+        var m = e.Method;
+        if (e.Kind != "icall" || !m.HasThis || m.HasGenericParameters || m.DeclaringType.IsValueType) return null;
+        if (!(m.Name.StartsWith("get_") || m.Name.StartsWith("set_")) || m.Name.Length <= 4) return null;
+        if (m.Parameters.Any(p => p.ParameterType is ByReferenceType || p.ParameterType is PointerType)) return null;
+        if (m.ReturnType is PointerType || m.ReturnType is ByReferenceType) return null;
+        bool get = m.Name[0] == 'g';
+        if (get ? (m.Parameters.Count != 0 || m.ReturnType.FullName == "System.Void") : (m.Parameters.Count != 1 || m.ReturnType.FullName != "System.Void")) return null;
+        // Only classes derived from UnityEngine.Object (components, assets).
+        for (TypeReference? t = m.DeclaringType; t != null;)
+        {
+            if (t.FullName == "UnityEngine.Object") return get ? "get" : "set";
+            TypeDefinition? d;
+            try { d = t.Resolve(); } catch { return null; }
+            t = d?.BaseType;
+        }
+        return null;
+    }
+
     static string Ident(string n) => "@" + Regex.Replace(n.Length == 0 ? "arg" : n, @"[^A-Za-z0-9_]", "_");
 
     static (string sig, List<string> outs) Signature(EngineMethod e)
@@ -250,7 +271,7 @@ internal static class Program
         sb.AppendLine("#pragma warning disable CS0108, CS0162, CS0618, CS8981, CS0169, CS1591");
         sb.AppendLine("namespace " + EngineNamespace + "\n{");
         sb.AppendLine("    public static unsafe partial class " + IcallsType + "\n    {");
-        int stubs = 0, skipped = 0;
+        int stubs = 0, skipped = 0, props = 0;
         var listing = new List<object>();
         foreach (var e in all)
         {
@@ -259,6 +280,22 @@ internal static class Program
             if (unsup) { skipped++; continue; }
             if (implemented.Contains(e.Name)) continue;
             var (sig, outs) = Signature(e);
+            // Plain property accessors of Unity objects keep state in the
+            // engine's property bag (seeded from converted data) until an
+            // engine module implements them.
+            var prop = PropertyAccessor(e);
+            if (prop != null)
+            {
+                string pname = e.Method.Name.Substring(4);
+                if (prop == "get")
+                    sb.Append("        public static ").Append(sig).Append(" => Props.Get<").Append(CsType(e.Method.ReturnType))
+                      .Append(">(self, \"").Append(pname).Append("\", \"").Append(e.Id).AppendLine("\");");
+                else
+                    sb.Append("        public static ").Append(sig).Append(" => Props.Set(self, \"").Append(pname).Append("\", ")
+                      .Append(Ident(e.Method.Parameters[0].Name.Length == 0 ? "a0" : e.Method.Parameters[0].Name)).Append(", \"").Append(e.Id).AppendLine("\");");
+                props++;
+                continue;
+            }
             sb.Append("        public static ").Append(sig).Append(" { ");
             foreach (var o in outs) sb.Append(o).Append(" = default; ");
             sb.Append("Icall.Missing(\"").Append(e.Kind).Append(' ').Append(e.Id.Replace("\"", "\\\"")).Append("\"); ");
@@ -283,7 +320,7 @@ internal static class Program
         pf.AppendLine("        };\n    }\n}");
         File.WriteAllText(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(outFile))!, "Publicized.g.cs"), pf.ToString());
         int impl = all.Count(e => implemented.Contains(e.Name));
-        Console.WriteLine($"gen: {all.Count} engine methods ({all.Count(e => e.Kind == "icall")} icall, {all.Count(e => e.Kind == "pinvoke")} pinvoke): {impl} implemented, {stubs} stubs, {skipped} unsupported -> {outFile}");
+        Console.WriteLine($"gen: {all.Count} engine methods ({all.Count(e => e.Kind == "icall")} icall, {all.Count(e => e.Kind == "pinvoke")} pinvoke): {impl} implemented, {props} property-bag accessors, {stubs} stubs, {skipped} unsupported -> {outFile}");
         foreach (var a in keep) a.Dispose();
         return 0;
     }

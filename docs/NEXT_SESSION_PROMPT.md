@@ -22,7 +22,7 @@ Objective: a genuinely playable alpha release candidate on real Xbox 360
 hardware, with gameplay and presentation virtually identical to the user's GOG
 version, plus a practical converter for the user's own game files.
 
-Continue with HANDOFF.md's "Next round" list (asset bundles, then booting to
+Continue with HANDOFF.md's "Next round" list (the GOG Galaxy boundary, then booting to
 scene_title through the original LoadSceneAsync, then a Windows preview
 renderer and input, then the opening flow). Rebuild with
 `python tools/build_managed.py`; check with `census`, `selftest` and

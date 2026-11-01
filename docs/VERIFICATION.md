@@ -1,3 +1,12 @@
+## 2026-11-01 managed player, round 2
+
+| Command | Result |
+| --- | --- |
+| `python -I tools/convert_objects.py --game game --out work/GameData --files none --bundles` | 420 files, 89,711 objects, 0 errors, 71.3 s |
+| `python tools/build_managed.py` stages through selftest | gen: 387 implemented, 1,775 property-bag accessors, 5,784 stubs; `SELFTEST PASS: 23 passed, 0 failed` |
+| `Cuphead360.Player run --frames 600 --seed 360` (`work/managed/run5.log`) | asset bundles load; full `Cuphead.Init` reaches `OnlineInterfaceGog.Init` and throws at the unimplemented Galaxy SDK P/Invokes; `Cuphead.Awake` throws in `AudioManager.masterVolume` (AudioMixer.GetFloat); Rewired initialization throws; `Vibrator.Update` throws each frame (600); still scene_start |
+| `%APPDATA%\Cuphead` SHA-256 before/after | unchanged (3 files) |
+
 ## 2026-11-01 managed player, round 1 (single-agent)
 
 Architecture: [MANAGED_PLAYER.md](MANAGED_PLAYER.md). Source: `5b4ef49`,

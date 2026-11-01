@@ -19,7 +19,9 @@ user's PC stays usable; `tools/build_managed.py` uses 2 jobs.
 - Branch `main`. Round 1 of the single-agent workflow (2026-11-01):
   - `5b4ef49` managed AOT player foundation (patcher, engine, host, pipeline).
   - `9126b86` boot of original scene_start from converted data.
-  - this round's docs commit (HANDOFF/NEXT_SESSION_PROMPT/MANAGED_PLAYER/...).
+  - `446a2da` docs for the decision and the single-agent workflow.
+  - Round 2: asset bundles, JsonUtility, property bag, Random/Font/Input
+    (commit "Load asset bundles and reach the Galaxy boundary in the boot").
 - Uncommitted: nothing intended. `managed/lib`, `managed/**/Generated`,
   `work/`, `game/`, `build/` are git-ignored derived data.
 - The interrupted D1 r4 interpreter work was committed as found to branch
@@ -38,7 +40,9 @@ hardware. Reasons and rules: [MANAGED_PLAYER.md](MANAGED_PLAYER.md). The old
 is kept as history and as a source of platform code for the console host; it
 is not extended.
 
-## Verified this round (Windows, JIT oracle unless noted)
+## Verified (Windows, JIT oracle unless noted)
+
+Round 1:
 
 - census: 8,438 types load, 60,077 methods JIT-compile, 0 failures.
 - selftest: 23/23 Unity lifecycle semantics (Awake/OnEnable/Start order,
@@ -56,18 +60,41 @@ is not extended.
 - Saves: `%APPDATA%\Cuphead` (3 files) unchanged by SHA-256; the port wrote
   only `work/managed/save/LocalApplicationData/playerprefs.txt`.
 
+Round 2 (same day):
+- `convert_objects.py --bundles`: 420 bundles, 89,711 objects, 0 errors
+  (508 MB of CHOB; pixels and audio samples omitted).
+- Engine: AssetBundle API (LoadFromFile(Async), LoadAsset(Async), LoadAll,
+  sub-assets, unload, requests), JsonUtility (Unity field rules, writer and
+  parser), QualitySettings, Random (xorshift128, deterministic `--seed`,
+  float mapping still to verify against an oracle), Font registration,
+  legacy Input (no keyboard/mouse/touch), mixer asset class mapping.
+- Patcher `gen` now routes 1,775 plain `get_X`/`set_X` accessors of Unity
+  objects to `Props` (state seeded from converted data, kept when set,
+  listed in a PROPS ledger) instead of returning default.
+- `run --frames 600` (`work/managed/run5.log`): bundle loads succeed; the full
+  `Cuphead.Init` runs and stops in `OnlineInterfaceGog.Init` at the GOG
+  Galaxy SDK P/Invokes; `AudioManager.masterVolume` needs AudioMixer.GetFloat;
+  Rewired's own initialization throws (InputManager_Base.Initialize ->
+  ReInput setup); `Vibrator.Update` throws every frame as a consequence.
+  Still scene_start only. selftest 23/23; saves unchanged (SHA-256).
+
 Not verified: rendering, audio, input, any scene after scene_start, XDK
 compile of the translated C, Xenia, hardware, performance or memory.
 
 ## Next round (in order)
 
-1. **Asset bundles.** `convert_objects.py --bundles` (index CAB names ->
-   bundle), engine `AssetBundle.LoadFromFile(Async)`, `LoadAsset(Async)`,
-   `GetAllAssetNames`, unload; resolve `archive:/CAB-...` externals.
-2. **Boot to scene_title** with the original `LoadSceneAsync(1)`: implement
-   in the order the run ledger shows (JsonUtility with Unity's rules, Font,
-   AudioSource/AudioClip/AudioMixer state, QualitySettings, convert
-   `Resources/unity default resources`). Keep every missing call visible.
+1. **GOG Galaxy boundary.** Read OnlineInterfaceGog/GalaxyCSharp to find the
+   original "Galaxy unavailable" path (Init failure, exceptions, listener
+   callbacks) and implement only the SDK P/Invokes so the original code takes
+   it: local stats/achievements bookkeeping must still run (PORT_REVIEW A2).
+   No blanket success.
+2. **Boot to scene_title** with the original `LoadSceneAsync(1)`, fixing in
+   ledger order: AudioMixer (GetFloat/SetFloat state from the converted
+   mixer), Rewired initialization (find what its InputManager data or
+   platform layer needs; Rewired_Core P/Invokes are redirected), convert
+   `Resources/unity default resources` (missing objects 140/146 and
+   PPtr(2,...) in resources.assets point there). Keep every missing call
+   visible.
 3. **Windows preview renderer** from an engine render snapshot (sprites,
    cameras, sorting) with PNG screenshots, so the title can be seen; then
    Rewired input from XInput.

@@ -170,7 +170,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--game", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--files", help="comma-separated serialized file names (default: all in Cuphead_Data)")
+    ap.add_argument("--files", help="comma-separated serialized file names (default: all in Cuphead_Data; 'none' for bundles only)")
     ap.add_argument("--bundles", action="store_true", help="also convert the files inside StreamingAssets asset bundles")
     a = ap.parse_args()
     data = os.path.join(a.game, "Cuphead_Data")
@@ -178,7 +178,7 @@ def main():
         sys.exit("not a Cuphead folder (no Cuphead_Data/globalgamemanagers): " + a.game)
     if os.path.abspath(a.out).startswith(os.path.abspath(a.game)):
         sys.exit("--out must be outside the game folder")
-    names = a.files.split(",") if a.files else sorted(
+    names = [] if a.files == "none" else a.files.split(",") if a.files else sorted(
         f for f in os.listdir(data)
         if f == "globalgamemanagers" or f.startswith("level") or f.endswith(".assets"))
     stats = {"objects": 0, "errors": [], "files": 0}
@@ -197,10 +197,15 @@ def main():
             if not os.path.isfile(path) or bname.endswith(".manifest"):
                 continue
             env = UnityPy.load(path)
-            for fname, sf in env.files.items():
-                if hasattr(sf, "objects"):
-                    convert_file(sf, os.path.join(a.out, "objects", "bundles", bname, os.path.basename(fname) + ".chob"), stats)
-                    stats["files"] += 1
+
+            def walk(files):
+                for fname, sf in files.items():
+                    if hasattr(sf, "objects"):
+                        convert_file(sf, os.path.join(a.out, "objects", "bundles", bname, os.path.basename(fname) + ".chob"), stats)
+                        stats["files"] += 1
+                    elif hasattr(sf, "files"):   # a bundle: its serialized files are inside
+                        walk(sf.files)
+            walk(env.files)
     print("convert_objects: %d files, %d objects, %d errors in %.1f s" % (stats["files"], stats["objects"], len(stats["errors"]), time.time() - t0))
     for e in stats["errors"][:30]:
         print("  error:", e)

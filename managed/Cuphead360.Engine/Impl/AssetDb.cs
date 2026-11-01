@@ -220,9 +220,18 @@ namespace Cuphead360.Engine
 
         static readonly Dictionary<string, Type> unityTypes = new Dictionary<string, Type>();
 
+        // Editor-side class names of assets whose player type has another name.
+        static readonly Dictionary<string, string> playerClass = new Dictionary<string, string>
+        {
+            ["AudioMixerController"] = "AudioMixer",
+            ["AudioMixerGroupController"] = "AudioMixerGroup",
+            ["AudioMixerSnapshotController"] = "AudioMixerSnapshot",
+        };
+
         public static Type UnityType(string className)
         {
             if (unityTypes.TryGetValue(className, out var t)) return t;
+            if (playerClass.TryGetValue(className, out var pc)) { t = UnityType(pc); unityTypes[className] = t; return t; }
             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
             {
                 if (!asm.GetName().Name.StartsWith("UnityEngine")) continue;
