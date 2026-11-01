@@ -1,10 +1,10 @@
 # Managed player (current architecture, 2026-11-01)
 
-This replaces the custom IL interpreter (`src/runtime`) as the way Cuphead's
-code runs. The interpreter, its C++ Unity layer and the D1/CP1 work stay in
-the tree as history; they are not extended. The decision and its evidence are
-below; PORT_REVIEW.md Part A remains the record of why the interpreter path
-was not viable as it stood.
+This replaced the custom IL interpreter as the way Cuphead's code runs. The
+interpreter, its C++ Unity layer and the D1/CP1 work were removed from the
+tree in round 3; they are in git history (up to `bb73ff0`), as is the port
+review explaining why that path was not viable. Its still-valid content,
+packaging, budget and gate sections live on in [CONSOLE_PLAN.md](CONSOLE_PLAN.md).
 
 ## Decision
 
@@ -25,7 +25,7 @@ GOG Cuphead_Data/Managed/*.dll
 
 Why:
 - The interpreter still lacked generic types, exceptions, `finally`, GC,
-  unsigned/unordered compares and much of the BCL (PORT_REVIEW A5/A11), ran
+  unsigned/unordered compares and much of the BCL, ran
   Root Pack at ~0.8 FPS on a PC, and every gap needed its own oracle. .NET
   supplies all of that as tested code; NativeAOT compiles it.
 - Unity's own managed code (Vector3, Mathf, MonoBehaviour, UI, coroutine
@@ -44,10 +44,11 @@ Why:
 | `managed/Cuphead360.Patcher` | Cecil tool: `publicize`, `gen`, `redirect` (plus BCL call replacement), `dump` |
 | `managed/Cuphead360.Engine/Impl` | the engine: object table, lifecycle, player loop, coroutines, scenes, assets, field decoder, icalls |
 | `managed/Cuphead360.Engine/Generated` | `Icalls.g.cs`, `Publicized.g.cs` (generated from the player's DLLs; git-ignored) |
-| `managed/Cuphead360.Player` | host: `census`, `selftest`, `run`, `fields` |
+| `managed/Cuphead360.Player` | host: `census`, `selftest`, `run`, probes `resource`, `fields` |
 | `managed/lib/{public,patched}` | the player's patched assemblies (git-ignored) |
 | `tools/build_managed.py` | the pipeline, stage by stage |
 | `tools/convert_objects.py` | Unity serialized files -> CHOB value trees (`GameData/objects`) |
+| `tools/save_guard.py` | fingerprint/check of the installed saves |
 
 Build and check (Windows, .NET 10 SDK; wasm/c also need wasi-sdk 29 at
 `C:\wasi-sdk-29.0-x86_64-windows` and Spire360's w2c2 build):
@@ -55,7 +56,7 @@ Build and check (Windows, .NET 10 SDK; wasm/c also need wasi-sdk 29 at
 ```
 python tools/build_managed.py                       # patcher..selftest
 python tools/build_managed.py --stage wasm,c        # console C
-python -I tools/convert_objects.py --game game --out work/GameData
+python -I tools/convert_objects.py --game game --out work/GameData [--bundles]
 dotnet work/managed/jit/Cuphead360.Player.dll run --frames 300
 ```
 
@@ -84,6 +85,15 @@ dotnet work/managed/jit/Cuphead360.Player.dll run --frames 300
   never the registry.
 - **Missing engine methods** return default and are listed with hit counts at
   the end of a run (`Icall.Missing`); `Icall.Strict` makes them throw.
+- **Engine-created objects.** Built-in classes the engine creates (a loaded
+  Material, TextAsset, GameObject) get no constructor call, as in Unity;
+  MonoBehaviours and ScriptableObjects run theirs.
+- **Platform boundaries follow the original fallback paths.** GOG Galaxy's
+  Init raises the glue's RUNTIME_ERROR (peer unavailable), so the original
+  code logs "Failed to initialize GOG Galaxy" and its guarded calls stay off.
+- **Exceptions** in behaviour messages and coroutines are reported with IL
+  offsets per frame (the game DLLs have no PDBs) and the frame continues, as
+  in Unity.
 
 ## Verified (2026-11-01, Windows, this machine)
 
@@ -97,7 +107,7 @@ dotnet work/managed/jit/Cuphead360.Player.dll run --frames 300
 | `run --frames 300` | scene_start (build 0) loads; original `CupheadStartScene.Awake` -> `Cuphead.Init` loads `Core/CupheadCore` via Resources.Load; 496 script objects decoded, 0 mismatches; `start_cr` proceeds to `AssetBundleLoader` and stops at the unimplemented AssetBundle API |
 | Installed saves | `%APPDATA%\Cuphead` (3 files) unchanged by SHA-256 across the runs |
 
-Not verified: anything rendered, audio, input, any scene after scene_start,
+Not verified: anything rendered, audio, input, any scene after scene_title,
 the C compiled by the XDK, anything on Xenia or hardware, performance.
 
 Round 2 added asset bundles (420 converted, engine API), JsonUtility,
@@ -107,22 +117,27 @@ converted data and are listed in a PROPS ledger, so state-only behaviour stays
 visible. The boot now runs the full `Cuphead.Init` and stops at the GOG Galaxy
 SDK boundary.
 
-## Gaps, in the order the boot meets them
+Round 3 added the Galaxy boundary (original unavailable path), AudioMixer
+state from the mixer constant, TextAsset, correct bundle LoadAllAssets, Shader
+stubs and Unity's built-in resources in the converter. `run --frames 300`
+goes scene_start -> scene_title through the original `LoadSceneAsync` with 0
+exceptions, 0 data problems and 556 script objects decoded with 0 mismatches.
 
-1. GOG Galaxy SDK boundary: the original offline/unavailable path, with local
-   stats/achievement bookkeeping intact.
-2. AudioMixer state, Rewired initialization, `library/unity default resources`.
-3. scene_title via the original `LoadSceneAsync(1)`; then slot select and the
-   opening flow (OPENING_FLOW.md).
-4. Rendering: SpriteRenderer/Camera/sorting snapshot -> Windows preview
-   renderer (screenshots), then the console renderer (D3D9 under the XDK,
-   Vulkan via vulkan4xenon under xSDK). Sprite meshes, atlases, materials
-   (PORT_REVIEW A4).
-5. Input: Rewired's native input calls (redirected) fed from XInput pads.
-6. Animator, Physics2D (queries, triggers), ParticleSystem, UI/TextMesh, audio
-   playback, achievements/stats at the Galaxy boundary (offline path).
-7. Console: the srt WASI runtime + translated C in the XDK project; memory
-   and frame-time measurement (gates G-A/G-B in PORT_REVIEW A7).
+## Gaps, in the order the title meets them
+
+1. Rendering state: Camera rect/size, SpriteRenderer (sprite, color, flip,
+   sorting), Material properties and `Shader.PropertyToID`, Mesh,
+   CanvasRenderer/RectTransform (UI), so a Windows preview renderer can draw
+   the title from an engine snapshot (PNG captures).
+2. Animator: controllers, states, clips (sprite/transform/property curves),
+   events, `GetCurrentAnimatorStateInfo`, `Play`, `StringToHash`.
+3. Input: Rewired's native input layer (redirected P/Invokes) fed from XInput,
+   so the original title "press any button" and slot select work.
+4. Audio playback from AudioSource + mixer state; then the opening flow
+   (OPENING_FLOW.md): slot select, intro, Elder Kettle, world map, Root Pack.
+5. Physics2D (queries, triggers), ParticleSystem, UI/TextMesh Pro layout.
+6. Console: the srt WASI runtime + translated C in an XDK project; memory and
+   frame-time measurement (CONSOLE_PLAN.md gates G-A/G-B).
 
 ## Toolchain transition (user requirement)
 

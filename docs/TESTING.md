@@ -2,71 +2,45 @@
 
 ## Principles
 
-A build is not a test. Each result must state which of these was actually
-done:
+A build is not a test. Each result states which of these was actually done:
 
 1. compiled;
-2. linked;
-3. executed on Windows;
-4. compared against the original game or its IL;
-5. executed in Xenia;
-6. executed on Xbox 360 hardware.
+2. executed on Windows (JIT oracle, the shared managed code);
+3. compared against the original game (captures, traces from the user's PC game);
+4. executed in Xenia (XDK build only; functional, never timing);
+5. executed on Xbox 360 hardware (xSDK build; the user runs it).
 
-## Automated Windows harness
+Synthetic stimulus (self-tests, probes) is labelled as such and never counts
+as gameplay.
 
-`build\win32\Cuphead360.exe` supports:
+## Windows checks
 
-```
---headless             no visible window; render offscreen
---frames N             run N fixed simulation steps then exit
---fixed-dt SECONDS     simulation step (default 1/60)
---seed N               deterministic RNG seed
---log PATH             structured log file
---screenshot PATH      write a screenshot at exit
---script PATH          scripted input sequence
---speed N              run faster than real time (headless)
---mute                 process audio but do not output it
-```
+- `census`: every type loads and every method JIT-compiles.
+- `selftest`: Unity lifecycle semantics through the patched assemblies
+  (`managed/Cuphead360.Player/SelfTest.cs`).
+- `run --frames N`: the original boot from `scene_start`, deterministic with
+  `--seed`. A run is judged by its ledgers: exceptions (with IL offsets),
+  missing engine methods, property-bag accessors (state only), data problems
+  and field-decode mismatches. Keep them visible; never silence a gap.
+- `tools/save_guard.py check` before and after any run.
 
-The default test run is headless, fixed-step, muted, and writes a structured
-log with scene loads, errors, frame times, and state snapshots.
+Planned (CONSOLE_PLAN.md V1): render fixtures per material recipe, and a
+test-only trace mod for the user's PC game recording per-frame state under
+recorded input, diffed against port traces.
 
-## Test categories
+## Xenia (XDK build)
 
-- `tests/unit/`: core containers, endian readers, metadata parser, IL
-  decoder, math.
-- `tests/integration/`: load the real metadata package; run selected real
-  methods and compare against a .NET reference harness.
-- `tests/gameplay/`: scripted input against real scenes; assert positions,
-  damage, transitions, and content loading.
-- `tests/regression/`: golden logs/screenshots for known checkpoints.
+Generally not needed: the Windows build runs the same managed code and
+answers behaviour questions faster. The one required Xenia run verifies
+genuine in-game status of the XDK build before switching to xSDK +
+vulkan4xenon. Launch Xenia hidden, with audio disabled, and drive the input
+from the harness. xSDK builds don't run on Xenia.
 
-## Reference oracle
+## Hardware (xSDK build)
 
-The original `Assembly-CSharp.dll` runs under .NET on Windows for pure
-managed methods that do not enter Unity native code. `tests/reference/`
-contains a small C# harness built with VS2010's `csc.exe`; it loads the
-user's assembly and prints deterministic results for selected methods. The
-interpreter is compared against those results with explicit float tolerances.
-
-For Unity-dependent behaviour, the original game is the oracle: scripted
-input, repeated observations, and logged state. Comparisons must be
-programmatic where possible.
-
-## Xbox 360 / Xenia procedure
-
-1. Build `default.xex`.
-2. Prepare the content required by the current target entrypoint using
-   [BUILDING.md](BUILDING.md). A production `tools\prepare_game.py` packer
-   does not exist yet.
-3. Deploy the folder `Cuphead360\` containing `default.xex` and `GameData\`.
-4. Launch in Xenia Canary (or on hardware running unsigned XEX).
-5. Check [HANDOFF.md](HANDOFF.md) for the current entrypoint and
-   [VERIFICATION.md](VERIFICATION.md) for the exact tested scope and log paths.
-   Historical Xenia results do not validate the latest binary.
-6. Report: build commit, Xenia/hardware version, exact steps, last log lines,
-   screenshot/video, and whether the failure is a crash, hang, content-load
-   error, or visual/gameplay defect.
+The user runs builds on the console and sends logs/captures. Report: build
+commit, steps, last log lines, capture, and whether a failure is a crash,
+hang, content error or visual/gameplay defect.
 
 Xenia success is not hardware validation, and compilation is not Xenia
 success.

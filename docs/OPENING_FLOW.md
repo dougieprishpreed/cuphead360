@@ -66,35 +66,12 @@ a scene carousel.
   what progression persists and test it; do not claim full save compatibility
   from a single in-memory map return.
 
-## Asset pipeline decision
+## Asset pipeline
 
-The existing custom metadata/scene packages and per-sprite CHTX RGBA files are
-development intermediates. Prior architecture documents planned atlasing,
-streaming and Xbox texture layout support; a production Xbox asset format and
-complete conversion pipeline have not been implemented.
-
-Proceed incrementally:
-
-1. Make sprite PNG previews optional. Keep one canonical current extraction
-   per scene and preserve compact verification captures separately.
-2. Deduplicate identical generated assets using immutable content identities
-   and a manifest shared across scenes. Regeneration must not mutate another
-   scene's assets through writable hardlinks.
-3. Measure texture residency, scene-switch lifetime, runtime heap use and peak
-   memory. Current Scene::LoadTextures eagerly loads every raw texture; this
-   must not be confused with the planned streaming architecture.
-4. Introduce bounded texture residency and suitable atlas/pack organization.
-   Keep sprite rects, pivots, transparency and animation references correct.
-5. Add target-specific texture/audio representations with renderer/audio paths
-   that can consume them. The current software renderer reads linear RGBA;
-   changing files to a GPU-native layout alone will not make it work.
-6. Validate visual output and memory on Windows and Xenia. Record actual Xbox
-   hardware results separately when available. The console has 512 MB shared
-   memory; disk-size reduction alone does not demonstrate a viable memory
-   working set.
-
-Do not convert the entire game speculatively before this small playable route
-establishes the required asset/runtime interfaces.
+Content packaging, textures and audio follow [CONSOLE_PLAN.md](CONSOLE_PLAN.md)
+section 2. Don't convert the whole game speculatively before this route
+establishes the renderer's and audio's needs; CHOB object trees are the
+development format until then.
 
 ## Evidence and completion gate
 
@@ -113,21 +90,9 @@ VERIFICATION.md. At minimum cover:
 | HUD | Captures tied to health changes, death and retry |
 | Victory | Original win/results flow and return to map with progression retained |
 | Input/audio | Interactive input evidence and explicit playback/mute status |
-| Regressions | Tutorial/platforming and prepared boss boot/play harnesses |
+| Regressions | Earlier routes and boss scenes keep booting and playing through the original flow |
 | Platforms | Windows execution, both target builds, and separately identified Xenia/hardware execution |
 
 Each test must fail when its required outcome is missing. A scene boot PASS
 does not validate authored attacks, map navigation or the complete opening.
 Do not mark revised M1 complete until the playable route and its evidence exist.
-
-## Generated-file cleanup checkpoint
-
-On 2026-10-31, the user approved removal of 22 obsolete extraction snapshots
-and redundant sprite PNG sidecars with matching runtime RGBA files. Cleanup
-reclaimed 4,106,863,495 bytes. Forty-one root screenshot/preview files were
-copied and checksum-verified under `work/cleanup-evidence-20261031` first.
-The local audit is in `work/cleanup-manifest.json` and `work/cleanup-result.json`.
-The installed game, active regression scenes, metadata, current combat evidence,
-source and repository history were preserved. Measured project size afterward
-was about 15.81 GB (decimal); most remaining space is game data and generated
-raw sprite content.

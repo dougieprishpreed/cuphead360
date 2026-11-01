@@ -34,7 +34,8 @@ maps, and save fields in the same assembly.
   generic type definitions and 74 generic method definitions** in this assembly,
   including AssetLoader, AbstractLevelProperties, AbstractLevelState and
   PlayerEvent families. Earlier claims that generics were confined to external
-  assemblies were incorrect. See PORT_REVIEW.md §A11 F1.
+  assemblies were incorrect. (The managed player runs them on .NET, so this
+  no longer constrains the port.)
 - `Assembly-CSharp-firstpass.dll` — Steamworks/GOG Galaxy glue.
 - `Rewired_Core.dll`, `Rewired_Windows_Lib.dll` — input.
 - `GalaxyCSharp.dll`, `GalaxyCSharpGlue.dll`, `Galaxy64.dll` — GOG Galaxy.

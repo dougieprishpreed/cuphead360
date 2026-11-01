@@ -2,69 +2,54 @@
 
 ## Prerequisites
 
-- Windows with Visual Studio 2010 (the XDK integration requires the full
-  edition; Express cannot load the Xbox 360 platform).
-- Microsoft Xbox 360 XDK installed. On this machine:
-  - `XEDK=C:\Program Files (x86)\Microsoft Xbox 360 SDK`
-  - PowerPC compiler: `%XEDK%\bin\win32\cl.exe` (`_MSC_VER=1600`)
-  - `MSBuild`: `C:\Windows\Microsoft.NET\Framework\v4.0.30319\MSBuild.exe`
-- Python 3 for the metadata/asset tools.
-- The user's GOG Cuphead installation (default `game\`).
+- Windows, .NET 10 SDK, Python 3 with UnityPy 1.25 (`pip install UnityPy`).
+- The player's GOG Cuphead installation (default `game\`).
+- Console C (stages `wasm`, `c`): wasi-sdk 29 at
+  `C:\wasi-sdk-29.0-x86_64-windows` (or `WASI_SDK_PATH`), the
+  dotnet-experimental NuGet feed (`managed/wasm-nuget.config`), and a built
+  w2c2 (Spire360's `out/logic/w2c2-build` next to this repository, or
+  `--w2c2`).
+- Console host (not written yet): the XDK (VS2010 + Xbox 360 SDK) until the
+  Xenia check, then xSDK + vulkan4xenon in the WSL distro `CTR360-XSDK`
+  (shared with other projects; don't change its checkouts).
 
-The XDK environment is set by `%XEDK%\bin\win32\xdkvars.bat`. Do **not** run
-`vsvars32.bat` in the same prompt: it puts the x86 compiler ahead of the XDK
-PowerPC compiler.
-
-## Windows development build
+## Managed player
 
 ```
-scripts\build_win32.bat
+python tools/build_managed.py                  # patcher .. selftest
+python tools/build_managed.py --stage wasm,c   # console C
 ```
 
-Output: `build\win32\Cuphead360.exe` (plus `.pdb`).
+Stages run in order and each can be run alone (`--stage gen,engine,redirect,jit`
+after changing `Impl/`). See the docstring of `tools/build_managed.py`.
+Outputs: `managed/lib/{public,patched}` (patched game DLLs),
+`managed/Cuphead360.Engine/Generated/` (stubs), `work/managed/{patcher,engine,jit,wasm,c}`.
+All of it is derived from the player's game and git-ignored.
 
-For a Visual Studio build, open `projects\win32\Cuphead360.sln`, select
-`Release|Win32`, and build.
-
-The Windows build is a first-class target: it uses the same `src/core`,
-`src/runtime`, `src/engine`, and `src/game` sources as the Xbox 360 build.
-Only `src/platform/win32` differs.
-
-## Xbox 360 build
+## Game data
 
 ```
-scripts\build_xbox360.bat
+python -I tools/convert_objects.py --game game --out work/GameData            # serialized files + built-in resources
+python -I tools/convert_objects.py --game game --out work/GameData --files none --bundles
 ```
 
-This sets `XEDK`, `INCLUDE`, `LIB`, and `PATH` locally in the batch process,
-then invokes MSBuild on `projects\xbox360\Cuphead360.vcxproj` with
-`Configuration=Release` and `Platform=Xbox 360`.
+Writes `work/GameData/objects/*.chob` (format in the script's docstring).
+Reads the game folder only. Pixels and audio samples are not converted yet.
 
-Output: `build\xbox360\default.xex`.
+## Run and check
 
-The XEX is not validated by compiling. See `docs/TESTING.md` for Xenia and
-hardware procedures.
-
-## Data preparation
-
-The current tools prepare individual development packages:
-
-```text
-python tools\build_metadata.py game\Cuphead_Data\Managed\Assembly-CSharp.dll work\metadata\metadata.chm
-python tools\extract_scene.py --game game\Cuphead_Data --scene scene_level_tutorial --out work\extract_level --add-level-resources
+```
+python tools/save_guard.py check                                  # installed saves untouched (before and after)
+dotnet work/managed/jit/Cuphead360.Player.dll selftest
+dotnet work/managed/jit/Cuphead360.Player.dll run --frames 300 [--seed 360]
+dotnet work/managed/jit/Cuphead360.Player.dll resource "<path>" [Type]
+dotnet work/managed/jit/Cuphead360.Player.dll fields <file> <pathId>
 ```
 
-Reuse current prepared scenes when validating source changes; avoid redundant
-large extractions. These tools read the user's installation and write derived
-data outside `game/`. Production `tools/prepare_game.py` and a complete Xbox
-GameData packer do not exist yet. See ASSET_PIPELINE.md and PORT_REVIEW.md for
-format, renderer and memory limits. A built XEX does not demonstrate that its
-content can fit in console memory or run the opening flow.
-
-## Reproducibility
-
-- Source builds should be reproducible from a clean checkout with the same
-  XDK/VS2010 toolchain.
-- Generated data is deterministic for a given source installation; timestamps
-  are not embedded in content files.
-- Local game data, decompiled output, and generated assets are gitignored.
+`run` writes the port's saves and PlayerPrefs under `work/managed/save`
+(guarded so it can't resolve into the PC's real AppData/Documents). Each run
+ends with the missing-engine-method, property-bag and data-problem ledgers.
+Exception reports give IL offsets; match them with
+`dotnet work/managed/patcher/Cuphead360.Patcher.dll dump --in managed/lib/public/<dll> --type <T> --method <M>`.
+For full stacks without inlining, set `DOTNET_JitNoInline=1` and
+`DOTNET_TieredCompilation=0`.

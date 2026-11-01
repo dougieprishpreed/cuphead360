@@ -7,8 +7,8 @@ $0 API spend. Do not spawn subagents or other models.
 
 Read `docs/HANDOFF.md` first, then `docs/MANAGED_PLAYER.md`, then check the
 actual `git status` / `git log` against the checkpoint HANDOFF records.
-PORT_REVIEW.md Part A is background on why the old interpreter was retired;
-OPENING_FLOW.md defines the first playable milestone.
+`docs/CONSOLE_PLAN.md` holds the console end state, budgets and gates;
+`docs/OPENING_FLOW.md` defines the first playable milestone.
 
 The project now runs the user's own Cuphead assemblies as original IL on .NET
 with Unity's engine methods redirected into `managed/Cuphead360.Engine`, and
@@ -22,12 +22,12 @@ Objective: a genuinely playable alpha release candidate on real Xbox 360
 hardware, with gameplay and presentation virtually identical to the user's GOG
 version, plus a practical converter for the user's own game files.
 
-Continue with HANDOFF.md's "Next round" list (the GOG Galaxy boundary, then booting to
-scene_title through the original LoadSceneAsync, then a Windows preview
-renderer and input, then the opening flow). Rebuild with
-`python tools/build_managed.py`; check with `census`, `selftest` and
-`run --frames N`, and keep the missing-engine-method ledger and data-problem
-list visible rather than hiding gaps.
+Continue with HANDOFF.md's "Next round" list (render state and a Windows
+preview renderer for the title, then the Animator, then Rewired input from
+XInput, then the opening flow). Rebuild with `python tools/build_managed.py`;
+check with `selftest` and `run --frames N`, run `tools/save_guard.py check`
+around runs, and keep the missing-engine-method, property-bag and
+data-problem ledgers visible rather than hiding gaps.
 
 Verify behaviour with the shared Windows build; Xenia runs are generally not
 needed. Required transition: once genuine in-game status is verified on Xenia
