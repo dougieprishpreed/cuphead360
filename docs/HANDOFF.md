@@ -21,9 +21,12 @@ time (builds, conversions, ILC) so the user's PC stays usable;
     `446a2da` decision docs; `2a4d8bc` asset bundles, Galaxy boundary reached.
   - `bb73ff0` round 3: original code boots to scene_title with no exceptions.
   - `98b0439` round 3 cleanup + docs ("Remove the retired interpreter tree ...").
-  - Round 4 commit ("Render state, Animator, UI and a Windows preview of the
-    title"): engine `Impl/Render.cs`, `Animation.cs`, `UI.cs`,
-    `RenderList.cs`; `tools/preview.py`, `tools/chob.py`; docs.
+  - `cdb14c0` round 4 ("Render state, Animator, UI and a Windows preview of
+    the title").
+  - `8f3201d` round 5: input (Unity Input fed from XInput/scripts, Rewired
+    on its Unity fallback), Physics2D, dynamic TTF/CFF fonts, the bot.
+  - `5c2b512` round 5: live Windows window (`play`), texture export,
+    collision response, RectTransform/clone/text/mask/clip fixes.
 - Side branch `interpreter-d1-r4-wip` (`ecbff5b`): the interrupted D1 r4
   interpreter edits, committed as found, not accepted, not continued.
 - Uncommitted: nothing intended. `managed/lib`, `managed/**/Generated`,
@@ -37,42 +40,42 @@ time (builds, conversions, ILC) so the user's PC stays usable;
 
 ## Verified (Windows, JIT oracle)
 
-Round 4 (`run16.log`, `run17.log`): the original title sequence plays: 1 s
-black, the fader fades out (t=1-2 s), the MDHR logo animation runs all 100
-frames through the Animator, fades, then the dancing title
-(animator_title_screen) with the flashing TextMesh Pro "Press Any Button".
-900 frames, 0 exceptions, 0 data problems, 1 missing engine method
-(`AudioSource.PlayOneShotHelper`); PROPS: 9, all audio. Sprite atlases are
-late-bound through the game's own `SpriteAtlasLoader`. The Windows preview
-(`run --capture` + `tools/preview.py`) draws the frames: contact sheet
-`work/preview/title_round4_sheet.png`. selftest 23/23; saves unchanged
-(SHA-256). Rounds 1-3: VERIFICATION.md.
+Round 5 (`run63.log`, `run65.log`, `live4.log`): the full normal loop runs
+from the original code under scripted pad input, headless and in the live
+window: title, slot select, new game, intro, Elder Kettle's house, world map
+(walking the real paths), Root Pack on Simple, won, results screen, back on
+the map, King Dice's tooltip. 0 exceptions, 0 data problems; the remaining
+gaps are audio, render textures and `Texture2D.SetPixel`. The user's two
+reports (walking through map scenery; misplaced bubble text) are fixed at
+their causes (collision response; RectTransform anchoredPosition, cloned
+RectOffset padding, line spacing), and the same work fixed HUD placement, a
+stale duplicate bubble and UGUI masks. selftest 23/23; saves unchanged.
+Details and earlier rounds: VERIFICATION.md.
 
-Not verified: a comparison with the user's PC game (no reference capture
-yet), the game's post-effect camera (not drawn), input, audio, any scene past
-the title, XDK/xSDK compile of the translated C, Xenia, hardware, performance
-or memory.
+Not verified: audio, the post-effect camera and render textures (not drawn),
+a comparison with the user's PC game, a full hand-played run (the user plays
+`play`; their reports drive fixes), XDK/xSDK compile of the translated C,
+Xenia, hardware, memory.
 
 ## Next round (in order)
 
-1. **Input.** Rewired's redirected native layer (its P/Invokes and the
-   Unity input it polls) fed from XInput on Windows, plus a scripted input
-   file for repeatable runs (`run --input script`). Goal: the original title
-   join (`PlayerManager.OnPlayerJoinedEvent`) -> `SceneLoader.LoadScene
-   (scene_slot_select, Iris, Fade)` -> slot select responds. Check the
-   transition with the preview (iris/fade are sprite and material state).
-2. **Audio playback**: AudioSource/AudioClip state (the PROPS ledger),
-   `PlayOneShotHelper`, mixer volumes; sample conversion of the clips the
-   title uses; a Windows audio backend (or a mixed WAV capture to check).
-3. **Opening flow** on Windows (OPENING_FLOW.md): slot select, intro book,
-   Elder Kettle's house, world map, Root Pack; implement what each meets
-   (Physics2D, ParticleSystem, SpriteMask, render textures, Animator gaps).
-4. **Reference comparison**: ask the user for PC captures of the title (and
-   later scenes) at known times to compare with the preview.
+1. **User play reports first.** The user plays `play` (live window, pad)
+   and reports defects; fix each at its root cause, then sweep for the same
+   cause elsewhere (this round: anchoredPosition, cloned native state, clip
+   planes, masks).
+2. **Audio playback**: AudioSource/AudioClip/mixer state, `PlayOneShotHelper`,
+   `Play`/`Stop`/`UnPause`, `AudioListener.pause`; clip sample conversion
+   (Vorbis in the .resS files and bundles); a Windows audio backend
+   (XAudio2 or WASAPI) in the live host.
+3. **Render textures and the post-effect camera** (GlowBossTitle, film
+   grain, chromatic aberration), `Texture2D.SetPixel/Apply`, scene-load
+   hitches (texture reads: stream or preload).
+4. **More of the game**: other bosses, run-and-gun levels, the shop, saves
+   across sessions; Animator interruptions and blend trees.
 5. **Console host (XDK)**: srt runtime + translated C, a GPU backend for the
-   render list including the game's post-effect camera; Xenia once, hidden,
-   muted, self-driven, to verify genuine in-game status; then **switch to
-   xSDK + vulkan4xenon** and test on hardware with the user.
+   render list (the GL host is the reference); Xenia once, hidden, muted,
+   self-driven, to verify genuine in-game status; then **switch to xSDK +
+   vulkan4xenon** and test on hardware with the user.
 
 ## Rules that stay
 

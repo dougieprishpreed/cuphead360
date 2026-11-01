@@ -34,7 +34,14 @@ python -I tools/convert_objects.py --game game --out work/GameData --files none 
 ```
 
 Writes `work/GameData/objects/*.chob` (format in the script's docstring).
-Reads the game folder only. Pixels and audio samples are not converted yet.
+Reads the game folder only.
+
+```
+python -I tools/convert_textures.py --game game --out work/GameData --bundles [--only-missing]
+```
+
+Writes `work/GameData/textures/*.tex` (GPU formats as stored; crunched DXT
+unpacked), which the live window uploads. Audio samples are not converted yet.
 
 ## Run and check
 
@@ -47,7 +54,16 @@ dotnet work/managed/jit/Cuphead360.Player.dll fields <file> <pathId>
 dotnet work/managed/jit/Cuphead360.Player.dll run --frames 900 --capture 60,300,600 [--capture-every N] [--capture-out F]
 python -I tools/preview.py [--frames 60,300] [--sheet]           # captures -> work/preview/frame_*.png
 python -I tools/chob.py scene work/GameData/objects/level1.chob   # hierarchy of a converted scene
+dotnet work/managed/jit/Cuphead360.Player.dll play                # live window: pads/keyboard, close to quit
+dotnet work/managed/jit/Cuphead360.Player.dll run --frames 15301 --save work/managed/save_bot --bot tests/input/bot_veggies.txt
+dotnet work/managed/jit/Cuphead360.Player.dll run ... --inspect <GameObject> --dump-at N   # rects, components, fields
 ```
+
+`play` takes the same options as `run` plus `--shot N,..` (PNG to
+`work/live`), `--max-frames N` and `--unlocked 1` (no vsync). `--bot`
+drives the pads from a step script (wait, press, hold, pressuntil, goto,
+fight; `managed/Cuphead360.Player/Bot.cs`); `--input` replays a raw
+per-frame input script.
 
 `--capture` writes the engine's render list for those frames
 (`work/preview/capture.jsonl`); `preview.py` decodes the textures it names

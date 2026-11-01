@@ -3,6 +3,28 @@
 Newest first. Each entry says what was run, on which build, and what it
 showed. Windows entries use the JIT oracle (`work/managed/jit`).
 
+## 2026-11-01 managed player, round 5
+
+Source: `8f3201d` (input, 2D physics, dynamic fonts, bot) and `5c2b512`
+(live window, collision response, UI layout/mask/text fixes). Windows JIT
+oracle; textures exported with `tools/convert_textures.py` (1,379 textures,
+14.2 GB, 0 errors).
+
+| Command | Result |
+| --- | --- |
+| `selftest` | `SELFTEST PASS: 23 passed, 0 failed` |
+| `run --frames 15301 --save work/managed/save_bot --bot tests/input/bot_veggies.txt` (`work/managed/run63.log`, `run65.log`; save dir deleted first) | the full normal loop from the original code under scripted pad input: title -> slot select -> new game -> intro book -> Elder Kettle's house (frame 3308) -> world map (5442) -> walks the map paths (A* over the game's own colliders) to Root Pack, enters on Simple (level at 8715) -> fight won (13759) -> scene_win results (13768) -> back on the map (14322) -> King Dice's map tooltip. 16 scene loads, 0 exceptions, 4,264 fields decoded, 0 mismatched, 0 data problems; 15 missing engine methods (audio: `PlayOneShotHelper`, `Play`, `Stop`, `UnPause`, `AudioListener.pause`; `RenderTexture` size; `Texture2D.SetPixel/Apply`) and 6 Rewired user32 P/Invokes (its expected fallback to Unity input) |
+| User report "player walks through unpassable scenery on the world map" | `Physics2D` now separates dynamic bodies from solid colliders (Minkowski MTV); the player stops at walls; the bot had to path around them |
+| User report "text in word bubbles is improperly placed" | house bubble (TMP): resizes with OnRectTransformDimensionsChange. King Dice map tooltip: the portrait was 640 px to the right (RectTransform grandchildren lost their anchoredPosition when an ancestor resized), the text had no margin (the cloned prefab lost its RectOffset padding of 35), and it sat high (line spacing applied below lines instead of above). After the fixes (frame 15300 preview and live shot): portrait left, bubble right with its tail on the portrait, text wrapped inside 35 px margins, CONFIRM bottom-right, the map darkened behind |
+| Same root causes elsewhere | level HUD moved from screen centre to bottom-left; the stale duplicate speech bubble in the house (world-space canvas seen by the UI camera on its near plane) is now clipped; the HUD weapon card's white square was a UGUI Mask (now stencil-only) |
+| `play --bot ... --unlocked 1 --shot 4200,9000,15300` (`live4.log`) | live window, the same loop to the map tooltip; screenshots match the preview; holds 60 fps once warm (level: logic ~1.1 ms, build 0.5 ms, draw 0.2 ms); hitches at scene loads (0.6-2 s) |
+| `play` again after the blend fix (`live5.log`) | ended at frame ~7800 with no error and no crash event (window closed); before that the bot looped on a failed plan at the Root Pack gate (live dt is not deterministic): a bot limitation, not a game fault |
+| `tools/save_guard.py check` | `OK, 3 files unchanged (SHA-256)` |
+
+Not verified: audio (not implemented), render textures and the post-effect
+camera (not drawn), a comparison against the user's PC game, the whole loop
+played by hand on a pad in the live window, any console build.
+
 ## 2026-11-01 managed player, round 4
 
 Source: the round-4 commit ("Render state, Animator, UI and a Windows preview

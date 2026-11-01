@@ -27,6 +27,12 @@ as gameplay.
 - `run --capture ...` + `tools/preview.py`: PNGs of the engine's render list
   (what the port would draw). Compare against captures of the user's PC game
   at the same moments; the preview leaves out the game's post-effect camera.
+- The loop check: `run --bot tests/input/bot_veggies.txt` with a fresh
+  `--save` dir plays new game -> house -> map -> Root Pack (won) -> results
+  -> map. The bot presses the buttons a player would (scripted pad input
+  through Rewired); it drives the game, it doesn't force states.
+- `play`: the live window; the user's hand-played reports are the
+  acceptance signal on Windows.
 
 Planned (CONSOLE_PLAN.md V1): render fixtures per material recipe, and a
 test-only trace mod for the user's PC game recording per-frame state under

@@ -22,11 +22,16 @@ Objective: a genuinely playable alpha release candidate on real Xbox 360
 hardware, with gameplay and presentation virtually identical to the user's GOG
 version, plus a practical converter for the user's own game files.
 
-Continue with HANDOFF.md's "Next round" list (Rewired input from XInput and
-scripted input so the title advances to slot select, then audio playback,
-then the opening flow). Rebuild with `python tools/build_managed.py`; check
-with `selftest`, `run --frames N` and `run --capture ...` +
-`tools/preview.py` (PNG frames of what the engine draws); run
+The full normal gameplay loop (new game through Root Pack and back to the
+map) runs on Windows, headless and in the live window (`play`). Continue
+with HANDOFF.md's "Next round" list: the user's play reports first (root
+causes, then a sweep for the same cause), then audio, render textures and
+the post-effect camera, more of the game, then the console host. Rebuild
+with `python tools/build_managed.py --stage jit` after engine changes; check
+with `selftest`, the bot loop (`run --frames 15301 --save
+work/managed/save_bot --bot tests/input/bot_veggies.txt`, deleting the save
+dir first), `--capture` + `tools/preview.py`, `--inspect <GameObject>
+--dump-at N`, and `play ... --unlocked 1 --shot N`; run
 `tools/save_guard.py check` around runs, and keep the missing-engine-method,
 property-bag and data-problem ledgers visible rather than hiding gaps.
 

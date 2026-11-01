@@ -1,7 +1,7 @@
 # Status
 
-Not a playable port yet. What is true on 2026-11-01 (round 4), and what
-isn't. Evidence: [VERIFICATION.md](VERIFICATION.md). Architecture:
+Playable on Windows without sound; no console build yet. What is true on
+2026-11-01 (round 5), and what isn't. Evidence: [VERIFICATION.md](VERIFICATION.md). Architecture:
 [MANAGED_PLAYER.md](MANAGED_PLAYER.md). Plan: [CONSOLE_PLAN.md](CONSOLE_PLAN.md).
 
 ## Works (Windows, JIT oracle)
@@ -21,6 +21,13 @@ isn't. Evidence: [VERIFICATION.md](VERIFICATION.md). Architecture:
   animation, fade, dancing title with the flashing "Press Any Button" text,
   through the engine's cameras, sprite renderers, late-bound sprite atlases,
   Animator, Canvas/CanvasRenderer and TextMesh Pro meshes, 0 exceptions.
+- The full normal loop: new game, intro, Elder Kettle's house, world map,
+  Root Pack, results, back to the map, from the original code (bot-driven
+  and in the live window): pads/keyboard through Rewired's Unity fallback,
+  2D physics with collision response, dynamic TTF/CFF fonts, UGUI layout
+  and masks.
+- Live Windows window (`play`): OpenGL, compressed textures, XInput, 60 fps
+  once warm.
 - Windows preview: `run --capture` + `tools/preview.py` draw what the engine
   would render to PNG (BC7 atlases decoded from the player's game files).
 - Converter: all serialized files, built-in resources and asset bundles to
@@ -29,11 +36,11 @@ isn't. Evidence: [VERIFICATION.md](VERIFICATION.md). Architecture:
 
 ## Not done
 
-- A real renderer: only the Windows preview draws, without the game's
-  post-effect camera (film grain, chromatic aberration, blur).
-- Input (Rewired's native layer), audio playback, physics.
-- Any scene past the title; the opening flow (OPENING_FLOW.md).
-- Texture/audio conversion and the console content archive.
+- Audio playback.
+- Render textures and the game's post-effect camera (film grain, chromatic
+  aberration, blur); `Texture2D.SetPixel`.
+- Scenes beyond the opening loop are untested; scene loads hitch 0.6-2 s.
+- Audio conversion and the console content archive.
 - The console host: the translated C has not been compiled by the XDK or
   xSDK, nothing has run in Xenia or on hardware; no memory or frame-time
   measurements.
