@@ -1,4 +1,10 @@
-# Progress
+# Historical foundation progress
+
+This is an early, superseded milestone record, retained for its historical
+evidence. Its checklist and next steps are not current acceptance claims.
+Use [STATUS.md](STATUS.md) and [VERIFICATION.md](VERIFICATION.md) for current
+results, [HANDOFF.md](HANDOFF.md) for recovery state, and
+[NEXT_SESSION_PROMPT.md](NEXT_SESSION_PROMPT.md) to continue in a new session.
 
 Status legend: **Not investigated / Recovered / Implemented / Windows tested /
 XDK built / Xenia tested / Hardware tested**

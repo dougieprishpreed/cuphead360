@@ -47,4 +47,5 @@ authority; a clean MSVC x86 build is necessary but not sufficient.
 
 ## Current compile status
 
-See `docs/PROGRESS.md`. Only claims recorded there are current.
+See [STATUS.md](STATUS.md) for the current summary and
+[VERIFICATION.md](VERIFICATION.md) for versioned execution evidence.

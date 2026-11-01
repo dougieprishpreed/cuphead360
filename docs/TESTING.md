@@ -56,11 +56,14 @@ programmatic where possible.
 ## Xbox 360 / Xenia procedure
 
 1. Build `default.xex`.
-2. Prepare `GameData` with `tools\prepare_game.py`.
+2. Prepare the content required by the current target entrypoint using
+   [BUILDING.md](BUILDING.md). A production `tools\prepare_game.py` packer
+   does not exist yet.
 3. Deploy the folder `Cuphead360\` containing `default.xex` and `GameData\`.
 4. Launch in Xenia Canary (or on hardware running unsigned XEX).
-5. Expected initial behaviour and log paths are documented in
-   `docs/HANDOFF.md` as milestones become runnable.
+5. Check [HANDOFF.md](HANDOFF.md) for the current entrypoint and
+   [VERIFICATION.md](VERIFICATION.md) for the exact tested scope and log paths.
+   Historical Xenia results do not validate the latest binary.
 6. Report: build commit, Xenia/hardware version, exact steps, last log lines,
    screenshot/video, and whether the failure is a crash, hang, content-load
    error, or visual/gameplay defect.

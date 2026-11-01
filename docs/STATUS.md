@@ -25,9 +25,9 @@ hashes, regressions, and unverified Unity semantics.
 
 This pre-CP1 experimental checkpoint records the former pause, which the user
 has since revoked. Its PASS results are historical;
-[`PAUSED_HANDOFF.md`](PAUSED_HANDOFF.md) records lead review findings, rendering
+[`HANDOFF.md`](HANDOFF.md) records current recovery state, rendering
 defects and runtime changes requiring further audit. The new-session prompt is
-[`RESTART_PROMPT.md`](RESTART_PROMPT.md).
+[`NEXT_SESSION_PROMPT.md`](NEXT_SESSION_PROMPT.md).
 
 The current milestone has changed to the normal opening flow described in
 [`OPENING_FLOW.md`](OPENING_FLOW.md): new-game entry, Elder Kettle/house,

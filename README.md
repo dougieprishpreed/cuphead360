@@ -12,7 +12,9 @@ locally generated `GameData/` directory.
 
 ## Status
 
-Foundation plus first executable vertical slices. The current build:
+Development foundation with experimental vertical slices. Earlier foundation
+checkpoints demonstrated the following; their Xenia results do not validate
+the latest binary or the playable opening flow:
 - loads the original `Assembly-CSharp.dll` metadata and IL through a custom
   big-endian-safe runtime;
 - executes original `EaseUtils`, `PlayerData/PlayerInventory`, and
@@ -30,9 +32,11 @@ Foundation plus first executable vertical slices. The current build:
   `VelocityManager` IL, verified on Windows and in Xenia.
 
 It is **not** yet a playable Cuphead port. See
-[docs/PROGRESS.md](docs/PROGRESS.md) for exactly what compiles, executes, and
-has been validated, and [docs/HANDOFF.md](docs/HANDOFF.md) for the current
-build mode and next steps.
+[docs/STATUS.md](docs/STATUS.md) for the current summary and
+[docs/VERIFICATION.md](docs/VERIFICATION.md) for checkpoint evidence. Recovery
+state and next actions live in [docs/HANDOFF.md](docs/HANDOFF.md); use
+[docs/NEXT_SESSION_PROMPT.md](docs/NEXT_SESSION_PROMPT.md) to start a succeeding
+agent session. Update both recovery files at the end of each round of changes.
 
 Current reference build:
 

@@ -394,7 +394,7 @@ They show a non-null `PlayerDamageReceiver`, `CanTakeDamage=1`,
 calculation; do not use that historical line as a current enabled-state oracle.
 The investigation changed activity/enabled handling and float comparisons.
 The lead's unresolved review findings are in
-[`PAUSED_HANDOFF.md`](PAUSED_HANDOFF.md).
+[`HANDOFF.md`](HANDOFF.md).
 
 HUD evidence was captured from the same run:
 

@@ -124,6 +124,21 @@ lifecycle work below. A1's contract
 must enforce allocation limits and preserve sprite placement; it is planned,
 not implemented or accepted. See ASSET_PIPELINE.md for measured defects.
 
+After accepted CP1, a read-only package probe attributed Root Pack's frame-118
+fault to `Level.intro.readyComplete`: the serialized `intro` object is null.
+Its class has no serialized leaf fields, the extractor emits no object-presence
+record, and the binder creates nested class objects only while applying child
+values. The prepared scene has no `intro` record or children. A later generic
+serialization repair must preserve empty inline objects; creating one will
+still leave the real intro animation/callback gate to implement. Do not force
+`readyComplete` or treat this as an Animator-only fault.
+
+The lead confirmed this finding and places a bounded S1 serialized-object
+graph checkpoint after A1 and before the common lifecycle work. S1 must validate
+type eligibility, byte consumption and object presence, including collections;
+it must not manufacture intro completion. A separate S2 port-local filesystem
+boundary follows the required semantic repairs and precedes slot-screen runs.
+
 The project lead issues one bounded implementation brief at a time, followed
 by Opus review and an independent Sol check:
 
