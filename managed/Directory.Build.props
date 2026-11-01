@@ -1,0 +1,21 @@
+<Project>
+  <!--
+    Shared settings for the Cuphead360 managed projects.
+
+    CupheadLibDir: the player's game assemblies after the patcher's passes.
+      lib/public/   publicized copies: what Cuphead360.Engine compiles against
+      lib/patched/  publicized + every engine call redirected into the engine
+    tools/build_managed.py fills both from the GOG install; nothing under lib/
+    may be committed or redistributed.
+  -->
+  <PropertyGroup>
+    <CupheadLibDir Condition="'$(CupheadLibDir)' == ''">$(MSBuildThisFileDirectory)lib/patched/</CupheadLibDir>
+    <CupheadPublicDir Condition="'$(CupheadPublicDir)' == ''">$(MSBuildThisFileDirectory)lib/public/</CupheadPublicDir>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+</Project>

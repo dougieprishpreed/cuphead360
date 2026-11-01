@@ -47,3 +47,9 @@ desktop.ini
 # Local test artifacts.
 *_selftest.bin
 cuphead360_win32.log
+
+# Managed player: derived from the player's own assemblies, never committed.
+/managed/lib/
+/managed/**/bin/
+/managed/**/obj/
+/managed/Cuphead360.Engine/Generated/

@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    The Cuphead360 player: the engine plus the player's patched game assemblies.
+
+      dotnet build                         JIT on Windows: the quick oracle
+      dotnet publish -r wasi-wasm -p:CupheadWasm=true
+                                           NativeAOT-LLVM -> player.wasm (w2c2 -> C -> XEX)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Cuphead360.Player</RootNamespace>
+    <AssemblyName>Cuphead360.Player</AssemblyName>
+    <RollForward>LatestMajor</RollForward>
+    <SuppressTrimAnalysisWarnings>true</SuppressTrimAnalysisWarnings>
+    <NoWarn>$(NoWarn);IL2026;IL2072;IL2075;IL3050;IL2104;IL3053;CS0618;CS1701;CS1702</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Cuphead360.Engine/Cuphead360.Engine.csproj" />
+  </ItemGroup>
+  <!-- The patched game set (tools/build_managed.py); copied next to the player. -->
+  <ItemGroup>
+    <Reference Include="$(CupheadLibDir)*.dll" Private="true" />
+  </ItemGroup>
+
+  <!-- Any AOT build: the engine finds MonoBehaviour messages and serialized
+       fields by reflection, so the game and Unity assemblies stay whole. -->
+  <ItemGroup Condition="'$(PublishAot)' == 'true' or '$(CupheadWasm)' == 'true'">
+    <TrimmerRootAssembly Include="Assembly-CSharp" />
+    <TrimmerRootAssembly Include="Assembly-CSharp-firstpass" />
+    <TrimmerRootAssembly Include="UnityEngine.CoreModule" />
+    <TrimmerRootAssembly Include="Cuphead360.Player" />
+  </ItemGroup>
+
+  <!-- NativeAOT-LLVM to a WASI preview1 core module, as Spire360 builds it. -->
+  <PropertyGroup Condition="'$(CupheadWasm)' == 'true'">
+    <PublishTrimmed>true</PublishTrimmed>
+    <SelfContained>true</SelfContained>
+    <MSBuildEnableWorkloadResolver>false</MSBuildEnableWorkloadResolver>
+    <WasmEnableExceptionHandling>false</WasmEnableExceptionHandling>
+    <IlcLlvmExceptionHandlingModel>emulated</IlcLlvmExceptionHandlingModel>
+    <IlcWasmStackSize>2097152</IlcWasmStackSize>
+    <UseSystemResourceKeys>false</UseSystemResourceKeys>
+    <IlcTreatWarningsAsErrors>false</IlcTreatWarningsAsErrors>
+    <IlcGenerateMstatFile>true</IlcGenerateMstatFile>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(CupheadIlcParallelism)' != ''">
+    <IlcArg Include="--parallelism:$(CupheadIlcParallelism)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(CupheadWasm)' == 'true'">
+    <PackageReference Include="Microsoft.DotNet.ILCompiler.LLVM" Version="$(CupheadIlcLlvmVersion)" />
+    <PackageReference Include="runtime.$(NETCoreSdkPortableRuntimeIdentifier).Microsoft.DotNet.ILCompiler.LLVM" Version="$(CupheadIlcLlvmVersion)" />
+  </ItemGroup>
+  <PropertyGroup Condition="'$(CupheadWasm)' == 'true' and '$(CupheadIlcLlvmVersion)' == ''">
+    <CupheadIlcLlvmVersion>10.0.0-*</CupheadIlcLlvmVersion>
+  </PropertyGroup>
+</Project>

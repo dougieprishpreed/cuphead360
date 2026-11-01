@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    The engine half of the Unity player, written against the player's own
+    (publicized) Unity assemblies. The patcher's redirect pass makes every
+    engine method of those assemblies call Icalls.<name> here.
+
+    Generated/Icalls.g.cs  default stubs (Cuphead360.Patcher gen)
+    Impl/                  the implemented engine methods and engine state
+  -->
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Cuphead360.Engine</RootNamespace>
+    <AssemblyName>Cuphead360.Engine</AssemblyName>
+    <NoWarn>$(NoWarn);CS0618;CS1701;CS1702;CS0436;CS8981</NoWarn>
+    <IsAotCompatible>false</IsAotCompatible>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="$(CupheadPublicDir)*.dll" Private="false" />
+  </ItemGroup>
+</Project>
