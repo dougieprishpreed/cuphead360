@@ -14,6 +14,9 @@ inside the StreamingAssets asset bundles with --bundles) becomes
                      decodes against the real managed type (Unity's rules)
   bulk data          texture pixels and audio sample data are left out
                      ("_omitted"); the media converter handles them
+  Shader             name only ({"m_Name"}); the port draws with its own
+                     shaders, but materials and Shader.Find need the object
+  TextAsset          m_Script as exact bytes (tag 7)
 
 CHOB v1 (little-endian):
   'CHOB' u32 version
@@ -36,7 +39,8 @@ import time
 import UnityPy
 
 OMIT_KEYS = {"image data", "m_StreamData", "m_AudioData", "m_Resource", "m_PlatformBlob"}
-OMIT_CLASSES = {"Shader", "CGProgram"}   # replaced by the port's own shaders
+OMIT_CLASSES = {"CGProgram"}             # replaced by the port's own shaders
+NAME_ONLY_CLASSES = {"Shader"}           # kept as {"m_Name"} so references resolve
 
 
 class Writer:
@@ -128,6 +132,16 @@ def mono_behaviour(obj):
     }
 
 
+def shader_name(obj):
+    """A Shader's name is m_ParsedForm.m_Name; read only that much."""
+    try:
+        t = obj.read_typetree()
+        pf = t.get("m_ParsedForm")
+        return (pf or {}).get("m_Name") or t.get("m_Name") or ""
+    except Exception:  # noqa: BLE001 - a stub without a name still resolves
+        return ""
+
+
 def convert_file(sf, out_path, stats):
     w = Writer()
     objects = []
@@ -138,8 +152,12 @@ def convert_file(sf, out_path, stats):
         try:
             if tname == "MonoBehaviour":
                 tree = mono_behaviour(obj)
+            elif tname in NAME_ONLY_CLASSES:
+                tree = {"m_Name": shader_name(obj)}
             else:
                 tree = obj.read_typetree()
+                if tname == "TextAsset" and isinstance(tree.get("m_Script"), str):
+                    tree["m_Script"] = tree["m_Script"].encode("utf-8", "surrogateescape")
         except Exception as e:  # noqa: BLE001 - recorded, never silent
             tree = {"_error": "%s: %s" % (type(e).__name__, e)}
             stats["errors"].append("%s %d %s: %s" % (out_path, path_id, tname, e))
@@ -180,7 +198,11 @@ def main():
         sys.exit("--out must be outside the game folder")
     names = [] if a.files == "none" else a.files.split(",") if a.files else sorted(
         f for f in os.listdir(data)
-        if f == "globalgamemanagers" or f.startswith("level") or f.endswith(".assets"))
+        if f == "globalgamemanagers" or f.startswith("level") or f.endswith(".assets")) + [
+        # Unity's built-in resources ("library/unity default resources",
+        # "resources/unity_builtin_extra" externals): default font, sprite
+        # material, UI sprites.
+        "Resources/unity default resources", "Resources/unity_builtin_extra"]
     stats = {"objects": 0, "errors": [], "files": 0}
     t0 = time.time()
     for name in names:
@@ -188,7 +210,7 @@ def main():
         for fname, sf in env.files.items():
             if not hasattr(sf, "objects"):
                 continue
-            convert_file(sf, os.path.join(a.out, "objects", name + ".chob"), stats)
+            convert_file(sf, os.path.join(a.out, "objects", os.path.basename(name) + ".chob"), stats)
             stats["files"] += 1
     if a.bundles:
         bdir = os.path.join(data, "StreamingAssets", "AssetBundles")

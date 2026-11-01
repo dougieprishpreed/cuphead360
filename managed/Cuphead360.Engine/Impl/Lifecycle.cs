@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using UnityEngine;
@@ -13,9 +14,18 @@ namespace Cuphead360.Engine
 
         public static UObject NewManaged(Type t)
         {
-            // Built-in wrappers have trivial constructors; MonoBehaviours run theirs
-            // (field initialisers) exactly like Unity does.
-            return (UObject)Activator.CreateInstance(t, nonPublic: true);
+            // MonoBehaviours/ScriptableObjects run their constructor (field
+            // initialisers) exactly like Unity does. Built-in classes created by
+            // the engine (a loaded Material, Mesh, ...) get no constructor call,
+            // and some (Material, Shader) have no parameterless one at all.
+            // (TextAsset(), GameObject() etc. would call Internal_Create* for a
+            // second native object.)
+            if (typeof(MonoBehaviour).IsAssignableFrom(t) || typeof(ScriptableObject).IsAssignableFrom(t))
+            {
+                var ctor = t.GetConstructor(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                if (ctor != null) return (UObject)ctor.Invoke(null);
+            }
+            return (UObject)RuntimeHelpers.GetUninitializedObject(t);
         }
 
         public static NGameObject CreateGameObject(GameObject managed, string name, bool persistent = false)

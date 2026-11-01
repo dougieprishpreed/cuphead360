@@ -83,6 +83,12 @@ namespace Cuphead360.Engine
         // ------------------------------------------------------------ legacy Input
         // The console has no keyboard, mouse or touch. Pads reach the game
         // through Rewired, not UnityEngine.Input.
+        public static bool UnityEngine_Input__GetKeyInt(int key) => false;
+        public static bool UnityEngine_Input__GetKeyString(string name) => false;
+        public static bool UnityEngine_Input__GetKeyUpInt(int key) => false;
+        public static bool UnityEngine_Input__GetKeyUpString(string name) => false;
+        public static bool UnityEngine_Input__GetKeyDownInt(int key) => false;
+        public static bool UnityEngine_Input__GetKeyDownString(string name) => false;
         public static bool UnityEngine_Input__GetButton(string buttonName) => false;
         public static bool UnityEngine_Input__GetButtonDown(string buttonName) => false;
         public static bool UnityEngine_Input__GetButtonUp(string buttonName) => false;

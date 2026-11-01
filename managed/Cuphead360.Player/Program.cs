@@ -19,6 +19,7 @@ namespace Cuphead360.Player
                 case "selftest": return SelfTest.Run();
                 case "run": return Run(args.Skip(1).ToArray());
                 case "fields": return Fields(args.Skip(1).ToArray());
+                case "resource": return Resource(args.Skip(1).ToArray());
             }
             Console.Error.WriteLine("usage: Cuphead360.Player census [assembly...] | smoke");
             return 2;
@@ -138,6 +139,19 @@ namespace Cuphead360.Player
                 ? System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(t) : null;
             FieldDecoder.Apply(inst, co, null);
             Console.WriteLine($"decoded {FieldDecoder.Decoded} mismatched {FieldDecoder.Mismatched}");
+            return 0;
+        }
+
+        /// <summary>resource PATH [TYPE]: what Resources.Load answers, outside a run.</summary>
+        static int Resource(string[] a)
+        {
+            Platform.SaveRoot = System.IO.Path.GetFullPath("work/managed/save");
+            AssetDb.Init(System.IO.Path.GetFullPath("work/GameData"));
+            var t = a.Length > 1 ? Find.TypeByName(a[1]) : typeof(UnityEngine.Object);
+            var o = Icalls.UnityEngine_Resources__Load(a[0], t);
+            Console.WriteLine($"Resources.Load(\"{a[0]}\", {t}) = {(o == null ? "null" : o.GetType().FullName + " '" + o.name + "'")}");
+            foreach (var kv in Icall.Report()) Console.WriteLine("  missing " + kv.Key + " x" + kv.Value);
+            foreach (var p in AssetDb.Problems) Console.WriteLine("  data " + p);
             return 0;
         }
 

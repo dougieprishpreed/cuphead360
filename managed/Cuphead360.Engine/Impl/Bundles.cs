@@ -84,6 +84,22 @@ namespace Cuphead360.Engine
             return null;
         }
 
+        public static UObject[] LoadWithSubAssets(AssetBundle bundle, string name, Type type)
+        {
+            var b = Of(bundle);
+            var r = new List<UObject>();
+            if (b != null)
+                foreach (var (p, ptr) in b.Container)
+                {
+                    if (!NameMatches(p, name)) continue;
+                    var o = As(AssetDb.Resolve(b.Main, ptr), type);
+                    if (o != null && !r.Contains(o)) r.Add(o);
+                }
+            var arr = (UObject[])Array.CreateInstance(type ?? typeof(UObject), r.Count);
+            for (int i = 0; i < r.Count; i++) arr[i] = r[i];
+            return arr;
+        }
+
         public static UObject[] LoadAll(AssetBundle bundle, Type type)
         {
             var b = Of(bundle);
@@ -147,11 +163,11 @@ namespace Cuphead360.Engine
             return Bundles.AssetRequest(o == null ? new UObject[0] : new[] { o });
         }
         public static AssetBundleRequest UnityEngine_AssetBundle__LoadAsync(AssetBundle self, string name, Type type) => UnityEngine_AssetBundle__LoadAssetAsync_Internal(self, name, type);
+        // A bundle's m_Container has one entry per asset object, sub-assets
+        // under their main asset's path; an empty name (LoadAllAssets) means
+        // every entry.
         public static UObject[] UnityEngine_AssetBundle__LoadAssetWithSubAssets_Internal(AssetBundle self, string name, Type type)
-        {
-            var o = Bundles.LoadAsset(self, name, type);
-            return o == null ? new UObject[0] : new[] { o };
-        }
+            => string.IsNullOrEmpty(name) ? Bundles.LoadAll(self, type) : Bundles.LoadWithSubAssets(self, name, type);
         public static AssetBundleRequest UnityEngine_AssetBundle__LoadAssetWithSubAssetsAsync_Internal(AssetBundle self, string name, Type type)
             => Bundles.AssetRequest(UnityEngine_AssetBundle__LoadAssetWithSubAssets_Internal(self, name, type));
         public static UObject[] UnityEngine_AssetBundle__LoadAll(AssetBundle self, Type type) => Bundles.LoadAll(self, type);

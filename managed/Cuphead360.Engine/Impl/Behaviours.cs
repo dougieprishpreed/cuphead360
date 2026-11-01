@@ -153,7 +153,29 @@ namespace Cuphead360.Engine
         public static void Report(Exception e, NObject where, string what)
         {
             Count++;
-            Log.Line("EXCEPTION in " + (where?.Managed?.GetType().FullName ?? "?") + "." + what + " ('" + where?.Name + "'): " + e);
+            Log.Line("EXCEPTION in " + (where?.Managed?.GetType().FullName ?? "?") + "." + what + " ('" + where?.Name + "'): " + e.GetType().FullName + ": " + e.Message);
+            Log.Line(Frames(e));
+        }
+
+        /// <summary>
+        /// Stack with IL offsets (the game DLLs have no PDBs): "at Type.Method+IL_xxxx".
+        /// Match an offset with `Cuphead360.Patcher dump --in DLL --type T --method M`.
+        /// </summary>
+        public static string Frames(Exception e)
+        {
+            var sb = new System.Text.StringBuilder();
+            for (var x = e; x != null; x = x.InnerException)
+            {
+                if (x != e) sb.Append("   --- inner " + x.GetType().FullName + ": " + x.Message + "\n");
+                foreach (var f in new System.Diagnostics.StackTrace(x, false).GetFrames())
+                {
+                    var m = f.GetMethod();
+                    if (m == null || m.DeclaringType?.Namespace?.StartsWith("System.Reflection") == true) continue;
+                    int il = f.GetILOffset();
+                    sb.Append("   at " + m.DeclaringType?.FullName + "." + m.Name + (il >= 0 ? "+IL_" + il.ToString("x4") : "") + "\n");
+                }
+            }
+            return sb.ToString().TrimEnd('\n');
         }
     }
 }
