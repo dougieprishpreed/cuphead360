@@ -114,8 +114,13 @@ baseline logs, and exact adapter records. They are deliberately uncommitted.
 Continuation decision: read-only asset preflight found eight distinct Player
 atlas pages sharing one texture name, which the current cache treats as one
 identity. All 2,392 entries are tightly packed; 356 require packing transforms.
-Opus therefore places a bounded sprite-correctness/residency checkpoint (A1)
-after accepted CP1 and before the broader lifecycle work below. Its contract
+Final CP1 review also identified inherited interface-slot misdispatch: the
+original OnGrounded `SetStat` call can select `UnlockAchievement` because
+interface and class slots share a numeric value but different meanings.
+Matching arity can conceal other wrong-method calls. Opus therefore places a
+small interface-dispatch checkpoint (D1) after accepted CP1, followed by the
+bounded sprite-correctness/residency checkpoint (A1), before the broader
+lifecycle work below. A1's contract
 must enforce allocation limits and preserve sprite placement; it is planned,
 not implemented or accepted. See ASSET_PIPELINE.md for measured defects.
 

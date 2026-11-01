@@ -45,6 +45,7 @@ int main(int argc, char** argv) {
 #endif
     ch360::AppConfig cfg;
     bool explicit_mode = false;
+    bool explicit_frames = false;
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         if (ArgEquals(a, "--headless")) {
@@ -55,6 +56,7 @@ int main(int argc, char** argv) {
             cfg.mute = true;
         } else if (ArgEquals(a, "--frames") && i + 1 < argc) {
             cfg.frames = (u32)strtoul(argv[++i], 0, 10);
+            explicit_frames = true;
         } else if (ArgEquals(a, "--seed") && i + 1 < argc) {
             cfg.seed = (u32)strtoul(argv[++i], 0, 10);
         } else if (ArgEquals(a, "--log") && i + 1 < argc) {
@@ -74,18 +76,18 @@ int main(int argc, char** argv) {
         } else if (ArgEquals(a, "--motor")) {
             cfg.command = "motor";
             explicit_mode = true;
-            cfg.frames = 180;
+            if (!explicit_frames) cfg.frames = 180;
         } else if (ArgEquals(a, "--motorplay")) {
             cfg.command = "motorplay";
             explicit_mode = true;
-            cfg.frames = 240;
+            if (!explicit_frames) cfg.frames = 240;
         } else if (ArgEquals(a, "--level")) {
             cfg.command = "level";
             explicit_mode = true;
         } else if (ArgEquals(a, "--levelplay")) {
             cfg.command = "levelplay";
             explicit_mode = true;
-            cfg.frames = 240;
+            if (!explicit_frames) cfg.frames = 240;
         } else if (ArgEquals(a, "--play")) {
             cfg.command = "play";
             explicit_mode = true;
@@ -104,6 +106,9 @@ int main(int argc, char** argv) {
             cfg.anim_time = (f32)atof(argv[++i]);
         } else if (ArgEquals(a, "--command") && i + 1 < argc) {
             cfg.command = argv[++i];
+            explicit_mode = true;
+        } else if (ArgEquals(a, "--strict-faults") && i + 1 < argc) {
+            cfg.strict_fault_prefixes = argv[++i];
         } else if (ArgEquals(a, "--selftest")) {
             cfg.command = "selftest";
         } else if (ArgEquals(a, "--speed") && i + 1 < argc) {
@@ -130,6 +135,7 @@ int main(int argc, char** argv) {
             printf("  --anim-time SECONDS\n");
             printf("  --selftest\n");
             printf("  --speed N\n");
+            printf("  --strict-faults PREFIX[,PREFIX...]\n");
             return 0;
         } else {
             printf("unknown argument: %s\n", a);

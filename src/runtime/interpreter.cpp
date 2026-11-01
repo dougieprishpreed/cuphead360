@@ -2,6 +2,7 @@
 #include "core/endian.h"
 #include "core/log.h"
 #include "core/mem.h"
+#include "engine/scene.h"
 
 #include <math.h>
 #include <string.h>
@@ -10,6 +11,61 @@ namespace ch360 {
 
 static const u32 kMaxStack = 256;
 static const u32 kMaxCallArgs = 64;
+static const u32 kMaxCoroutines = 4096;
+static const u32 kMaxLedgerRecords = 8192;
+static const u32 kMaxSamePassAdvances = 131072;
+static const u32 kMaxSynchronousStepDepth = 32;
+
+enum {
+    COROUTINE_WAIT_NONE = 0,
+    COROUTINE_WAIT_TIME = 1,
+    COROUTINE_WAIT_REALTIME = 2,
+    COROUTINE_WAIT_HANDLE = 3,
+    COROUTINE_WAIT_RAW = 4,
+    COROUTINE_WAIT_ORPHANED = 5
+};
+
+static char g_strict_prefixes[16][160];
+static u32 g_strict_prefix_count = 0;
+static bool g_strict_fault_matched = false;
+static bool g_strict_loss_detected = false;
+
+static const char* LedgerCategoryName(u8 category) {
+    if (category == Interpreter::LEDGER_FAULT) return "FAULT";
+    if (category == Interpreter::LEDGER_UNSUPPORTED) return "UNSUPPORTED";
+    return "NOTE";
+}
+
+static const char* SafeName(const char* name) {
+    return name ? name : "";
+}
+
+void SetStrictFaultPrefixes(const char* prefixes) {
+    g_strict_prefix_count = 0;
+    g_strict_fault_matched = false;
+    g_strict_loss_detected = false;
+    if (!prefixes) return;
+    const char* p = prefixes;
+    while (*p && g_strict_prefix_count < CH360_ARRAY_COUNT(g_strict_prefixes)) {
+        while (*p == ',' || *p == ' ' || *p == '\t') ++p;
+        const char* begin = p;
+        while (*p && *p != ',') ++p;
+        const char* end = p;
+        while (end > begin && (end[-1] == ' ' || end[-1] == '\t')) --end;
+        if (end > begin) {
+            u32 n = (u32)(end - begin);
+            if (n >= sizeof(g_strict_prefixes[0])) n = sizeof(g_strict_prefixes[0]) - 1;
+            memcpy(g_strict_prefixes[g_strict_prefix_count], begin, n);
+            g_strict_prefixes[g_strict_prefix_count][n] = 0;
+            ++g_strict_prefix_count;
+        }
+        if (*p == ',') ++p;
+    }
+}
+
+bool LastRunStrictFaultMatched() {
+    return g_strict_fault_matched || g_strict_loss_detected;
+}
 
 static ValueTag TagForSig(const MetadataPackage& md, const SigInfo& s) {
     switch (s.kind) {
@@ -161,8 +217,14 @@ Interpreter::Interpreter(MetadataPackage& metadata)
       array_type_id_(0), exception_type_id_(0), mathf_type_id_(0),
       gameobject_type_id_(0), transform_type_id_(0), component_type_id_(0),
       monobehaviour_type_id_(0), sprite_renderer_type_id_(0), animator_type_id_(0),
-      scene_(0) {
+      scene_(0), coroutine_frame_(0), coroutine_pass_(0), ledger_dropped_(0),
+      ledger_allocation_loss_(0), ledger_push_failed_(0), ledger_ancestry_truncated_(0),
+      last_summary_groups_(0), time_scale_member_ref_(0), sync_step_depth_(0),
+      step_budget_pass_(0), step_budget_count_(0), current_entry_(0),
+      budget_exhausted_pass_(0xFFFFFFFFu), time_scale_resolved_(false),
+      coroutine_in_pass_(false), ledger_printed_(false) {
     for (u32 i = 0; i < 32; ++i) generic_arg_types_[i] = 0;
+    memset(&root_context_, 0, sizeof(root_context_));
 }
 
 Interpreter::~Interpreter() {
@@ -171,6 +233,7 @@ Interpreter::~Interpreter() {
 
 bool Interpreter::Fail(const char* message, u32 method_id) {
     last_error_ = method_id;
+    RecordLedger(LEDGER_FAULT, 0, method_id ? method_id : current_method_id_, message);
     if (method_id) {
         const MethodInfo& m = metadata_.Method(method_id);
         LogError("interp", "%s (method %s.%s id=%u)", message,
@@ -179,6 +242,59 @@ bool Interpreter::Fail(const char* message, u32 method_id) {
         LogError("interp", "%s", message);
     }
     return false;
+}
+
+Interpreter::RootScope::RootScope(Interpreter& owner, u32 method_id, u32 arg_count, Value* args)
+    : interp(owner), owns(false) {
+    memset(&saved, 0, sizeof(saved));
+    if (interp.root_context_.kind || !interp.method_stack_.Empty()) return;
+    owns = true;
+    saved = interp.root_context_;
+    RootContext& root = interp.root_context_;
+    memset(&root, 0, sizeof(root));
+    root.kind = 2;
+    u32 component = 0;
+    if (arg_count && args && (args[0].tag == VT_OBJECT || args[0].tag == VT_STRUCT) &&
+        args[0].data.obj) {
+        component = args[0].data.obj->type_id;
+    }
+    if (!component && method_id && method_id <= interp.metadata_.MethodCount()) {
+        component = interp.metadata_.Method(method_id).decl_id;
+    }
+    root.iterator_type = component;
+    root.owner_type = component;
+    if (!method_id || method_id > interp.metadata_.MethodCount()) return;
+    const MethodInfo& method = interp.metadata_.Method(method_id);
+    const char* type_name = SafeName(interp.metadata_.Type(method.decl_id).full_name);
+    u32 n = (u32)strlen(type_name);
+    if (n >= sizeof(root.callback) - 1) n = sizeof(root.callback) - 1;
+    memcpy(root.callback, type_name, n);
+    root.callback[n++] = ':';
+    root.callback[n++] = ':';
+    root.callback[n] = 0;
+    u32 mn = (u32)strlen(SafeName(method.name));
+    if (mn > sizeof(root.callback) - 1 - n) mn = sizeof(root.callback) - 1 - n;
+    memcpy(root.callback + n, method.name, mn);
+    root.callback[n + mn] = 0;
+}
+
+Interpreter::RootScope::~RootScope() {
+    if (owns) interp.root_context_ = saved;
+}
+
+Interpreter::StepRootScope::StepRootScope(Interpreter& owner, u32 iterator_type, u32 owner_type)
+    : interp(owner), saved(owner.root_context_) {
+    char callback[128];
+    _snprintf(callback, sizeof(callback) - 1, "%s::MoveNext",
+              iterator_type && iterator_type <= interp.metadata_.TypeCount()
+                  ? SafeName(interp.metadata_.Type(iterator_type).full_name)
+                  : "<invalid>");
+    callback[sizeof(callback) - 1] = 0;
+    interp.SetRootContext(iterator_type, owner_type, callback);
+}
+
+Interpreter::StepRootScope::~StepRootScope() {
+    interp.root_context_ = saved;
 }
 
 const char* Interpreter::TypeName(u32 id) const {
@@ -339,10 +455,12 @@ bool Interpreter::BuildVtable(u32 type_id, bool* visiting) {
 bool Interpreter::Init() {
     if (!metadata_.IsLoaded()) return false;
     if (!BuildRuntimeTypes()) return Fail("failed to build runtime types");
+    if (!coroutines_.Reserve(kMaxCoroutines)) return Fail("failed to reserve coroutine scheduler");
     return true;
 }
 
 void Interpreter::Shutdown() {
+    PrintLedgerSummary();
     for (u32 i = 0; i < objects_.Size(); ++i) {
         // Objects are allocated as one block; free the header block.
         MemFree(objects_[i]);
@@ -360,6 +478,9 @@ void Interpreter::Shutdown() {
     runtime_types_.Reset();
     field_slots_.Reset();
     field_static_.Reset();
+    coroutines_.Reset();
+    ledger_.Reset();
+    method_stack_.Reset();
 }
 
 Object* Interpreter::AllocObject(u32 type_id) {
@@ -371,6 +492,8 @@ Object* Interpreter::AllocObject(u32 type_id) {
         else if (strcmp(t.full_name, "UnityEngine.Quaternion") == 0) slots = 4;
         else if (strcmp(t.full_name, "UnityEngine.Vector4") == 0) slots = 4;
         else if (strcmp(t.full_name, "UnityEngine.Bounds") == 0) slots = 6;
+        else if (strcmp(t.full_name, "UnityEngine.WaitForSeconds") == 0 ||
+                 strcmp(t.full_name, "UnityEngine.WaitForSecondsRealtime") == 0) slots = 1;
     }
     return AllocObjectWithSlots(type_id, slots);
 }
@@ -888,17 +1011,307 @@ bool Interpreter::EnsureTypeInitialized(u32 type_id) {
     return true;
 }
 
-bool Interpreter::StartCoroutineObject(const Value& enumerator) {
-    if ((enumerator.tag != VT_OBJECT && enumerator.tag != VT_STRUCT) ||
-        !enumerator.data.obj) {
+static bool IsCoroutineHandle(const Interpreter& in, const Value& value) {
+    if ((value.tag != VT_OBJECT && value.tag != VT_STRUCT) || !value.data.obj) return false;
+    const char* name = in.Metadata().Type(value.data.obj->type_id).full_name;
+    return name && strcmp(name, "UnityEngine.Coroutine") == 0;
+}
+
+static bool IsWaitForNativeConstructor(const MetadataPackage& metadata,
+                                       const MemberRefInfo& member) {
+    if (!member.name || strcmp(member.name, ".ctor") != 0 || !member.decl_id ||
+        member.decl_id > metadata.TypeCount()) return false;
+    const char* type = SafeName(metadata.Type(member.decl_id).full_name);
+    return strcmp(type, "UnityEngine.WaitForSeconds") == 0 ||
+           strcmp(type, "UnityEngine.WaitForSecondsRealtime") == 0 ||
+           strcmp(type, "UnityEngine.WaitForFixedUpdate") == 0 ||
+           strcmp(type, "UnityEngine.WaitForEndOfFrame") == 0;
+}
+
+static u32 CoroutineIDForHandle(const Value& handle) {
+    if ((handle.tag != VT_OBJECT && handle.tag != VT_STRUCT) || !handle.data.obj) return 0;
+    if (!handle.data.obj->slots || handle.data.obj->Fields()[0].tag != VT_I4) return 0;
+    s32 id = handle.data.obj->Fields()[0].data.i32;
+    return id > 0 ? (u32)id : 0;
+}
+
+f32 Interpreter::ReadCoroutineTimeScale() {
+    if (time_scale_resolved_) {
+        if (!time_scale_member_ref_) return 1.0f;
+        const MemberRefInfo& member = metadata_.MemberRef(time_scale_member_ref_);
+        Value value;
+        if (InvokeNative(member, 0, 0, &value) && value.tag == VT_R4) return value.data.f32;
+        return 1.0f;
+    }
+    time_scale_resolved_ = true;
+    for (u32 i = 1; i <= metadata_.MemberRefCount(); ++i) {
+        const MemberRefInfo& member = metadata_.MemberRef(i);
+        if (member.kind != 1 || !member.name || strcmp(member.name, "get_timeScale") != 0) continue;
+        const TypeInfo& type = metadata_.Type(member.decl_id);
+        if (!type.full_name || strcmp(type.full_name, "UnityEngine.Time") != 0) continue;
+        time_scale_member_ref_ = i;
+        Value value;
+        if (InvokeNative(member, 0, 0, &value) && value.tag == VT_R4) return value.data.f32;
+        break;
+    }
+    return 1.0f;
+}
+
+u32 Interpreter::InactiveAncestor(u32 owner_object_index) const {
+    if (!scene_ || owner_object_index == 0xFFFFFFFFu ||
+        owner_object_index >= scene_->ObjectCount()) return 0xFFFFFFFFu;
+    u32 current = owner_object_index;
+    u32 guard = 0;
+    while (current < scene_->ObjectCount() && guard++ < 256) {
+        const SceneObject& object = scene_->Object(current);
+        if (!(object.flags & 1u)) return current;
+        if (!object.parent || object.parent == 0xFFFFFFFFu || object.parent == object.id) break;
+        u32 parent = 0xFFFFFFFFu;
+        for (u32 i = 0; i < scene_->ObjectCount(); ++i) {
+            if (scene_->Object(i).id == object.parent) {
+                parent = i;
+                break;
+            }
+        }
+        if (parent == 0xFFFFFFFFu || parent == current) break;
+        current = parent;
+    }
+    return 0xFFFFFFFFu;
+}
+
+bool Interpreter::OwnerActive(u32 owner_object_index) const {
+    return InactiveAncestor(owner_object_index) == 0xFFFFFFFFu;
+}
+
+bool Interpreter::StartCoroutine(const Value& owner, const Value& enumerator, Value* handle,
+                                 u32 parent_entry) {
+    if (handle) *handle = Value::Null();
+    if (parent_entry && (parent_entry > coroutines_.Size() ||
+                         !EntryChainActive(parent_entry))) {
+        char detail[192];
+        CoroutineEntry* parent = parent_entry <= coroutines_.Size()
+            ? &coroutines_[parent_entry - 1] : 0;
+        Object* parent_iterator = parent && (parent->enumerator.tag == VT_OBJECT ||
+                                             parent->enumerator.tag == VT_STRUCT)
+            ? parent->enumerator.data.obj : 0;
+        _snprintf(detail, sizeof(detail) - 1,
+                  "raw child suppressed cancelled_parent=%s receiver=%s",
+                  parent_iterator
+                      ? SafeName(metadata_.Type(parent_iterator->type_id).full_name)
+                      : "<invalid>",
+                  (owner.tag == VT_OBJECT || owner.tag == VT_STRUCT) && owner.data.obj
+                      ? SafeName(metadata_.Type(owner.data.obj->type_id).full_name)
+                      : "<invalid>");
+        detail[sizeof(detail) - 1] = 0;
+        RecordLedger(LEDGER_NOTE, "raw-child-suppressed", 0, detail);
+        return true;
+    }
+    if (!parent_entry && current_entry_ && !EntryChainActive(current_entry_)) {
+        char detail[192];
+        const CoroutineEntry& cancelled = coroutines_[current_entry_ - 1];
+        Object* cancelled_iterator = (cancelled.enumerator.tag == VT_OBJECT ||
+                                      cancelled.enumerator.tag == VT_STRUCT)
+            ? cancelled.enumerator.data.obj : 0;
+        _snprintf(detail, sizeof(detail) - 1,
+                  "explicit start after self-stop cancelled_iterator=%s receiver=%s",
+                  cancelled_iterator
+                      ? SafeName(metadata_.Type(cancelled_iterator->type_id).full_name)
+                      : "<invalid>",
+                  (owner.tag == VT_OBJECT || owner.tag == VT_STRUCT) && owner.data.obj
+                      ? SafeName(metadata_.Type(owner.data.obj->type_id).full_name)
+                      : "<invalid>");
+        detail[sizeof(detail) - 1] = 0;
+        RecordLedger(LEDGER_NOTE, "start-after-self-stop", 0, detail);
+    }
+    if ((owner.tag != VT_OBJECT && owner.tag != VT_STRUCT) || !owner.data.obj) {
+        RecordLedger(LEDGER_FAULT, "UnityEngine.MonoBehaviour::StartCoroutine", 0,
+                     "null or invalid receiver");
         return false;
     }
-    if (coroutines_.Size() >= 1024) return false;
-    CoroutineEntry e;
-    e.enumerator = CopyValue(enumerator);
-    e.wait = 0.0f;
-    e.active = 1;
-    return coroutines_.PushBack(e);
+    u32 owner_object_index = ManagedObjectIndexFor(owner);
+    u32 inactive = InactiveAncestor(owner_object_index);
+    if (inactive != 0xFFFFFFFFu) {
+        char detail[192];
+        _snprintf(detail, sizeof(detail) - 1,
+                  "inactive owner type=%s gameObject=%s firstInactiveAncestor=%s",
+                  SafeName(metadata_.Type(owner.data.obj->type_id).full_name),
+                  SafeName(scene_ && owner_object_index < scene_->ObjectCount()
+                               ? scene_->Object(owner_object_index).name : "<unbound>"),
+                  SafeName(scene_ && inactive < scene_->ObjectCount()
+                               ? scene_->Object(inactive).name : "<unknown>"));
+        detail[sizeof(detail) - 1] = 0;
+        RecordLedger(LEDGER_FAULT, "UnityEngine.MonoBehaviour::StartCoroutine", 0, detail);
+        return true;
+    }
+    if ((enumerator.tag != VT_OBJECT && enumerator.tag != VT_STRUCT) || !enumerator.data.obj) {
+        RecordLedger(LEDGER_FAULT, "UnityEngine.MonoBehaviour::StartCoroutine", 0,
+                     "null or invalid IEnumerator");
+        return false;
+    }
+    u32 coroutine_type = metadata_.FindType("UnityEngine.Coroutine");
+    if (!coroutine_type) {
+        RecordLedger(LEDGER_FAULT, "UnityEngine.Coroutine::.ctor", 0,
+                     "managed Coroutine type unavailable");
+        return false;
+    }
+    if (coroutines_.Size() >= kMaxCoroutines) {
+        RecordLedger(LEDGER_FAULT, "coroutine scheduler", 0, "coroutine capacity overflow");
+        return false;
+    }
+    CoroutineEntry entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.enumerator = enumerator;
+    entry.owner = owner;
+    entry.owner_object_index = owner_object_index;
+    entry.parent_entry = parent_entry;
+    entry.active = 1;
+    entry.wait_kind = COROUTINE_WAIT_NONE;
+    entry.timer_prepared_pass = 0xFFFFFFFFu;
+    entry.last_step_pass = coroutine_pass_;
+    strcpy(entry.last_yield, "none");
+    u32 entry_id = coroutines_.Size() + 1;
+    if (!coroutines_.PushBack(entry)) {
+        RecordLedger(LEDGER_FAULT, "coroutine scheduler", 0, "entry allocation failed");
+        return false;
+    }
+    Object* managed = AllocObjectWithSlots(coroutine_type, 1);
+    if (!managed) {
+        coroutines_[entry_id - 1].active = 0;
+        coroutines_[entry_id - 1].stopped = 1;
+        RecordLedger(LEDGER_FAULT, "UnityEngine.Coroutine::.ctor", 0,
+                     "managed Coroutine allocation failed");
+        return false;
+    }
+    managed->Fields()[0] = Value::I4((s32)entry_id);
+    managed->flags = 1u;
+    Value managed_handle = Value::ObjectRef(managed);
+    coroutines_[entry_id - 1].handle = managed_handle;
+    if (handle) *handle = managed_handle;
+    StepEntry(entry_id, 0.0f, false);
+    if (coroutines_[entry_id - 1].active && !coroutine_in_pass_) {
+        coroutines_[entry_id - 1].skip_pass = coroutine_pass_ + 1;
+    }
+    return true;
+}
+
+bool Interpreter::EntryActive(u32 entry_id) const {
+    return entry_id && entry_id <= coroutines_.Size() &&
+           coroutines_[entry_id - 1].active;
+}
+
+bool Interpreter::EntryChainActive(u32 entry_id) const {
+    u32 guard = 0;
+    while (entry_id && guard++ < kMaxCoroutines) {
+        if (entry_id > coroutines_.Size() || !coroutines_[entry_id - 1].active) return false;
+        entry_id = coroutines_[entry_id - 1].parent_entry;
+    }
+    return entry_id == 0;
+}
+
+bool Interpreter::EntryMatchesTarget(u32 entry_id, const Value& target) const {
+    if (!entry_id || entry_id > coroutines_.Size()) return false;
+    const CoroutineEntry& entry = coroutines_[entry_id - 1];
+    if (IsCoroutineHandle(*this, target)) return CoroutineIDForHandle(target) == entry_id;
+    Object* object = (target.tag == VT_OBJECT || target.tag == VT_STRUCT) ? target.data.obj : 0;
+    Object* enumerator = (entry.enumerator.tag == VT_OBJECT || entry.enumerator.tag == VT_STRUCT)
+        ? entry.enumerator.data.obj : 0;
+    return object && object == enumerator;
+}
+
+void Interpreter::StopEntry(u32 entry_id) {
+    if (!entry_id || entry_id > coroutines_.Size()) return;
+    CoroutineEntry& entry = coroutines_[entry_id - 1];
+    if (!entry.active) return;
+    entry.active = 0;
+    entry.stopped = 1;
+    entry.wait_kind = COROUTINE_WAIT_NONE;
+    for (u32 i = 0; i < coroutines_.Size(); ++i) {
+        if (coroutines_[i].parent_entry == entry_id) StopEntry(i + 1);
+    }
+}
+
+void Interpreter::FaultEntry(u32 entry_id, const char* site, const char* detail) {
+    if (!entry_id || entry_id > coroutines_.Size()) return;
+    CoroutineEntry& entry = coroutines_[entry_id - 1];
+    entry.active = 0;
+    entry.completed = 0;
+    entry.stopped = 0;
+    entry.faulted = 1;
+    entry.wait_kind = COROUTINE_WAIT_NONE;
+    _snprintf(entry.fault_site, sizeof(entry.fault_site) - 1, "%s", SafeName(site));
+    entry.fault_site[sizeof(entry.fault_site) - 1] = 0;
+    if (detail) RecordLedger(LEDGER_FAULT, site, 0, detail);
+}
+
+bool Interpreter::StopAllCoroutines(const Value& owner) {
+    bool any = false;
+    for (u32 i = 0; i < coroutines_.Size(); ++i) {
+        if (!coroutines_[i].active || coroutines_[i].owner.data.obj != owner.data.obj) continue;
+        StopEntry(i + 1);
+        any = true;
+    }
+    return any;
+}
+
+bool Interpreter::StopCoroutine(const Value& owner, const Value& target) {
+    bool found = false;
+    bool owned = false;
+    for (u32 i = 0; i < coroutines_.Size(); ++i) {
+        if (!EntryMatchesTarget(i + 1, target)) continue;
+        found = true;
+        if (coroutines_[i].owner.data.obj != owner.data.obj) continue;
+        owned = true;
+        if (coroutines_[i].active) {
+            StopEntry(i + 1);
+        } else {
+            RecordLedger(LEDGER_NOTE, "UnityEngine.MonoBehaviour::StopCoroutine", 0,
+                         "already stopped, completed, or faulted");
+        }
+        return true;
+    }
+    if (!found) RecordNoteSite("UnityEngine.MonoBehaviour::StopCoroutine", "unknown target");
+    if (found && !owned) {
+        RecordLedger(LEDGER_UNSUPPORTED, "UnityEngine.MonoBehaviour::StopCoroutine", 0,
+                     "target is owned by another receiver");
+        return false;
+    }
+    RecordLedger(LEDGER_UNSUPPORTED, "UnityEngine.MonoBehaviour::StopCoroutine", 0,
+                 "target is not owned by receiver");
+    return false;
+}
+
+void Interpreter::StopCoroutinesForComponent(u32 component_index) {
+    for (u32 i = 0; i < coroutines_.Size(); ++i) {
+        if (coroutines_[i].active &&
+            ManagedComponentIndexFor(coroutines_[i].owner) == component_index) {
+            StopEntry(i + 1);
+        }
+    }
+}
+
+void Interpreter::StopCoroutinesForGameObject(u32 object_index, bool descendants) {
+    if (!scene_ || object_index >= scene_->ObjectCount()) return;
+    for (u32 i = 0; i < coroutines_.Size(); ++i) {
+        if (!coroutines_[i].active) continue;
+        u32 oi = coroutines_[i].owner_object_index;
+        bool matches = oi == object_index;
+        if (!matches && descendants && oi != 0xFFFFFFFFu) {
+            u32 cur = oi;
+            u32 guard = 0;
+            while (cur < scene_->ObjectCount() && guard++ < 256) {
+                const SceneObject& object = scene_->Object(cur);
+                if (!object.parent || object.parent == 0xFFFFFFFFu || object.parent == object.id) break;
+                u32 parent = 0xFFFFFFFFu;
+                for (u32 j = 0; j < scene_->ObjectCount(); ++j) {
+                    if (scene_->Object(j).id == object.parent) { parent = j; break; }
+                }
+                if (parent == 0xFFFFFFFFu || parent == cur) break;
+                if (parent == object_index) { matches = true; break; }
+                cur = parent;
+            }
+        }
+        if (matches) StopEntry(i + 1);
+    }
 }
 
 static u32 FindCoroutineCurrent(MetadataPackage& md, u32 type_id) {
@@ -916,77 +1329,645 @@ static u32 FindCoroutineCurrent(MetadataPackage& md, u32 type_id) {
     return 0;
 }
 
-void Interpreter::UpdateCoroutines(f32 dt) {
-    if (coroutines_.Empty()) return;
-    u32 initial = coroutines_.Size();
-    u32 budget = 512;
-    for (u32 i = 0; i < initial; ++i) {
-        if (!coroutines_[i].active) continue;
-        if (coroutines_[i].wait > 0.0f) {
-            coroutines_[i].wait -= dt;
-            if (coroutines_[i].wait > 0.0f) continue;
+bool Interpreter::ChargeStep(u32 entry_id) {
+    if (step_budget_pass_ != coroutine_pass_) {
+        step_budget_pass_ = coroutine_pass_;
+        step_budget_count_ = 0;
+    }
+    if (budget_exhausted_pass_ == coroutine_pass_) {
+        char detail[192];
+        _snprintf(detail, sizeof(detail) - 1,
+                  "same-pass step budget refused entry=%u pass=%u steps=%u limit=%u",
+                  entry_id, coroutine_pass_, step_budget_count_, kMaxSamePassAdvances);
+        detail[sizeof(detail) - 1] = 0;
+        FaultEntry(entry_id, "coroutine scheduler::step-budget", detail);
+        return false;
+    }
+    if (step_budget_count_ >= kMaxSamePassAdvances) {
+        budget_exhausted_pass_ = coroutine_pass_;
+        char detail[192];
+        _snprintf(detail, sizeof(detail) - 1,
+                  "same-pass step budget exceeded entry=%u steps=%u limit=%u",
+                  entry_id, step_budget_count_, kMaxSamePassAdvances);
+        detail[sizeof(detail) - 1] = 0;
+        FaultEntry(entry_id, "coroutine scheduler::step-budget", detail);
+        return false;
+    }
+    ++step_budget_count_;
+    return true;
+}
+
+bool Interpreter::StepEntry(u32 entry_id, f32 dt, bool timer_tick) {
+    if (!entry_id || entry_id > coroutines_.Size()) return false;
+    if (!EntryChainActive(entry_id)) return false;
+    CoroutineEntry& entry = coroutines_[entry_id - 1];
+    Object* enumerator_object = (entry.enumerator.tag == VT_OBJECT ||
+                                 entry.enumerator.tag == VT_STRUCT)
+        ? entry.enumerator.data.obj : 0;
+    if (!enumerator_object || !IsLiveObject(enumerator_object)) {
+        FaultEntry(entry_id, "coroutine entry::invalid-enumerator",
+                   "coroutine enumerator is no longer live");
+        return false;
+    }
+    StepRootScope step_root(*this, enumerator_object->type_id, entry.owner.data.obj->type_id);
+    if (!ChargeStep(entry_id)) return false;
+    if (sync_step_depth_ >= kMaxSynchronousStepDepth) {
+        char detail[192];
+        _snprintf(detail, sizeof(detail) - 1,
+                  "synchronous step depth exceeded entry=%u depth=%u limit=%u",
+                  entry_id, sync_step_depth_, kMaxSynchronousStepDepth);
+        detail[sizeof(detail) - 1] = 0;
+        FaultEntry(entry_id, "coroutine scheduler::step-depth", detail);
+        return false;
+    }
+    ++sync_step_depth_;
+    u32 saved_entry = current_entry_;
+    current_entry_ = entry_id;
+    bool result = StepEntryImpl(entry_id, dt, timer_tick);
+    current_entry_ = saved_entry;
+    --sync_step_depth_;
+    return result;
+}
+
+bool Interpreter::StepEntryImpl(u32 entry_id, f32 dt, bool timer_tick) {
+    if (!entry_id || entry_id > coroutines_.Size()) return false;
+    CoroutineEntry& entry = coroutines_[entry_id - 1];
+    if (!entry.active) return false;
+    if (entry.timer_prepared_pass == coroutine_pass_) return false;
+    Object* enumerator_object = (entry.enumerator.tag == VT_OBJECT ||
+                                 entry.enumerator.tag == VT_STRUCT)
+        ? entry.enumerator.data.obj : 0;
+    if (entry.wait_kind == COROUTINE_WAIT_HANDLE) {
+        u32 child = CoroutineIDForHandle(entry.handle);
+        if (child && child <= coroutines_.Size() && coroutines_[child - 1].active) return false;
+        if (child && child <= coroutines_.Size() && coroutines_[child - 1].completed) {
+            entry.wait_kind = COROUTINE_WAIT_NONE;
+            return true;
         }
-        if (budget == 0) break;
-        --budget;
-        Value enumerator = coroutines_[i].enumerator;
-        Object* en = (enumerator.tag == VT_OBJECT || enumerator.tag == VT_STRUCT)
-            ? enumerator.data.obj : 0;
-        if (!en || !IsLiveObject(en)) { coroutines_[i].active = 0; continue; }
-        {
-            const TypeInfo& et = metadata_.Type(en->type_id);
-            const char* ename = et.full_name ? et.full_name : "";
-            // Temporary safety filter: these UI/boss coroutine state machines
-            // still expose incorrect managed references through the partial
-            // runtime and can fault the process. Run the gameplay coroutines
-            // that are validated while the remaining ones are brought up.
-            if (strstr(ename, "UIImageAnimationLoop") ||
-                strstr(ename, "VeggiesLevel") ||
-                strstr(ename, "PlayerDeathEffect") ||
-                strstr(ename, "WeaponWideShot/<angle_cr>") ||
-                strstr(ename, "GroundHomingMovement") ||
-                strstr(ename, "HomingProjectile/<move_cr>")) {
-                coroutines_[i].active = 0;
+        if (!entry.orphaned) {
+            entry.orphaned = 1;
+            entry.wait_kind = COROUTINE_WAIT_ORPHANED;
+            char detail[192];
+            _snprintf(detail, sizeof(detail) - 1,
+                      "stopped or faulted child wait; waiter owner=%s",
+                      entry.owner.data.obj
+                          ? SafeName(metadata_.Type(entry.owner.data.obj->type_id).full_name)
+                          : "<invalid>");
+            detail[sizeof(detail) - 1] = 0;
+            RecordLedger(LEDGER_NOTE, "orphaned-waiter", 0, detail);
+        }
+        return false;
+    }
+    if (entry.wait_kind == COROUTINE_WAIT_RAW) {
+        u32 child = entry.wait_entry;
+        if (child && child <= coroutines_.Size() && coroutines_[child - 1].active) return false;
+        if (child && child <= coroutines_.Size() && coroutines_[child - 1].completed) {
+            entry.wait_kind = COROUTINE_WAIT_NONE;
+            entry.wait_entry = 0;
+            return true;
+        }
+        if (!entry.orphaned) {
+            entry.orphaned = 1;
+            entry.wait_kind = COROUTINE_WAIT_ORPHANED;
+            RecordLedger(LEDGER_NOTE, "orphaned-waiter", 0,
+                         "raw child stopped or faulted");
+        }
+        return false;
+    }
+    if (entry.wait_kind == COROUTINE_WAIT_ORPHANED) return false;
+    if (entry.wait_kind == COROUTINE_WAIT_TIME || entry.wait_kind == COROUTINE_WAIT_REALTIME) {
+        if (!timer_tick) return false;
+        entry.timer_prepared_pass = coroutine_pass_;
+        f32 elapsed = entry.wait_kind == COROUTINE_WAIT_TIME
+            ? dt * ReadCoroutineTimeScale() : dt;
+        entry.wait -= elapsed;
+        if (entry.wait > 0.0f) return false;
+        entry.wait_kind = COROUTINE_WAIT_NONE;
+    }
+
+    u32 move = 0;
+    u32 cur = enumerator_object->type_id;
+    u32 guard = 0;
+    while (cur && guard++ < 64 && !move) {
+        move = metadata_.FindMethod(cur, "MoveNext");
+        cur = metadata_.Type(cur).base_id;
+    }
+    if (!move) {
+        char site[256];
+        _snprintf(site, sizeof(site) - 1, "%s::MoveNext",
+                  SafeName(metadata_.Type(enumerator_object->type_id).full_name));
+        site[sizeof(site) - 1] = 0;
+        FaultEntry(entry_id, site, "MoveNext missing");
+        return false;
+    }
+    Value self = entry.enumerator;
+    Value moved = Value::Bool(false);
+    bool ok = Invoke(move, &self, 1, &moved);
+    entry.last_step_pass = coroutine_pass_;
+    entry.timer_prepared_pass = coroutine_pass_;
+    if (!EntryChainActive(entry_id)) {
+        if (entry.active) StopEntry(entry_id);
+        return false;
+    }
+    if (!ok) {
+        char site[256];
+        _snprintf(site, sizeof(site) - 1, "%s::MoveNext",
+                  SafeName(metadata_.Type(enumerator_object->type_id).full_name));
+        site[sizeof(site) - 1] = 0;
+        FaultEntry(entry_id, site, 0);
+        return false;
+    }
+    if (!IsTrue(moved)) {
+        entry.active = 0;
+        entry.completed = 1;
+        entry.wait_kind = COROUTINE_WAIT_NONE;
+        return true;
+    }
+    u32 current = FindCoroutineCurrent(metadata_, enumerator_object->type_id);
+    Value yielded = Value::Null();
+    if (!current) {
+        char site[256];
+        _snprintf(site, sizeof(site) - 1, "%s::get_Current",
+                  SafeName(metadata_.Type(enumerator_object->type_id).full_name));
+        site[sizeof(site) - 1] = 0;
+        FaultEntry(entry_id, site, "current yield method unavailable");
+        return false;
+    }
+    bool current_ok = Invoke(current, &self, 1, &yielded);
+    if (!EntryChainActive(entry_id)) {
+        if (entry.active) StopEntry(entry_id);
+        return false;
+    }
+    if (!current_ok) {
+        char site[256];
+        _snprintf(site, sizeof(site) - 1, "%s::get_Current",
+                  SafeName(metadata_.Type(enumerator_object->type_id).full_name));
+        site[sizeof(site) - 1] = 0;
+        FaultEntry(entry_id, site, 0);
+        return false;
+    }
+    strcpy(entry.last_yield, "null");
+    entry.wait_kind = COROUTINE_WAIT_NONE;
+    entry.wait = 0.0f;
+    if ((yielded.tag == VT_OBJECT || yielded.tag == VT_STRUCT) && yielded.data.obj &&
+        IsLiveObject(yielded.data.obj)) {
+        const char* yield_name = SafeName(metadata_.Type(yielded.data.obj->type_id).full_name);
+        u32 n = (u32)strlen(yield_name);
+        if (n >= sizeof(entry.last_yield)) n = sizeof(entry.last_yield) - 1;
+        memcpy(entry.last_yield, yield_name, n);
+        entry.last_yield[n] = 0;
+        if (strcmp(yield_name, "UnityEngine.WaitForSeconds") == 0) {
+            f32 seconds = yielded.data.obj->slots ? ToF32(yielded.data.obj->Fields()[0]) : 0.0f;
+            if (seconds > 0.0f) {
+                entry.wait = seconds;
+                entry.wait_kind = COROUTINE_WAIT_TIME;
+            }
+        } else if (strcmp(yield_name, "UnityEngine.WaitForSecondsRealtime") == 0) {
+            f32 seconds = yielded.data.obj->slots ? ToF32(yielded.data.obj->Fields()[0]) : 0.0f;
+            if (seconds > 0.0f) {
+                entry.wait = seconds;
+                entry.wait_kind = COROUTINE_WAIT_REALTIME;
+            }
+        } else if (strcmp(yield_name, "UnityEngine.WaitForFixedUpdate") == 0 ||
+                   strcmp(yield_name, "UnityEngine.WaitForEndOfFrame") == 0) {
+            RecordLedger(LEDGER_NOTE, "approximated wait", 0, yield_name);
+        } else if (IsCoroutineHandle(*this, yielded)) {
+            u32 child = CoroutineIDForHandle(yielded);
+            if (child && child <= coroutines_.Size()) {
+                entry.handle = yielded;
+                entry.wait_kind = COROUTINE_WAIT_HANDLE;
+            }
+        } else {
+            u32 child_move = 0;
+            u32 child_cur = yielded.data.obj->type_id;
+            u32 child_guard = 0;
+            while (child_cur && child_guard++ < 64 && !child_move) {
+                child_move = metadata_.FindMethod(child_cur, "MoveNext");
+                child_cur = metadata_.Type(child_cur).base_id;
+            }
+            if (child_move) {
+                if (!EntryChainActive(entry_id)) {
+                    if (entry.active) StopEntry(entry_id);
+                    return false;
+                }
+                Value child_handle;
+                Value child_owner = entry.owner;
+                u32 old_size = coroutines_.Size();
+                if (!StartCoroutine(child_owner, yielded, &child_handle, entry_id)) {
+                    return false;
+                }
+                if (!EntryChainActive(entry_id)) return false;
+                u32 child = CoroutineIDForHandle(child_handle);
+                if (!child && coroutines_.Size() > old_size) child = old_size + 1;
+                if (child && child <= coroutines_.Size()) {
+                    coroutines_[entry_id - 1].wait_entry = child;
+                    coroutines_[entry_id - 1].wait_kind = COROUTINE_WAIT_RAW;
+                }
+                RecordLedger(LEDGER_NOTE, "raw IEnumerator yield", 0, yield_name);
+            } else {
+                RecordLedger(LEDGER_NOTE, "unknown yield approximation", 0, yield_name);
+                RecordLedger(LEDGER_UNSUPPORTED, "unknown yield type", 0, yield_name);
+            }
+        }
+    }
+    entry.timer_prepared_pass = coroutine_pass_;
+    return true;
+}
+
+void Interpreter::UpdateCoroutines(f32 dt) {
+    ++coroutine_frame_;
+    ++coroutine_pass_;
+    coroutine_in_pass_ = true;
+    if (coroutines_.Empty()) {
+        coroutine_in_pass_ = false;
+        return;
+    }
+    u32 initial = coroutines_.Size();
+    bool progressed = true;
+    while (progressed) {
+        progressed = false;
+        if (budget_exhausted_pass_ == coroutine_pass_) break;
+        for (u32 i = 0; i < initial && i < coroutines_.Size(); ++i) {
+            if (!coroutines_[i].active || coroutines_[i].last_step_pass == coroutine_pass_) continue;
+            if (coroutines_[i].timer_prepared_pass == coroutine_pass_) continue;
+            if (coroutines_[i].skip_pass == coroutine_pass_) {
                 continue;
             }
-        }
-        u32 move = 0;
-        u32 cur = en->type_id;
-        u32 h = 0;
-        while (cur && h++ < 64 && !move) {
-            move = metadata_.FindMethod(cur, "MoveNext");
-            cur = metadata_.Type(cur).base_id;
-        }
-        if (!move) { coroutines_[i].active = 0; continue; }
-        Value self = enumerator;
-        Value mr = Value::Bool(true);
-        bool ok = Invoke(move, &self, 1, &mr);
-        if (!ok || (mr.tag == VT_BOOL && mr.data.i32 == 0)) {
-            coroutines_[i].active = 0;
-            continue;
-        }
-        u32 current = FindCoroutineCurrent(metadata_, en->type_id);
-        if (current) {
-            Value cr = Value::Null();
-            if (Invoke(current, &self, 1, &cr) &&
-                (cr.tag == VT_OBJECT || cr.tag == VT_STRUCT) && cr.data.obj &&
-                IsLiveObject(cr.data.obj)) {
-                const TypeInfo& ct = metadata_.Type(cr.data.obj->type_id);
-                if (ct.full_name && strstr(ct.full_name, "WaitForSeconds")) {
-                    f32 seconds = cr.data.obj->slots > 0
-                        ? ToF32(cr.data.obj->Fields()[0]) : 0.0f;
-                    if (seconds > 0.0f) coroutines_[i].wait = seconds;
-                }
+            if (StepEntry(i + 1, dt, true)) {
+                progressed = true;
+            } else if (budget_exhausted_pass_ == coroutine_pass_) {
+                break;
             }
         }
     }
-    // Compaction must happen after all MoveNext calls: a coroutine may have
-    // appended new entries (or reallocated coroutines_) while running.
-    Buffer<CoroutineEntry> alive;
-    for (u32 i = 0; i < coroutines_.Size(); ++i) {
-        if (coroutines_[i].active) alive.PushBack(coroutines_[i]);
+    coroutine_in_pass_ = false;
+}
+
+bool Interpreter::GetCoroutineInfo(u32 index, CoroutineInfo* out) const {
+    if (!out || index >= coroutines_.Size()) return false;
+    const CoroutineEntry& entry = coroutines_[index];
+    Object* enumerator = (entry.enumerator.tag == VT_OBJECT || entry.enumerator.tag == VT_STRUCT)
+        ? entry.enumerator.data.obj : 0;
+    Object* owner = (entry.owner.tag == VT_OBJECT || entry.owner.tag == VT_STRUCT)
+        ? entry.owner.data.obj : 0;
+    out->iterator_type = enumerator
+        ? SafeName(metadata_.Type(enumerator->type_id).full_name) : "<invalid>";
+    out->owner_type = owner
+        ? SafeName(metadata_.Type(owner->type_id).full_name) : "<invalid>";
+    out->last_yield = entry.last_yield;
+    out->state = -1;
+    if (enumerator) {
+        u32 cur = enumerator->type_id;
+        u32 guard = 0;
+        while (cur && guard++ < 64) {
+            u32 field = metadata_.FindField(cur, "$PC");
+            if (field) {
+                Value value = const_cast<Interpreter*>(this)->GetField(field, entry.enumerator);
+                if (value.tag == VT_I4) out->state = value.data.i32;
+                break;
+            }
+            cur = metadata_.Type(cur).base_id;
+        }
     }
-    coroutines_.Reset();
-    for (u32 i = 0; i < alive.Size(); ++i) coroutines_.PushBack(alive[i]);
+    out->running = entry.active;
+    out->completed = entry.completed;
+    out->stopped = entry.stopped;
+    out->orphaned = entry.orphaned;
+    out->faulted = entry.faulted;
+    out->wait_kind = entry.wait_kind;
+    out->last_step_pass = entry.last_step_pass;
+    out->fault_site = entry.fault_site[0] ? entry.fault_site : "";
+    return true;
+}
+
+bool Interpreter::GetCoroutineInfo(const Value& handle, CoroutineInfo* out) const {
+    u32 id = CoroutineIDForHandle(handle);
+    return id ? GetCoroutineInfo(id - 1, out) : false;
+}
+
+bool Interpreter::IsCoroutineRunning(const Value& handle) const {
+    u32 id = CoroutineIDForHandle(handle);
+    return id && id <= coroutines_.Size() && coroutines_[id - 1].active;
+}
+
+void Interpreter::SetRootContext(u32 iterator_type, u32 owner_type, const char* callback) {
+    memset(&root_context_, 0, sizeof(root_context_));
+    root_context_.kind = 1;
+    root_context_.iterator_type = iterator_type;
+    root_context_.owner_type = owner_type;
+    if (callback) {
+        u32 n = (u32)strlen(callback);
+        if (n >= sizeof(root_context_.callback)) n = sizeof(root_context_.callback) - 1;
+        memcpy(root_context_.callback, callback, n);
+        root_context_.callback[n] = 0;
+    }
+}
+
+void Interpreter::ClearRootContext() {
+    memset(&root_context_, 0, sizeof(root_context_));
+}
+
+void Interpreter::RecordLedger(LedgerCategory category, const char* native_site,
+                               u32 managed_site, const char* detail) {
+    LedgerRecord record;
+    memset(&record, 0, sizeof(record));
+    record.frame = coroutine_frame_;
+    record.count = 1;
+    record.category = (u8)category;
+    record.managed_site = managed_site;
+    if (native_site) {
+        u32 n = (u32)strlen(native_site);
+        if (n >= sizeof(record.native_site)) n = sizeof(record.native_site) - 1;
+        memcpy(record.native_site, native_site, n);
+        record.native_site[n] = 0;
+    }
+    if (detail) {
+        u32 n = (u32)strlen(detail);
+        if (n >= sizeof(record.detail)) n = sizeof(record.detail) - 1;
+        memcpy(record.detail, detail, n);
+        record.detail[n] = 0;
+    }
+    u32 available = method_stack_.Size();
+    record.root_iterator_type = root_context_.iterator_type;
+    record.root_owner_type = root_context_.owner_type;
+    strcpy(record.root_callback, root_context_.callback);
+    RecordStrictPrefixes(record);
+    for (u32 i = 0; i < ledger_.Size(); ++i) {
+        LedgerRecord& group = ledger_[i];
+        if (group.category != record.category ||
+            group.managed_site != record.managed_site ||
+            strcmp(group.native_site, record.native_site) != 0 ||
+            group.root_iterator_type != record.root_iterator_type ||
+            group.root_owner_type != record.root_owner_type ||
+            strcmp(group.root_callback, record.root_callback) != 0) continue;
+        ++group.count;
+        if (available > 32) ++ledger_ancestry_truncated_;
+        return;
+    }
+    if (ledger_.Size() >= kMaxLedgerRecords) {
+        ++ledger_dropped_;
+        if (g_strict_prefix_count) g_strict_loss_detected = true;
+        return;
+    }
+    u32 keep = available < 32 ? available : 32;
+    record.ancestor_count = keep;
+    record.ancestors_truncated = available > keep;
+    u32 start = available - keep;
+    for (u32 i = 0; i < keep; ++i) record.ancestors[i] = method_stack_[start + i];
+    if (record.ancestors_truncated) ++ledger_ancestry_truncated_;
+    if (!ledger_.PushBack(record)) {
+        ++ledger_allocation_loss_;
+        ++ledger_push_failed_;
+        if (g_strict_prefix_count) g_strict_loss_detected = true;
+    }
+}
+
+u32 Interpreter::LedgerObservationCount() const {
+    u32 total = ledger_dropped_ + ledger_push_failed_;
+    for (u32 i = 0; i < ledger_.Size(); ++i) total += ledger_[i].count;
+    return total;
+}
+
+u32 Interpreter::LedgerSiteCount(LedgerCategory category, const char* site) const {
+    if (!site) return 0;
+    u32 total = 0;
+    for (u32 i = 0; i < ledger_.Size(); ++i) {
+        if (ledger_[i].category != category) continue;
+        char scratch[256];
+        if (strcmp(LedgerSite(ledger_[i], scratch, sizeof(scratch)), site) == 0) {
+            total += ledger_[i].count;
+        }
+    }
+    return total;
+}
+
+void Interpreter::RecordFaultSite(const char* site, const char* detail) {
+    RecordLedger(LEDGER_FAULT, site, 0, detail);
+}
+
+void Interpreter::RecordUnsupportedSite(const char* site, const char* detail) {
+    RecordLedger(LEDGER_UNSUPPORTED, site, 0, detail);
+}
+
+void Interpreter::RecordNoteSite(const char* site, const char* detail) {
+    RecordLedger(LEDGER_NOTE, site, 0, detail);
+}
+
+const char* Interpreter::LedgerSite(const LedgerRecord& record, char* scratch,
+                                    u32 scratch_size) const {
+    if (record.native_site[0]) return record.native_site;
+    if (!record.managed_site || record.managed_site > metadata_.MethodCount()) return "<unknown>";
+    const MethodInfo& method = metadata_.Method(record.managed_site);
+    _snprintf(scratch, scratch_size - 1, "%s::%s",
+              SafeName(metadata_.Type(method.decl_id).full_name), SafeName(method.name));
+    scratch[scratch_size - 1] = 0;
+    return scratch;
+}
+
+void Interpreter::RecordStrictPrefixes(const LedgerRecord& record) {
+    if (record.category != LEDGER_FAULT || !g_strict_prefix_count) return;
+    char site_scratch[256];
+    char item_scratch[256];
+    const char* site = LedgerSite(record, site_scratch, sizeof(site_scratch));
+    for (u32 p = 0; p < g_strict_prefix_count; ++p) {
+        const char* prefix = g_strict_prefixes[p];
+        u32 plen = (u32)strlen(prefix);
+        if (strncmp(site, prefix, plen) == 0) {
+            g_strict_fault_matched = true;
+            return;
+        }
+        for (u32 i = 0; i < method_stack_.Size(); ++i) {
+            u32 id = method_stack_[i];
+            if (!id || id > metadata_.MethodCount()) {
+                g_strict_loss_detected = true;
+                continue;
+            }
+            const MethodInfo& method = metadata_.Method(id);
+            _snprintf(item_scratch, sizeof(item_scratch) - 1, "%s::%s",
+                      SafeName(metadata_.Type(method.decl_id).full_name),
+                      SafeName(method.name));
+            item_scratch[sizeof(item_scratch) - 1] = 0;
+            if (strncmp(item_scratch, prefix, plen) == 0) {
+                g_strict_fault_matched = true;
+                return;
+            }
+        }
+        if (record.root_iterator_type && record.root_iterator_type <= metadata_.TypeCount()) {
+            _snprintf(item_scratch, sizeof(item_scratch) - 1, "%s::MoveNext",
+                      SafeName(metadata_.Type(record.root_iterator_type).full_name));
+            item_scratch[sizeof(item_scratch) - 1] = 0;
+            if (strncmp(item_scratch, prefix, plen) == 0) {
+                g_strict_fault_matched = true;
+                return;
+            }
+        }
+        if (record.root_owner_type && record.root_owner_type <= metadata_.TypeCount()) {
+            _snprintf(item_scratch, sizeof(item_scratch) - 1, "%s::StartCoroutine",
+                      SafeName(metadata_.Type(record.root_owner_type).full_name));
+            item_scratch[sizeof(item_scratch) - 1] = 0;
+            if (strncmp(item_scratch, prefix, plen) == 0) {
+                g_strict_fault_matched = true;
+                return;
+            }
+        }
+        if (strncmp(record.root_callback, prefix, plen) == 0) {
+            g_strict_fault_matched = true;
+            return;
+        }
+    }
+}
+
+bool Interpreter::FirstLedgerSite(LedgerCategory category, char* out, u32 out_size) const {
+    if (!out || !out_size) return false;
+    for (u32 i = 0; i < ledger_.Size(); ++i) {
+        if (ledger_[i].category != category) continue;
+        char scratch[256];
+        const char* site = LedgerSite(ledger_[i], scratch, sizeof(scratch));
+        u32 n = (u32)strlen(site);
+        if (n >= out_size) n = out_size - 1;
+        memcpy(out, site, n);
+        out[n] = 0;
+        return true;
+    }
+    return false;
+}
+
+bool Interpreter::FirstLedgerSitePrefix(LedgerCategory category, const char* prefix,
+                                        char* out, u32 out_size) const {
+    if (!out || !out_size || !prefix) return false;
+    u32 prefix_length = (u32)strlen(prefix);
+    for (u32 i = 0; i < ledger_.Size(); ++i) {
+        if (ledger_[i].category != category) continue;
+        char scratch[256];
+        const char* site = LedgerSite(ledger_[i], scratch, sizeof(scratch));
+        if (strncmp(site, prefix, prefix_length) != 0) continue;
+        u32 n = (u32)strlen(site);
+        if (n >= out_size) n = out_size - 1;
+        memcpy(out, site, n);
+        out[n] = 0;
+        return true;
+    }
+    return false;
+}
+
+bool Interpreter::FirstLedgerSiteForRoot(LedgerCategory category, u32 iterator_type,
+                                         u32 owner_type, char* out,
+                                         u32 out_size) const {
+    if (!out || !out_size) return false;
+    for (u32 i = 0; i < ledger_.Size(); ++i) {
+        const LedgerRecord& record = ledger_[i];
+        if (record.category != category) continue;
+        if (iterator_type && record.root_iterator_type != iterator_type &&
+            record.root_owner_type != iterator_type) continue;
+        if (owner_type && record.root_owner_type != owner_type &&
+            record.root_iterator_type != owner_type) continue;
+        char scratch[256];
+        const char* site = LedgerSite(record, scratch, sizeof(scratch));
+        u32 n = (u32)strlen(site);
+        if (n >= out_size) n = out_size - 1;
+        memcpy(out, site, n);
+        out[n] = 0;
+        return true;
+    }
+    return false;
+}
+
+static const char* RootTypeName(const MetadataPackage& metadata, u32 type, char* fallback) {
+    if (type && type <= metadata.TypeCount()) {
+        return SafeName(metadata.Type(type).full_name);
+    }
+    strcpy(fallback, "<none>");
+    return fallback;
+}
+
+u32 Interpreter::PrintLedgerSummary(u32 limit) {
+    if (ledger_printed_) return last_summary_groups_;
+    ledger_printed_ = true;
+    Buffer<u8> emitted;
+    if (!emitted.Resize(ledger_.Size())) {
+        ++ledger_allocation_loss_;
+        if (g_strict_prefix_count) g_strict_loss_detected = true;
+        LogError("ledger", "summary allocation failed groups=%u strict_loss=%d",
+                 ledger_.Size(), g_strict_loss_detected ? 1 : 0);
+        LogInfo("ledger",
+                "summary groups=0 observations=%u shown=0 dropped=%u push_fail=%u alloc_loss=%u ancestry_truncated=%u strict_prefixes=%u strict_matched=%d strict_loss=%d",
+                LedgerObservationCount(), ledger_dropped_, LedgerPushFailureCount(),
+                ledger_allocation_loss_,
+                ledger_ancestry_truncated_, g_strict_prefix_count,
+                g_strict_fault_matched ? 1 : 0, g_strict_loss_detected ? 1 : 0);
+        return 0;
+    }
+    u32 groups = 0;
+    while (true) {
+        u32 best = emitted.Size();
+        char best_site[256];
+        best_site[0] = 0;
+        for (u32 j = 0; j < ledger_.Size() && j < emitted.Size(); ++j) {
+            if (emitted[j]) continue;
+            char scratch[256];
+            const char* site = LedgerSite(ledger_[j], scratch, sizeof(scratch));
+            if (best == emitted.Size() || ledger_[j].category < ledger_[best].category ||
+                (ledger_[j].category == ledger_[best].category &&
+                 strcmp(site, best_site) < 0) ||
+                (ledger_[j].category == ledger_[best].category &&
+                 strcmp(site, best_site) == 0 &&
+                 ledger_[j].root_owner_type < ledger_[best].root_owner_type)) {
+                best = j;
+                strcpy(best_site, site);
+            }
+        }
+        if (best == emitted.Size()) break;
+
+        const LedgerRecord& first = ledger_[best];
+        emitted[best] = 1;
+        char site_scratch[256];
+        const char* site = LedgerSite(first, site_scratch, sizeof(site_scratch));
+        char site_key[256];
+        strcpy(site_key, site);
+        char root_it_fallback[32], root_owner_fallback[32];
+        const char* root_iterator = RootTypeName(metadata_, first.root_iterator_type,
+                                                 root_it_fallback);
+        const char* root_owner = RootTypeName(metadata_, first.root_owner_type,
+                                              root_owner_fallback);
+        char sample_ancestry[768];
+        sample_ancestry[0] = 0;
+        u32 sample_length = 0;
+        for (u32 a = 0; a < first.ancestor_count; ++a) {
+            u32 id = first.ancestors[a];
+            if (!id || id > metadata_.MethodCount()) continue;
+            const MethodInfo& method = metadata_.Method(id);
+            char item[320];
+            _snprintf(item, sizeof(item) - 1, "%s%s::%s",
+                      sample_length ? "," : "",
+                      SafeName(metadata_.Type(method.decl_id).full_name),
+                      SafeName(method.name));
+            item[sizeof(item) - 1] = 0;
+            u32 item_length = (u32)strlen(item);
+            if (sample_length + item_length >= sizeof(sample_ancestry) - 1) break;
+            memcpy(sample_ancestry + sample_length, item, item_length);
+            sample_length += item_length;
+            sample_ancestry[sample_length] = 0;
+        }
+        if (!sample_ancestry[0]) strcpy(sample_ancestry, "<none>");
+        if (groups < limit) {
+            LogInfo("ledger",
+                    "%s count=%u site=%s frame=%u root_iterator=%s root_owner=%s callback=%s ancestors=%u%s sample_ancestry=%s detail=%s",
+                    LedgerCategoryName(first.category), first.count, site_key, first.frame,
+                    root_iterator, root_owner, first.root_callback, first.ancestor_count,
+                    first.ancestors_truncated ? " truncated" : "", sample_ancestry,
+                    first.detail);
+        }
+        ++groups;
+    }
+    last_summary_groups_ = groups;
+    u32 shown = groups < limit ? groups : limit;
+    LogInfo("ledger",
+            "summary groups=%u observations=%u shown=%u dropped=%u push_fail=%u alloc_loss=%u ancestry_truncated=%u strict_prefixes=%u strict_matched=%d strict_loss=%d",
+            groups, LedgerObservationCount(), shown, ledger_dropped_,
+            LedgerPushFailureCount(), ledger_allocation_loss_,
+            ledger_ancestry_truncated_, g_strict_prefix_count,
+            g_strict_fault_matched ? 1 : 0, g_strict_loss_detected ? 1 : 0);
+    return groups;
 }
 
 bool Interpreter::Invoke(u32 method_id, Value* args, u32 arg_count, Value* ret) {
@@ -994,6 +1975,7 @@ bool Interpreter::Invoke(u32 method_id, Value* args, u32 arg_count, Value* ret) 
     if (method_id == 0 || method_id > metadata_.MethodCount()) return Fail("bad method id");
     const MethodInfo& m = metadata_.Method(method_id);
     const MethodSigInfo& sig = metadata_.MethodSig(m.sig);
+    RootScope ledger_root(*this, method_id, arg_count, args);
     {
         const TypeInfo& dt = metadata_.Type(m.decl_id);
         // Trilean is a tiny value type whose implicit conversions are used in
@@ -1124,9 +2106,16 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
     u32 code_size = method.il_size;
     u32 saved_method = current_method_id_;
     current_method_id_ = method_id;
+    if (!method_stack_.PushBack(method_id)) {
+        current_method_id_ = saved_method;
+        return Fail("method ancestry capacity exceeded", method_id);
+    }
 
     Value* arg_slots = (Value*)MemAlloc((arg_count ? arg_count : 1) * sizeof(Value));
-    if (!arg_slots) return Fail("out of memory for args", method_id);
+    if (!arg_slots) {
+        method_stack_.PopBack();
+        return Fail("out of memory for args", method_id);
+    }
     for (u32 i = 0; i < arg_count; ++i) arg_slots[i] = CopyValue(args[i]);
 
     u32 local_count = 0;
@@ -1136,7 +2125,11 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
         const LocalSigInfo& ls = metadata_.LocalSig(local_sig_id);
         local_count = ls.var_count;
         locals = (Value*)MemAlloc((local_count ? local_count : 1) * sizeof(Value));
-        if (!locals) { MemFree(arg_slots); return Fail("out of memory for locals", method_id); }
+        if (!locals) {
+            MemFree(arg_slots);
+            method_stack_.PopBack();
+            return Fail("out of memory for locals", method_id);
+        }
         for (u32 i = 0; i < local_count; ++i) {
             locals[i] = DefaultValue(metadata_.LocalVarSig(ls.var_start + i));
         }
@@ -1471,6 +2464,25 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
                                 : ((ftn.tag == VT_I4) ? (u32)ftn.data.i32 : 0);
                             bool is_static = (target.tag == VT_NULL);
                             PUSH(NewDelegate(mr->decl_id, mid, target, is_static));
+                            break;
+                        }
+                        if (IsWaitForNativeConstructor(metadata_, *mr)) {
+                            Value wait_object = NewObjectValue(mr->decl_id);
+                            if ((wait_object.tag != VT_OBJECT && wait_object.tag != VT_STRUCT) ||
+                                !wait_object.data.obj) {
+                                ok = Fail("WaitFor object allocation failed", method_id);
+                                goto done;
+                            }
+                            Value this_slot = wait_object;
+                            Value wait_args[kMaxCallArgs];
+                            wait_args[0] = Value::ByRef(&this_slot);
+                            for (u32 i = 0; i < explicit_count; ++i) {
+                                wait_args[i + 1] = cargs[i];
+                            }
+                            Value cr = Value::Void();
+                            ok = InvokeNative(*mr, explicit_count + 1, wait_args, &cr);
+                            if (!ok) goto done;
+                            PUSH(wait_object);
                             break;
                         }
                         // The constructor has no 'this' on the IL stack yet, so
@@ -1848,6 +2860,7 @@ bool Interpreter::Execute(u32 method_id, const MethodInfo& method, const MethodS
     }
 
 done:
+    if (!method_stack_.Empty()) method_stack_.PopBack();
     current_method_id_ = saved_method;
     if (!ok) {
         LogError("interp", "execute failed %s.%s id=%u pc=%u op=%02x",

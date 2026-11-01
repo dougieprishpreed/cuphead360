@@ -1498,10 +1498,12 @@ static bool GogGalaxyManager_IsInitialized(Interpreter&, const MemberRefInfo&, u
     return RetBool(ret, false);
 }
 static bool JsonUtility_ToJson(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    in.RecordUnsupportedSite("UnityEngine.JsonUtility::ToJson");
     if (ret) *ret = in.NewStringAscii("{}");
     return true;
 }
 static bool JsonUtility_FromJson(Interpreter& in, const MemberRefInfo&, u32, Value*, Value* ret) {
+    in.RecordUnsupportedSite("UnityEngine.JsonUtility::FromJson");
     u32 t = in.GenericArgType(0);
     if (ret) *ret = t ? in.NewObjectValue(t) : Value::Null();
     return true;
@@ -2070,14 +2072,32 @@ bool Interpreter::InvokeNative(const MemberRefInfo& member, u32 arg_count, Value
         if (strcmp(kEntries[i].type, t.full_name) == 0 &&
             strcmp(kEntries[i].name, member.name) == 0) {
             bool ok = kEntries[i].fn(*this, member, arg_count, args, ret);
-            if (!ok) LogError("native", "%s::%s returned false", t.full_name, member.name);
+            if (!ok) {
+                char site[192];
+                _snprintf(site, sizeof(site) - 1, "%s::%s", t.full_name, member.name);
+                site[sizeof(site) - 1] = 0;
+                RecordFaultSite(site, "native returned false");
+                LogError("native", "%s::%s returned false", t.full_name, member.name);
+            }
             return ok;
         }
     }
     if (strncmp(t.full_name, "UnityEngine.", 12) == 0) {
         bool ok = InvokeUnityNative(*this, member, arg_count, args, ret);
-        if (!ok) LogError("native", "%s::%s returned false (unity)", t.full_name, member.name);
+        if (!ok) {
+            char site[192];
+            _snprintf(site, sizeof(site) - 1, "%s::%s", t.full_name, member.name);
+            site[sizeof(site) - 1] = 0;
+            RecordFaultSite(site, "native Unity method returned false");
+            LogError("native", "%s::%s returned false (unity)", t.full_name, member.name);
+        }
         return ok;
+    }
+    {
+        char site[192];
+        _snprintf(site, sizeof(site) - 1, "%s::%s", t.full_name, member.name);
+        site[sizeof(site) - 1] = 0;
+        RecordFaultSite(site, "unimplemented native method");
     }
     LogError("native", "unimplemented native method %s::%s (argc=%u)",
              t.full_name, member.name, arg_count);

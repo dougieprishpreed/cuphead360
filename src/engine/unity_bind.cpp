@@ -867,6 +867,7 @@ static bool GameObject_SetActive(Interpreter& in, const MemberRefInfo&, u32, Val
     u32 oi = ManagedObjectIndex(in, a[0]);
     Scene* scene = in.BoundScene();
     bool enabled = Interpreter::ToBool(a[1]);
+    if (!enabled) in.StopCoroutinesForGameObject(oi, true);
     if (a[0].tag == VT_OBJECT && a[0].data.obj) {
         a[0].data.obj->flags = (a[0].data.obj->flags & ~1u) | (enabled ? 1u : 0u);
     }
@@ -2377,6 +2378,13 @@ static bool Object_Instantiate(Interpreter& in, const MemberRefInfo&, u32 argc, 
 
 static bool Object_Destroy(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
     if (a[0].tag == VT_OBJECT && a[0].data.obj) {
+        u32 ci = in.ManagedComponentIndexFor(a[0]);
+        if (ci != 0xFFFFFFFFu) {
+            in.StopCoroutinesForComponent(ci);
+        } else {
+            u32 oi = in.ManagedObjectIndexFor(a[0]);
+            in.StopCoroutinesForGameObject(oi, true);
+        }
         u32 oi = ManagedObjectIndex(in, a[0]);
         Scene* scene = in.BoundScene();
         if (scene && oi < scene->ObjectCount()) {
@@ -2621,10 +2629,44 @@ static bool Animator_GetSpeed(Interpreter& in, const MemberRefInfo&, u32, Value*
     const SceneComponent* c = SceneComponentFor(in, a[0]);
     return RetF32Field(ret, c ? c->color[0] : 1.0f);
 }
-static bool MonoBehaviour_StartCoroutine(Interpreter& in, const MemberRefInfo&, u32 argc, Value* a, Value* ret) {
-    if (argc >= 2) in.StartCoroutineObject(a[1]);
+static bool MonoBehaviour_StartCoroutine(Interpreter& in, const MemberRefInfo&, u32 argc,
+                                         Value* a, Value* ret) {
     if (ret) *ret = Value::Null();
-    return true;
+    if (argc < 2) {
+        in.RecordFaultSite("UnityEngine.MonoBehaviour::StartCoroutine", "missing IEnumerator");
+        return false;
+    }
+    if (a[1].tag == VT_STRING) {
+        in.RecordUnsupportedSite("UnityEngine.MonoBehaviour::StartCoroutine(string)",
+                                 in.StringUtf8(a[1]));
+        return true;
+    }
+    return in.StartCoroutine(a[0], a[1], ret);
+}
+
+static bool MonoBehaviour_StopCoroutine(Interpreter& in, const MemberRefInfo&, u32 argc,
+                                        Value* a, Value* ret) {
+    if (argc < 2) return RetVoid(ret);
+    if (a[1].tag == VT_STRING) {
+        in.RecordUnsupportedSite("UnityEngine.MonoBehaviour::StopCoroutine(string)",
+                                 in.StringUtf8(a[1]));
+        return RetVoid(ret);
+    }
+    in.StopCoroutine(a[0], a[1]);
+    return RetVoid(ret);
+}
+
+static bool MonoBehaviour_StopAllCoroutines(Interpreter& in, const MemberRefInfo&, u32 argc,
+                                            Value* a, Value* ret) {
+    if (argc >= 1) in.StopAllCoroutines(a[0]);
+    return RetVoid(ret);
+}
+
+static bool MonoBehaviour_Invoke(Interpreter& in, const MemberRefInfo&, u32 argc,
+                                 Value* a, Value* ret) {
+    const char* method = argc >= 2 && a[1].tag == VT_STRING ? in.StringUtf8(a[1]) : "";
+    in.RecordUnsupportedSite("UnityEngine.MonoBehaviour::Invoke", method);
+    return RetVoid(ret);
 }
 
 static bool Vector3_Ctor(Interpreter& in, const MemberRefInfo&, u32, Value* a, Value* ret) {
@@ -3073,24 +3115,42 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         if (strcmp(n, ".ctor") == 0 && strcmp(type, "UnityEngine.GameObject") == 0) {
             return GameObject_Ctor(in, member, argc, args, ret);
         }
-        if (strcmp(n, "StopCoroutine") == 0 || strcmp(n, "StopAllCoroutines") == 0 ||
-            strcmp(n, "Invoke") == 0 || strcmp(n, ".ctor") == 0) {
-            return MonoBehaviour_NoOp(in, member, argc, args, ret);
-        }
+        if (strcmp(n, "StopCoroutine") == 0) return MonoBehaviour_StopCoroutine(in, member, argc, args, ret);
+        if (strcmp(n, "StopAllCoroutines") == 0) return MonoBehaviour_StopAllCoroutines(in, member, argc, args, ret);
+        if (strcmp(n, "Invoke") == 0) return MonoBehaviour_Invoke(in, member, argc, args, ret);
+        if (strcmp(n, ".ctor") == 0) return MonoBehaviour_NoOp(in, member, argc, args, ret);
         if (strcmp(n, "op_Equality") == 0) return RetBoolV(ret, args[0].data.obj == args[1].data.obj);
         if (strcmp(n, "op_Inequality") == 0) return RetBoolV(ret, args[0].data.obj != args[1].data.obj);
         if (strcmp(n, "op_Implicit") == 0) return RetBoolV(ret, args[0].data.obj != 0);
         if (strcmp(n, "Destroy") == 0) return Object_Destroy(in, member, argc, args, ret);
-        if (strcmp(n, "DontDestroyOnLoad") == 0) return RetVoid(ret);
+        if (strcmp(n, "DontDestroyOnLoad") == 0) {
+            in.RecordUnsupportedSite("UnityEngine.Object::DontDestroyOnLoad");
+            return RetVoid(ret);
+        }
         if (strcmp(type, "UnityEngine.Animator") == 0) {
             if (strcmp(n, "set_speed") == 0) return Animator_SetSpeed(in, member, argc, args, ret);
             if (strcmp(n, "get_speed") == 0) return Animator_GetSpeed(in, member, argc, args, ret);
-            if (strcmp(n, "GetInteger") == 0) return RetI32V(ret, 0);
-            if (strcmp(n, "GetBool") == 0) return RetBoolV(ret, false);
-            if (strcmp(n, "GetFloat") == 0) return RetF32V(ret, 0.0f);
+            if (strcmp(n, "GetInteger") == 0) {
+                in.RecordUnsupportedSite("UnityEngine.Animator::GetInteger");
+                return RetI32V(ret, 0);
+            }
+            if (strcmp(n, "GetBool") == 0) {
+                in.RecordUnsupportedSite("UnityEngine.Animator::GetBool");
+                return RetBoolV(ret, false);
+            }
+            if (strcmp(n, "GetFloat") == 0) {
+                in.RecordUnsupportedSite("UnityEngine.Animator::GetFloat");
+                return RetF32V(ret, 0.0f);
+            }
         }
         if (strcmp(n, "Play") == 0 || strcmp(n, "SetTrigger") == 0 || strcmp(n, "SetBool") == 0 ||
             strcmp(n, "SetInteger") == 0 || strcmp(n, "SetFloat") == 0) {
+            char site[128];
+            _snprintf(site, sizeof(site) - 1, "UnityEngine.Animator::%s", n);
+            site[sizeof(site) - 1] = 0;
+            const char* detail = argc >= 2 && args[1].tag == VT_STRING
+                ? in.StringUtf8(args[1]) : 0;
+            in.RecordUnsupportedSite(site, detail);
             return RetVoid(ret);
         }
     }
@@ -3244,7 +3304,16 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
         strcmp(type, "UnityEngine.WaitForSecondsRealtime") == 0 ||
         strcmp(type, "UnityEngine.WaitForFixedUpdate") == 0 ||
         strcmp(type, "UnityEngine.WaitForEndOfFrame") == 0) {
-        if (strcmp(n, ".ctor") == 0) return RetVoid(ret);
+        if (strcmp(n, ".ctor") == 0) {
+            if ((strcmp(type, "UnityEngine.WaitForSeconds") == 0 ||
+                 strcmp(type, "UnityEngine.WaitForSecondsRealtime") == 0) &&
+                argc >= 2 && args[0].tag == VT_BYREF && args[0].data.ref &&
+                args[0].data.ref->tag == VT_OBJECT && args[0].data.ref->data.obj &&
+                args[0].data.ref->data.obj->slots) {
+                args[0].data.ref->data.obj->Fields()[0] = Value::R4(Interpreter::ToF32(args[1]));
+            }
+            return RetVoid(ret);
+        }
     }
     if (strcmp(type, "UnityEngine.SystemInfo") == 0) {
         if (strcmp(n, "SupportsRenderTextureFormat") == 0) return RetBoolV(ret, false);
@@ -3303,7 +3372,15 @@ bool InvokeUnityNative(Interpreter& in, const MemberRefInfo& member, u32 argc, V
             if (ret) *ret = so ? Value::StructRef(so) : Value::Null();
             return true;
         }
-        if (strcmp(n, "LoadScene") == 0 || strcmp(n, "UnloadScene") == 0) return RetVoid(ret);
+        if (strcmp(n, "LoadScene") == 0 || strcmp(n, "UnloadScene") == 0) {
+            char site[128];
+            _snprintf(site, sizeof(site) - 1, "UnityEngine.SceneManagement.SceneManager::%s", n);
+            site[sizeof(site) - 1] = 0;
+            const char* detail = argc >= 2 && args[1].tag == VT_STRING
+                ? in.StringUtf8(args[1]) : 0;
+            in.RecordUnsupportedSite(site, detail);
+            return RetVoid(ret);
+        }
     }
     if (strcmp(type, "UnityEngine.SceneManagement.Scene") == 0) {
         if (strcmp(n, "get_name") == 0) {

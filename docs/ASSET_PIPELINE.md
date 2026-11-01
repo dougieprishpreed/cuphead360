@@ -24,7 +24,7 @@ TypeDef/FieldDef/MethodDef where possible; it is not an unmodified byte copy.
 It is little-endian and is
 converted to host values by `src/runtime/metadata.cpp`.
 
-Header: 64 u32 words (`CHM1`, version, file size, counts, section offsets,
+Header: 80 u32 words (`CHM1`, version, file size, counts, section offsets,
 section sizes). Sections: strings, types, fields, methods, signatures,
 method signatures, local signatures, IL, exception clauses, user strings,
 member refs, method specs, params, and auxiliary arrays.

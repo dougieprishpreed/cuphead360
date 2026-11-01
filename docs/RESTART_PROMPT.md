@@ -1,8 +1,9 @@
 # Prompt for continuing the port
 
-Continuation note (2026-10-31): the fundamental audit is complete in
-`PORT_REVIEW.md`, committed as `694b9f0`. CP1 coroutine/fault-ledger source is
-implemented but still under Opus acceptance and independent Sol review. Read
+Continuation note (2026-11-01): the fundamental audit is complete in
+`PORT_REVIEW.md`, committed as `694b9f0`. Opus and the independent Sol host have
+accepted the bounded CP1 coroutine/fault-ledger checkpoint. D1 interface
+dispatch is next, before A1 asset correctness/residency. Read
 the current `PAUSED_HANDOFF.md` and working tree before repeating tests or
 starting another checkpoint. The user revoked the earlier pause and requested
 continued porting with all three configured agents. Do not stop at a handoff

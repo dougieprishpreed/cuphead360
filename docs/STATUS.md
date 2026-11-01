@@ -6,9 +6,25 @@ playable alpha release candidate with no content or behavior gaps versus the
 Windows version. This document records exactly what is implemented, what has
 been validated, and what remains.
 
-## 2026-10-31 player-damage engine checkpoint (scope corrected)
+Current-status paragraph: the CP1 coroutine/fault-accounting checkpoint now
+provides managed handles, receiver ownership, stop/disable behavior, joins,
+raw-child cancellation, explicit post-self-stop starts with observational
+NOTEs, rooted synchronous guards, managed caller ancestry, aggregated strict
+fault accounting, and visible unsupported stubs. Opus and the independent Sol
+host accepted CP1 on 2026-11-01 within its documented pilot limits. D1 interface
+dispatch is next; the opening flow is not accepted. Windows
+and Xbox 360 Release builds pass; Root Pack remains `NOT_PLAYABLE` at the
+chain-derived `Level/<startBattle_cr>c__Iterator2::MoveNext` fault. The
+frame-101 levelplay failures remain an inherited interface-slot misdispatch for
+the separate D1 checkpoint. See
+[`PORT_REVIEW.md`](PORT_REVIEW.md) for the architecture review and
+[`VERIFICATION.md`](VERIFICATION.md) for exact commands, exit codes, binary
+hashes, regressions, and unverified Unity semantics.
 
-Work is paused at the user's request. This is an experimental checkpoint;
+## Historical: 2026-10-31 player-damage engine checkpoint
+
+This pre-CP1 experimental checkpoint records the former pause, which the user
+has since revoked. Its PASS results are historical;
 [`PAUSED_HANDOFF.md`](PAUSED_HANDOFF.md) records lead review findings, rendering
 defects and runtime changes requiring further audit. The new-session prompt is
 [`RESTART_PROMPT.md`](RESTART_PROMPT.md).

@@ -204,6 +204,804 @@ static float InvokeEase3(Interpreter& interp, MetadataPackage& pkg, const char* 
     return ret.data.f32;
 }
 
+static const MemberRefInfo* FindCoroutineMemberRef(MetadataPackage& pkg, const char* type_name,
+                                                   const char* method_name,
+                                                   u32 param_count,
+                                                   const char* first_param_type) {
+    u32 first_type = first_param_type ? pkg.FindType(first_param_type) : 0;
+    for (u32 i = 1; i <= pkg.MemberRefCount(); ++i) {
+        const MemberRefInfo& member = pkg.MemberRef(i);
+        if (member.kind != 1 || !member.name || strcmp(member.name, method_name) != 0) continue;
+        const TypeInfo& declaring = pkg.Type(member.decl_id);
+        if (!declaring.full_name || strcmp(declaring.full_name, type_name) != 0) continue;
+        const MethodSigInfo& sig = pkg.MethodSig(member.sig_index);
+        if (sig.param_count != param_count) continue;
+        if (first_param_type && param_count) {
+            const SigInfo& first = pkg.Sig(pkg.MethodParamSig(sig.param_start));
+            if (strcmp(first_param_type, "System.Boolean") == 0) {
+                if (first.kind != SIG_BOOL) continue;
+            } else if (first.type_id != first_type) {
+                continue;
+            }
+        }
+        return &member;
+    }
+    return 0;
+}
+
+static bool InvokeCoroutineMember(Interpreter& interp, const MemberRefInfo* member,
+                                  Value* args, u32 arg_count, Value* ret) {
+    if (!member) return false;
+    return interp.InvokeMemberRef(*member, arg_count, args, ret);
+}
+
+static bool InvokeFixtureFactory(Interpreter& interp, MetadataPackage& pkg,
+                                 const char* name, Value* args, u32 arg_count, Value* ret) {
+    u32 type = pkg.FindType("CP1FixtureFactory");
+    if (strcmp(name, "Timing") == 0 || strcmp(name, "NullTiming") == 0 ||
+        strcmp(name, "OrderState") == 0 || strcmp(name, "RawOrder") == 0 ||
+        strcmp(name, "RawOrderIterator") == 0 ||
+        strcmp(name, "ReentrancyState") == 0 || strcmp(name, "ReentrancyCount") == 0 ||
+        strcmp(name, "ReentrantParent") == 0 ||
+        strcmp(name, "JoinSelfStopFirst") == 0 || strcmp(name, "JoinFaultedChild") == 0 ||
+        strcmp(name, "SelfStopLater") == 0 || strcmp(name, "SelfStopComplete") == 0 ||
+        strcmp(name, "RawParentStop") == 0 || strcmp(name, "Recursive") == 0 ||
+        strcmp(name, "Probe") == 0) {
+        type = pkg.FindType("CP1ExtendedFixtureFactory");
+    }
+    u32 method = pkg.FindMethod(type, name);
+    bool ok = method && interp.Invoke(method, args, arg_count, ret);
+    if (!ok) LogError("coroutinetest", "fixture factory %s failed method=%u last_error=%u",
+                      name, method, interp.LastError());
+    return ok;
+}
+
+static bool CoroutineCheck(bool condition, const char* label) {
+    LogInfo("coroutinetest", "%s %s", condition ? "PASS" : "FAIL", label);
+    return condition;
+}
+
+static bool SceneObjectActiveInHierarchy(const Scene& scene, u32 oi);
+
+static int RunFixtureCoroutineTest(MetadataPackage& pkg) {
+    Interpreter interp(pkg);
+    if (!interp.Init()) return 1;
+    bool pass = true;
+    u32 owner_type = pkg.FindType("CP1FixtureOwner");
+    Object* parent_owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+    Object* child_owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+    Value parent_owner = parent_owner_object
+        ? Value::ObjectRef(parent_owner_object) : Value::Null();
+    Value child_owner = child_owner_object
+        ? Value::ObjectRef(child_owner_object) : Value::Null();
+    Value parent, iterator, parent_handle;
+    Value parent_args[2]; parent_args[0] = parent_owner; parent_args[1] = child_owner;
+    pass = InvokeFixtureFactory(interp, pkg, "Parent", parent_args, 2, &parent) && pass;
+    Value iter_args[1]; iter_args[0] = parent;
+    pass = InvokeFixtureFactory(interp, pkg, "ParentIterator", iter_args, 1, &iterator) && pass;
+    pass = CoroutineCheck(parent_owner.tag == VT_OBJECT && child_owner.tag == VT_OBJECT &&
+                          parent.tag == VT_OBJECT && iterator.tag == VT_OBJECT,
+                          "Synthetic fixture factories produced managed objects") && pass;
+    if (!pass) return 1;
+
+    u32 iterator_type = iterator.data.obj->type_id;
+    u32 parent_type = parent.data.obj->type_id;
+    LogInfo("coroutinetest", "fixture=SYNTHETIC iterator=%s owner=%s parent_owner=%s child_owner=%s",
+            pkg.Type(iterator_type).full_name,
+            pkg.Type(parent_owner.data.obj->type_id).full_name,
+            pkg.Type(parent_owner.data.obj->type_id).full_name,
+            pkg.Type(child_owner.data.obj->type_id).full_name);
+    const MemberRefInfo* start = FindCoroutineMemberRef(
+        pkg, "UnityEngine.MonoBehaviour", "StartCoroutine", 1,
+        "System.Collections.IEnumerator");
+    const MemberRefInfo* stop_one = FindCoroutineMemberRef(
+        pkg, "UnityEngine.MonoBehaviour", "StopCoroutine", 1,
+        "UnityEngine.Coroutine");
+    Value start_args[2]; start_args[0] = parent_owner; start_args[1] = iterator;
+    bool started = InvokeCoroutineMember(interp, start, start_args, 2, &parent_handle);
+    Interpreter::CoroutineInfo info;
+    bool have_info = interp.GetCoroutineInfo(parent_handle, &info);
+    bool handle_ok = started && parent_handle.tag == VT_OBJECT && parent_handle.data.obj &&
+        strcmp(pkg.Type(parent_handle.data.obj->type_id).full_name, "UnityEngine.Coroutine") == 0;
+    LogInfo("coroutinetest", "fixture start=%d handle_type=%s info=%d iterator=%s yield=%s running=%u completed=%u",
+            started ? 1 : 0,
+            parent_handle.tag == VT_OBJECT && parent_handle.data.obj
+                ? pkg.Type(parent_handle.data.obj->type_id).full_name : "<null>",
+            have_info ? 1 : 0, have_info ? info.iterator_type : "<none>",
+            have_info ? info.last_yield : "<none>",
+            have_info ? info.running : 99, have_info ? info.completed : 99);
+    pass = CoroutineCheck(handle_ok && have_info && info.running && !info.completed,
+                          "fixture join handle and initial post-yield state") && pass;
+    u32 state_field = pkg.FindField(parent_type, "State");
+    Value state = state_field ? interp.GetField(state_field, parent) : Value::Null();
+    pass = CoroutineCheck(state.tag == VT_I4 && state.data.i32 == 1,
+                          "fixture parent state=1 after synchronous first step") && pass;
+    for (u32 frame = 0; frame < 30; ++frame) interp.UpdateCoroutines(1.0f / 60.0f);
+    state = state_field ? interp.GetField(state_field, parent) : Value::Null();
+    bool incomplete_before = interp.GetCoroutineInfo(parent_handle, &info) &&
+        info.running && !info.completed && state.tag == VT_I4 && state.data.i32 == 1;
+    pass = CoroutineCheck(incomplete_before,
+                          "fixture 0.5s wait incomplete on frame 30") && pass;
+    interp.UpdateCoroutines(1.0f / 60.0f);
+    state = state_field ? interp.GetField(state_field, parent) : Value::Null();
+    bool completed_frame = interp.GetCoroutineInfo(parent_handle, &info) &&
+        !info.running && info.completed && state.tag == VT_I4 && state.data.i32 == 2;
+    pass = CoroutineCheck(completed_frame,
+                          "fixture handle completed 0.5s wait and parent resumed on frame 31") && pass;
+    Value finished_stop_args[2];
+    finished_stop_args[0] = parent_owner;
+    finished_stop_args[1] = parent_handle;
+    bool finished_stop_ok = InvokeCoroutineMember(
+        interp, stop_one, finished_stop_args, 2, 0);
+    char finished_note[192]; finished_note[0] = 0;
+    bool finished_note_ok = interp.FirstLedgerSitePrefix(
+        Interpreter::LEDGER_NOTE, "UnityEngine.MonoBehaviour::StopCoroutine",
+        finished_note, sizeof(finished_note));
+    pass = CoroutineCheck(finished_stop_ok && finished_note_ok,
+                          "stopping a finished handle is a NOTE no-op") && pass;
+
+    // Restart and stop only the parent. Its independently started child must live on.
+    pass = InvokeFixtureFactory(interp, pkg, "ParentIterator", iter_args, 1, &iterator) && pass;
+    start_args[1] = iterator;
+    pass = InvokeCoroutineMember(interp, start, start_args, 2, &parent_handle) && pass;
+    Value stop_args[2]; stop_args[0] = parent_owner; stop_args[1] = parent_handle;
+    pass = InvokeFixtureFactory(interp, pkg, "Stop", stop_args, 2, 0) && pass;
+    u32 running_child_owned = 0;
+    for (u32 i = 0; i < interp.CoroutineCount(); ++i) {
+        Interpreter::CoroutineInfo ci;
+        if (!interp.GetCoroutineInfo(i, &ci) || !ci.running) continue;
+        if (strcmp(ci.owner_type, pkg.Type(child_owner.data.obj->type_id).full_name) == 0) {
+            ++running_child_owned;
+        }
+    }
+    pass = CoroutineCheck(running_child_owned == 1,
+                          "StopCoroutine(parent) leaves independent child running") && pass;
+    for (u32 frame = 0; frame < 31; ++frame) interp.UpdateCoroutines(1.0f / 60.0f);
+
+    // A second run stops the child owner. The parent remains parked and is noted.
+    Value parent2, iterator2;
+    pass = InvokeFixtureFactory(interp, pkg, "Parent", parent_args, 2, &parent2) && pass;
+    Value iter2_args[1]; iter2_args[0] = parent2;
+    pass = InvokeFixtureFactory(interp, pkg, "ParentIterator", iter2_args, 1, &iterator2) && pass;
+    Value start2[2]; start2[0] = parent_owner; start2[1] = iterator2;
+    Value parent2_handle;
+    pass = InvokeCoroutineMember(interp, start, start2, 2, &parent2_handle) && pass;
+    Value stop_all_args[1]; stop_all_args[0] = child_owner;
+    pass = InvokeFixtureFactory(interp, pkg, "StopAll", stop_all_args, 1, 0) && pass;
+    interp.UpdateCoroutines(1.0f / 60.0f);
+    interp.UpdateCoroutines(1.0f / 60.0f);
+    state = interp.GetField(state_field, parent2);
+    char note[192]; note[0] = 0;
+    bool orphan_note = interp.FirstLedgerSitePrefix(
+        Interpreter::LEDGER_NOTE, "orphaned-waiter", note, sizeof(note));
+    pass = CoroutineCheck(state.tag == VT_I4 && state.data.i32 == 1 && orphan_note,
+                          "stopped child leaves parent suspended with orphaned-waiter NOTE") && pass;
+
+    // Raw nested enumerators are owned by the parent owner and stop with the parent.
+    Value raw_cleanup[1]; raw_cleanup[0] = parent_owner;
+    InvokeFixtureFactory(interp, pkg, "StopAll", raw_cleanup, 1, 0);
+    Value raw_parent, raw_iterator;
+    pass = InvokeFixtureFactory(interp, pkg, "Parent", parent_args, 2, &raw_parent) && pass;
+    Value raw_args[1]; raw_args[0] = raw_parent;
+    pass = InvokeFixtureFactory(interp, pkg, "RawIterator", raw_args, 1, &raw_iterator) && pass;
+    Value raw_start[2]; raw_start[0] = parent_owner; raw_start[1] = raw_iterator;
+    Value raw_handle;
+    pass = InvokeCoroutineMember(interp, start, raw_start, 2, &raw_handle) && pass;
+    Value raw_stop_args[2]; raw_stop_args[0] = parent_owner; raw_stop_args[1] = raw_handle;
+    pass = InvokeFixtureFactory(interp, pkg, "Stop", raw_stop_args, 2, 0) && pass;
+    u32 parent_owner_running = 0;
+    for (u32 i = 0; i < interp.CoroutineCount(); ++i) {
+        Interpreter::CoroutineInfo ci;
+        if (interp.GetCoroutineInfo(i, &ci) && ci.running &&
+            strcmp(ci.owner_type, pkg.Type(parent_owner.data.obj->type_id).full_name) == 0) {
+            ++parent_owner_running;
+        }
+    }
+    pass = CoroutineCheck(parent_owner_running == 0,
+                          "stopping raw parent recursively stops its raw child") && pass;
+    LogInfo("coroutinetest", "fixture=SYNTHETIC result=%s", pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+}
+
+static bool FixtureIntegerValue(Interpreter& interp, MetadataPackage& pkg, const Value& value,
+                                const char* field_name, s32* out) {
+    if (!out || value.tag != VT_OBJECT || !value.data.obj) return false;
+    u32 field = pkg.FindField(value.data.obj->type_id, field_name);
+    if (!field) return false;
+    Value read = interp.GetField(field, value);
+    if (read.tag != VT_I4) return false;
+    *out = read.data.i32;
+    return true;
+}
+
+static bool FindFixtureCoroutineIndex(Interpreter& interp, const char* iterator_name,
+                                      u32 skip, u32* out_index,
+                                      Interpreter::CoroutineInfo* out_info) {
+    u32 seen = 0;
+    for (u32 i = 0; i < interp.CoroutineCount(); ++i) {
+        Interpreter::CoroutineInfo info;
+        if (!interp.GetCoroutineInfo(i, &info) ||
+            strncmp(info.iterator_type, iterator_name, strlen(iterator_name)) != 0) continue;
+        if (seen++ < skip) continue;
+        if (out_index) *out_index = i;
+        if (out_info) *out_info = info;
+        return true;
+    }
+    return false;
+}
+
+static int RunExtendedFixtureCoroutineTest(MetadataPackage& pkg) {
+    bool pass = true;
+    const MemberRefInfo* start = FindCoroutineMemberRef(
+        pkg, "UnityEngine.MonoBehaviour", "StartCoroutine", 1,
+        "System.Collections.IEnumerator");
+    u32 owner_type = pkg.FindType("CP1FixtureOwner");
+
+    {
+        Interpreter interp(pkg);
+        if (!interp.Init()) return 1;
+        Object* owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+        Value owner = owner_object ? Value::ObjectRef(owner_object) : Value::Null();
+        Value timing, iterator, handle;
+        pass = InvokeFixtureFactory(interp, pkg, "Timing", 0, 0, &timing) && pass;
+        Value timing_args[1]; timing_args[0] = timing;
+        pass = InvokeFixtureFactory(interp, pkg, "NullTiming", timing_args, 1, &iterator) && pass;
+        Value start_args[2]; start_args[0] = owner; start_args[1] = iterator;
+        pass = InvokeCoroutineMember(interp, start, start_args, 2, &handle) && pass;
+        s32 state = -1;
+        pass = FixtureIntegerValue(interp, pkg, timing, "State", &state) &&
+            state == 1 && pass;
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        s32 still_one = -1;
+        FixtureIntegerValue(interp, pkg, timing, "State", &still_one);
+        pass = CoroutineCheck(still_one == 1,
+                              "outside-pass yield-null entry waits for next pass") && pass;
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        s32 finished = -1;
+        Interpreter::CoroutineInfo timing_info;
+        bool timing_completed = interp.GetCoroutineInfo(handle, &timing_info) &&
+            !timing_info.running && timing_info.completed;
+        FixtureIntegerValue(interp, pkg, timing, "State", &finished);
+        pass = CoroutineCheck(timing_completed && finished == 2,
+                              "outside-pass yield-null entry resumes on next pass") && pass;
+    }
+
+    {
+        Interpreter interp(pkg);
+        if (!interp.Init()) return 1;
+        Object* owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+        Value owner = owner_object ? Value::ObjectRef(owner_object) : Value::Null();
+        Value timing_a, timing_b, iterator_a, iterator_b, handle_a, handle_b;
+        pass = InvokeFixtureFactory(interp, pkg, "Timing", 0, 0, &timing_a) && pass;
+        pass = InvokeFixtureFactory(interp, pkg, "Timing", 0, 0, &timing_b) && pass;
+        Value aargs[1]; aargs[0] = timing_a;
+        Value bargs[1]; bargs[0] = timing_b;
+        pass = InvokeFixtureFactory(interp, pkg, "NullTiming", aargs, 1, &iterator_a) && pass;
+        pass = InvokeFixtureFactory(interp, pkg, "NullTiming", bargs, 1, &iterator_b) && pass;
+        Value start_args[2]; start_args[0] = owner; start_args[1] = iterator_a;
+        pass = InvokeCoroutineMember(interp, start, start_args, 2, &handle_a) && pass;
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        start_args[1] = iterator_b;
+        pass = InvokeCoroutineMember(interp, start, start_args, 2, &handle_b) && pass;
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        s32 mixed_a = -1, mixed_b = -1;
+        FixtureIntegerValue(interp, pkg, timing_a, "State", &mixed_a);
+        FixtureIntegerValue(interp, pkg, timing_b, "State", &mixed_b);
+        Interpreter::CoroutineInfo info_b;
+        bool b_still_waiting = interp.GetCoroutineInfo(handle_b, &info_b) &&
+            info_b.running && mixed_b == 1;
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        s32 mixed_b_done = -1;
+        FixtureIntegerValue(interp, pkg, timing_b, "State", &mixed_b_done);
+        pass = CoroutineCheck(mixed_a == 2 && b_still_waiting && mixed_b_done == 2,
+                              "mixed outside-pass entries retain skip tag across inner advancement") && pass;
+    }
+
+    {
+        Interpreter interp(pkg);
+        if (!interp.Init()) return 1;
+        Object* owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+        Value owner = owner_object ? Value::ObjectRef(owner_object) : Value::Null();
+        Value order, fixture, iterator, handle;
+        pass = InvokeFixtureFactory(interp, pkg, "OrderState", 0, 0, &order) && pass;
+        Value owner_args[2]; owner_args[0] = owner; owner_args[1] = order;
+        pass = InvokeFixtureFactory(interp, pkg, "RawOrder", owner_args, 2, &fixture) && pass;
+        Value fixture_args[1]; fixture_args[0] = fixture;
+        pass = InvokeFixtureFactory(interp, pkg, "RawOrderIterator", fixture_args, 1,
+                                    &iterator) && pass;
+        Value start_args[2]; start_args[0] = owner; start_args[1] = iterator;
+        pass = InvokeCoroutineMember(interp, start, start_args, 2, &handle) && pass;
+        s32 child_state = -1, parent_state = -1;
+        FixtureIntegerValue(interp, pkg, fixture, "ChildState", &child_state);
+        FixtureIntegerValue(interp, pkg, fixture, "ParentState", &parent_state);
+        pass = CoroutineCheck(child_state == 2 && parent_state == 2,
+                              "raw child starts synchronously before parent parks") && pass;
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        s32 child_order = 0, parent_order = 0;
+        FixtureIntegerValue(interp, pkg, fixture, "ChildOrder", &child_order);
+        FixtureIntegerValue(interp, pkg, fixture, "ParentOrder", &parent_order);
+        FixtureIntegerValue(interp, pkg, fixture, "ParentState", &parent_state);
+        pass = CoroutineCheck(child_order == 1 && parent_order == 2 && parent_state == 3,
+                              "raw child completes before its parent resumes") && pass;
+    }
+
+    {
+        Interpreter interp(pkg);
+        if (!interp.Init()) return 1;
+        Object* parent_owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+        Object* child_owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+        Value parent_owner = parent_owner_object
+            ? Value::ObjectRef(parent_owner_object) : Value::Null();
+        Value child_owner = child_owner_object
+            ? Value::ObjectRef(child_owner_object) : Value::Null();
+        Value state, fixture, iterator, handle;
+        pass = InvokeFixtureFactory(interp, pkg, "ReentrancyState", 0, 0, &state) && pass;
+        Value fargs[3]; fargs[0] = parent_owner; fargs[1] = child_owner; fargs[2] = state;
+        pass = InvokeFixtureFactory(interp, pkg, "ReentrantParent", fargs, 3, &fixture) && pass;
+        Value iargs[1]; iargs[0] = fixture;
+        pass = InvokeFixtureFactory(interp, pkg, "JoinSelfStopFirst", iargs, 1, &iterator) && pass;
+        Value start_args[2]; start_args[0] = parent_owner; start_args[1] = iterator;
+        pass = InvokeCoroutineMember(interp, start, start_args, 2, &handle) && pass;
+        Interpreter::CoroutineInfo child_info;
+        u32 child_index = 0;
+        bool child_found = FindFixtureCoroutineIndex(interp, "CP1ReentrantParent", 1,
+                                                     &child_index, &child_info);
+        Value count_ret;
+        Value count_args[1]; count_args[0] = state;
+        bool count_ok = InvokeFixtureFactory(interp, pkg, "ReentrancyCount",
+                                             count_args, 1, &count_ret);
+        s32 nested_starts = count_ok && count_ret.tag == VT_I4 ? count_ret.data.i32 : -1;
+        LogInfo("coroutinetest",
+                "reentrant first child_found=%d stopped=%u completed=%u starts=%u nested_starts=%d",
+                child_found ? 1 : 0, child_info.stopped, child_info.completed,
+                interp.CoroutineCount(), nested_starts);
+        pass = CoroutineCheck(child_found && child_info.stopped && !child_info.completed &&
+                              nested_starts == 1 && interp.CoroutineCount() == 3,
+                              "self-stop on first step preserves explicit nested start") && pass;
+        u32 explicit_note_count = interp.LedgerSiteCount(
+            Interpreter::LEDGER_NOTE, "start-after-self-stop");
+        pass = CoroutineCheck(explicit_note_count == 1,
+                              "explicit start after self-stop records NOTE") && pass;
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        Interpreter::CoroutineInfo waiter_info;
+        bool waiter_running = interp.GetCoroutineInfo(handle, &waiter_info) &&
+            waiter_info.running && waiter_info.orphaned;
+        Interpreter::CoroutineInfo nested_info;
+        bool nested_completed = FindFixtureCoroutineIndex(
+            interp, "CP1ReentrantParent/<Nested>", 0, 0, &nested_info) &&
+            nested_info.completed && !nested_info.running;
+        s32 frozen_state = -1;
+        FixtureIntegerValue(interp, pkg, fixture, "ChildState", &frozen_state);
+        char note[192]; note[0] = 0;
+        bool parked_note = interp.FirstLedgerSitePrefix(
+            Interpreter::LEDGER_NOTE, "orphaned-waiter", note, sizeof(note));
+        pass = CoroutineCheck(waiter_running && parked_note && nested_completed &&
+                              frozen_state == 1,
+                              "waiter parks while explicit nested work completes") && pass;
+    }
+
+    {
+        Interpreter interp(pkg);
+        if (!interp.Init()) return 1;
+        Object* parent_owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+        Object* child_owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+        Value parent_owner = parent_owner_object
+            ? Value::ObjectRef(parent_owner_object) : Value::Null();
+        Value child_owner = child_owner_object
+            ? Value::ObjectRef(child_owner_object) : Value::Null();
+        Value state, fixture, iterator, handle;
+        pass = InvokeFixtureFactory(interp, pkg, "ReentrancyState", 0, 0, &state) && pass;
+        Value fargs[3]; fargs[0] = parent_owner; fargs[1] = child_owner; fargs[2] = state;
+        pass = InvokeFixtureFactory(interp, pkg, "ReentrantParent", fargs, 3, &fixture) && pass;
+        Value iargs[1]; iargs[0] = fixture;
+        pass = InvokeFixtureFactory(interp, pkg, "JoinFaultedChild", iargs, 1, &iterator) && pass;
+        Value start_args[2]; start_args[0] = parent_owner; start_args[1] = iterator;
+        pass = InvokeCoroutineMember(interp, start, start_args, 2, &handle) && pass;
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        Interpreter::CoroutineInfo child_info;
+        bool child_faulted = FindFixtureCoroutineIndex(interp, "CP1ReentrantParent", 1,
+                                                       0, &child_info) && child_info.faulted;
+        Interpreter::CoroutineInfo waiter_info;
+        bool waiter_parked = interp.GetCoroutineInfo(handle, &waiter_info) &&
+            waiter_info.running && waiter_info.orphaned;
+        char fault_note[192]; fault_note[0] = 0;
+        bool note_written = interp.FirstLedgerSitePrefix(
+            Interpreter::LEDGER_NOTE, "orphaned-waiter", fault_note, sizeof(fault_note));
+        pass = CoroutineCheck(child_faulted && waiter_parked && note_written,
+                              "waiter on faulted child parks with NOTE") && pass;
+    }
+
+    {
+        Interpreter interp(pkg);
+        if (!interp.Init()) return 1;
+        Object* parent_owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+        Object* child_owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+        Value parent_owner = parent_owner_object
+            ? Value::ObjectRef(parent_owner_object) : Value::Null();
+        Value child_owner = child_owner_object
+            ? Value::ObjectRef(child_owner_object) : Value::Null();
+        Value state, fixture, iterator, handle;
+        pass = InvokeFixtureFactory(interp, pkg, "ReentrancyState", 0, 0, &state) && pass;
+        Value fargs[3]; fargs[0] = parent_owner; fargs[1] = child_owner; fargs[2] = state;
+        pass = InvokeFixtureFactory(interp, pkg, "ReentrantParent", fargs, 3, &fixture) && pass;
+        Value iargs[1]; iargs[0] = fixture;
+        pass = InvokeFixtureFactory(interp, pkg, "SelfStopLater", iargs, 1, &iterator) && pass;
+        Value start_args[2]; start_args[0] = child_owner; start_args[1] = iterator;
+        pass = InvokeCoroutineMember(interp, start, start_args, 2, &handle) && pass;
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        Interpreter::CoroutineInfo info;
+        bool later_stopped = interp.GetCoroutineInfo(handle, &info) &&
+            info.stopped && !info.completed;
+        Value count_ret;
+        Value count_args[1]; count_args[0] = state;
+        bool count_ok = InvokeFixtureFactory(interp, pkg, "ReentrancyCount",
+                                             count_args, 1, &count_ret);
+        s32 nested_starts = count_ok && count_ret.tag == VT_I4 ? count_ret.data.i32 : -1;
+        Interpreter::CoroutineInfo nested_info;
+        bool nested_completed = FindFixtureCoroutineIndex(
+            interp, "CP1ReentrantParent/<Nested>", 0, 0, &nested_info) &&
+            nested_info.completed && !nested_info.running;
+        s32 frozen_state = -1;
+        FixtureIntegerValue(interp, pkg, fixture, "ChildState", &frozen_state);
+        u32 note_count = interp.LedgerSiteCount(Interpreter::LEDGER_NOTE,
+                                                "start-after-self-stop");
+        LogInfo("coroutinetest",
+                "reentrant later stopped=%u completed=%u starts=%u nested_starts=%d state=%d note_count=%u",
+                info.stopped, info.completed, interp.CoroutineCount(), nested_starts,
+                frozen_state, note_count);
+        pass = CoroutineCheck(later_stopped && nested_starts == 1 && note_count == 1 &&
+                              nested_completed && frozen_state == 2 &&
+                              interp.CoroutineCount() == 2,
+                              "self-stop on later step preserves explicit nested start") && pass;
+    }
+
+    {
+        Interpreter interp(pkg);
+        if (!interp.Init()) return 1;
+        Object* parent_owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+        Object* child_owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+        Value parent_owner = parent_owner_object
+            ? Value::ObjectRef(parent_owner_object) : Value::Null();
+        Value child_owner = child_owner_object
+            ? Value::ObjectRef(child_owner_object) : Value::Null();
+        Value state, fixture, iterator, handle;
+        pass = InvokeFixtureFactory(interp, pkg, "ReentrancyState", 0, 0, &state) && pass;
+        Value fargs[3]; fargs[0] = parent_owner; fargs[1] = child_owner; fargs[2] = state;
+        pass = InvokeFixtureFactory(interp, pkg, "ReentrantParent", fargs, 3, &fixture) && pass;
+        Value iargs[1]; iargs[0] = fixture;
+        pass = InvokeFixtureFactory(interp, pkg, "SelfStopComplete", iargs, 1, &iterator) && pass;
+        Value start_args[2]; start_args[0] = child_owner; start_args[1] = iterator;
+        pass = InvokeCoroutineMember(interp, start, start_args, 2, &handle) && pass;
+        Interpreter::CoroutineInfo info;
+        bool complete_stop = interp.GetCoroutineInfo(handle, &info) &&
+            info.stopped && !info.completed && interp.CoroutineCount() == 1;
+        pass = CoroutineCheck(complete_stop,
+                              "self-stop before MoveNext false is stopped not completed") && pass;
+    }
+
+    {
+        Interpreter interp(pkg);
+        if (!interp.Init()) return 1;
+        Object* parent_owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+        Object* child_owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+        Value parent_owner = parent_owner_object
+            ? Value::ObjectRef(parent_owner_object) : Value::Null();
+        Value child_owner = child_owner_object
+            ? Value::ObjectRef(child_owner_object) : Value::Null();
+        Value state, fixture, iterator, handle;
+        pass = InvokeFixtureFactory(interp, pkg, "ReentrancyState", 0, 0, &state) && pass;
+        Value fargs[3]; fargs[0] = parent_owner; fargs[1] = child_owner; fargs[2] = state;
+        pass = InvokeFixtureFactory(interp, pkg, "ReentrantParent", fargs, 3, &fixture) && pass;
+        Value iargs[1]; iargs[0] = fixture;
+        pass = InvokeFixtureFactory(interp, pkg, "RawParentStop", iargs, 1, &iterator) && pass;
+        Value start_args[2]; start_args[0] = parent_owner; start_args[1] = iterator;
+        pass = InvokeCoroutineMember(interp, start, start_args, 2, &handle) && pass;
+        u32 parent_handle_field = fixture.data.obj
+            ? pkg.FindField(fixture.data.obj->type_id, "ParentHandle") : 0;
+        if (parent_handle_field) interp.SetField(parent_handle_field, fixture, handle);
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        interp.UpdateCoroutines(1.0f / 60.0f);
+        Interpreter::CoroutineInfo parent_info, child_info;
+        bool parent_ok = interp.GetCoroutineInfo(handle, &parent_info) &&
+            parent_info.stopped && !parent_info.completed;
+        bool child_found = FindFixtureCoroutineIndex(interp, "CP1ReentrantParent", 1, 0,
+                                                     &child_info);
+        Value count_ret;
+        Value count_args[1]; count_args[0] = state;
+        bool count_ok = InvokeFixtureFactory(interp, pkg, "ReentrancyCount",
+                                             count_args, 1, &count_ret);
+        s32 nested_starts = count_ok && count_ret.tag == VT_I4 ? count_ret.data.i32 : -1;
+        Interpreter::CoroutineInfo nested_info;
+        bool nested_completed = FindFixtureCoroutineIndex(
+            interp, "CP1ReentrantParent/<Nested>", 0, 0, &nested_info) &&
+            nested_info.completed && !nested_info.running;
+        u32 note_count = interp.LedgerSiteCount(Interpreter::LEDGER_NOTE,
+                                                "start-after-self-stop");
+        LogInfo("coroutinetest",
+                "reentrant raw parent parent_stopped=%u child_found=%d child_stopped=%u child_completed=%u starts=%u nested_starts=%d note_count=%u",
+                parent_info.stopped, child_found ? 1 : 0, child_info.stopped,
+                child_info.completed, interp.CoroutineCount(), nested_starts, note_count);
+        pass = CoroutineCheck(parent_ok && child_found && child_info.stopped &&
+                              !child_info.completed &&
+                              nested_starts == 1 && note_count == 1 &&
+                              nested_completed && interp.CoroutineCount() == 3,
+                              "raw parent stop cancels raw child but preserves explicit nested start") && pass;
+    }
+
+    {
+        Interpreter interp(pkg);
+        if (!interp.Init()) return 1;
+        Object* owner_object = interp.AllocObjectWithSlots(owner_type, 0);
+        Value owner = owner_object ? Value::ObjectRef(owner_object) : Value::Null();
+        Value args[2]; args[0] = owner; args[1] = Value::I4(40);
+        Value iterator, handle, probe;
+        pass = InvokeFixtureFactory(interp, pkg, "Recursive", args, 2, &iterator) && pass;
+        Value start_args[2]; start_args[0] = owner; start_args[1] = iterator;
+        pass = InvokeCoroutineMember(interp, start, start_args, 2, &handle) && pass;
+        char fault_site[192]; fault_site[0] = 0;
+        bool depth_fault = interp.FirstLedgerSitePrefix(
+            Interpreter::LEDGER_FAULT, "coroutine scheduler::step-depth",
+            fault_site, sizeof(fault_site));
+        Interpreter::CoroutineInfo victim_info;
+        bool victim_found = FindFixtureCoroutineIndex(
+            interp, "CP1GuardVictimIterator", 0, 0, &victim_info);
+        char victim_body_site[192]; victim_body_site[0] = 0;
+        bool victim_body_ran = interp.FirstLedgerSitePrefix(
+            Interpreter::LEDGER_FAULT,
+            "CP1GuardVictimIterator/<Run>d__0::MoveNext",
+            victim_body_site, sizeof(victim_body_site));
+        u32 probe_method = pkg.FindMethod(pkg.FindType("CP1ExtendedFixtureFactory"), "Probe");
+        bool probe_ok = probe_method && interp.Invoke(probe_method, 0, 0, &probe) &&
+            probe.tag == VT_I4 && probe.data.i32 == 42;
+        LogInfo("coroutinetest",
+                "recursion target=40 starts=%u fault=%s victim=%s victim_body_fault=%d probe=%d",
+                interp.CoroutineCount(), depth_fault ? fault_site : "<none>",
+                victim_found ? victim_info.iterator_type : "<none>",
+                victim_body_ran ? 1 : 0, probe_ok ? probe.data.i32 : -1);
+        pass = CoroutineCheck(depth_fault && victim_found && victim_info.faulted &&
+                              !victim_body_ran && probe_ok &&
+                              interp.CoroutineCount() <= 34,
+                              "finite distinct-victim recursion faults at depth guard and run continues") && pass;
+    }
+
+    LogInfo("coroutinetest", "fixture=SYNTHETIC-EXTENDED result=%s", pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+}
+
+static int RunLedgerFixtureTest(MetadataPackage& pkg, const char* command) {
+    Interpreter interp(pkg);
+    if (!interp.Init()) return 1;
+    u32 sites_type = pkg.FindType("CP1LedgerSites");
+    if (!sites_type) {
+        LogError("ledger-fixture", "CP1LedgerSites missing");
+        return 1;
+    }
+    bool pass = true;
+    if (strcmp(command, "ledger-sites") == 0) {
+        u32 fail_z = pkg.FindMethod(sites_type, "FailZ");
+        u32 fail_a = pkg.FindMethod(sites_type, "FailA");
+        bool z_ok = fail_z && interp.Invoke(fail_z, 0, 0, 0);
+        bool a_ok = fail_a && interp.Invoke(fail_a, 0, 0, 0);
+        bool z2_ok = fail_z && interp.Invoke(fail_z, 0, 0, 0);
+        pass = CoroutineCheck(!z_ok && !a_ok && !z2_ok,
+                              "ledger fixture recorded FailZ before FailA then repeated FailZ") && pass;
+        u32 groups = interp.PrintLedgerSummary();
+        pass = CoroutineCheck(groups == 2,
+                              "reversed-order ledger emits both distinct groups") && pass;
+        LogInfo("ledger-fixture",
+                "groups=%u observations=%u dropped=%u push_fail=%u ancestry_truncated=%u",
+                groups, interp.LedgerObservationCount(), interp.LedgerDroppedCount(),
+                interp.LedgerAllocationLossCount(),
+                interp.LedgerAncestryTruncationCount());
+    } else if (strcmp(command, "ledger-deep") == 0) {
+        u32 deep = pkg.FindMethod(sites_type, "DeepRoot");
+        bool deep_ok = deep && interp.Invoke(deep, 0, 0, 0);
+        char fault[192]; fault[0] = 0;
+        bool faulted = interp.FirstLedgerSitePrefix(
+            Interpreter::LEDGER_FAULT, "CP1LedgerSites::FailA", fault, sizeof(fault));
+        u32 groups = interp.PrintLedgerSummary();
+        pass = CoroutineCheck(!deep_ok && faulted && groups == 1,
+                              "deep fault retained for fault-time ancestry matching") && pass;
+        LogInfo("ledger-fixture",
+                "deep_outer groups=%u records=%u dropped=%u push_fail=%u ancestry_truncated=%u",
+                groups, interp.LedgerRecordCount(), interp.LedgerDroppedCount(),
+                interp.LedgerAllocationLossCount(),
+                interp.LedgerAncestryTruncationCount());
+    } else if (strcmp(command, "ledger-exhaust") == 0) {
+        for (u32 i = 0; i < 8192; ++i) {
+            char site[96];
+            _snprintf(site, sizeof(site) - 1, "CP1LedgerSites::Exhaustion%u", i);
+            site[sizeof(site) - 1] = 0;
+            interp.RecordUnsupportedSite(site, "synthetic capacity fill");
+        }
+        u32 fail_a = pkg.FindMethod(sites_type, "FailA");
+        interp.Invoke(fail_a, 0, 0, 0);
+        u32 groups = interp.PrintLedgerSummary(1);
+        pass = CoroutineCheck(interp.LedgerDroppedCount() > 0 &&
+                              interp.LedgerRecordCount() == 8192 && groups == 8192,
+                              "ledger exhaustion is limited and reported") && pass;
+        LogInfo("ledger-fixture",
+                "exhaustion groups=%u observations=%u dropped=%u push_fail=%u ancestry_truncated=%u",
+                groups, interp.LedgerObservationCount(), interp.LedgerDroppedCount(),
+                interp.LedgerAllocationLossCount(),
+                interp.LedgerAncestryTruncationCount());
+    } else {
+        LogError("ledger-fixture", "unknown command=%s", command);
+        return 1;
+    }
+    LogInfo("ledger-fixture", "result=%s", pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+}
+
+static int RunOriginalCoroutineTest(MetadataPackage& pkg, const AppConfig& config) {
+    if (!config.scene_path) {
+        LogError("coroutinetest", "original metadata requires --scene");
+        return 1;
+    }
+    Scene scene;
+    if (!scene.Load(config.scene_path)) return 1;
+    Interpreter interp(pkg);
+    if (!interp.Init() || !interp.BindScene(scene)) return 1;
+    Value owner = Value::Null();
+    u32 owner_ci = 0xFFFFFFFFu;
+    for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+        const SceneComponent& component = scene.Component(ci);
+        if (component.type != 4) continue;
+        Value candidate = interp.ManagedComponent(ci);
+        if (candidate.tag != VT_OBJECT || !candidate.data.obj) continue;
+        u32 oi = interp.ManagedObjectIndexFor(candidate);
+        if (oi < scene.ObjectCount() && SceneObjectActiveInHierarchy(scene, oi)) {
+            owner = candidate;
+            owner_ci = ci;
+            break;
+        }
+    }
+    bool pass = CoroutineCheck(owner.tag == VT_OBJECT,
+                               "active original MonoBehaviour owner selected");
+    if (!pass) return 1;
+    const char* owner_type = pkg.Type(owner.data.obj->type_id).full_name;
+    LogInfo("coroutinetest", "original owner=%s ci=%u", owner_type, owner_ci);
+
+    u32 time_type = pkg.FindType("CupheadTime");
+    u32 wait_method = 0;
+    for (u32 cur = time_type; cur && !wait_method;) {
+        const TypeInfo& type = pkg.Type(cur);
+        for (u32 i = 0; i < type.method_count; ++i) {
+            u32 id = type.method_start + i;
+            const MethodInfo& method = pkg.Method(id);
+            const MethodSigInfo& sig = pkg.MethodSig(method.sig);
+            if (strcmp(method.name, "WaitForSeconds") == 0 && sig.param_count == 2) {
+                wait_method = id;
+                break;
+            }
+        }
+        cur = type.base_id;
+    }
+    pass = CoroutineCheck(wait_method != 0,
+                          "original CupheadTime.WaitForSeconds(MonoBehaviour,float) found");
+    if (!pass) return 1;
+    Value inactive_owner = Value::Null();
+    for (u32 ci = 0; ci < scene.ComponentCount(); ++ci) {
+        const SceneComponent& component = scene.Component(ci);
+        if (component.type != 4) continue;
+        Value candidate = interp.ManagedComponent(ci);
+        if (candidate.tag != VT_OBJECT || !candidate.data.obj) continue;
+        u32 oi = interp.ManagedObjectIndexFor(candidate);
+        if (oi < scene.ObjectCount() && !SceneObjectActiveInHierarchy(scene, oi)) {
+            inactive_owner = candidate;
+            break;
+        }
+    }
+    Value inactive_args[2];
+    inactive_args[0] = inactive_owner;
+    inactive_args[1] = Value::R4(0.1f);
+    Value inactive_handle = Value::Null();
+    bool inactive_invoke = inactive_owner.tag == VT_OBJECT &&
+        interp.Invoke(wait_method, inactive_args, 2, &inactive_handle);
+    pass = CoroutineCheck(inactive_invoke && inactive_handle.tag == VT_NULL,
+                          "inactive owner records FAULT and returns null Coroutine") && pass;
+    Value wait1[2]; wait1[0] = owner; wait1[1] = Value::R4(0.5f);
+    Value handle1;
+    bool invoke1 = interp.Invoke(wait_method, wait1, 2, &handle1);
+    Interpreter::CoroutineInfo info;
+    bool have_info = interp.GetCoroutineInfo(handle1, &info);
+    bool handle_ok = invoke1 && handle1.tag == VT_OBJECT && handle1.data.obj &&
+        strcmp(pkg.Type(handle1.data.obj->type_id).full_name, "UnityEngine.Coroutine") == 0;
+    pass = CoroutineCheck(handle_ok, "original WaitForSeconds returned non-null Coroutine") && pass;
+    bool owner_ok = have_info &&
+        strstr(info.iterator_type, "CupheadTime/") == info.iterator_type &&
+        strstr(info.iterator_type, "waitForSeconds_cr") != 0 &&
+        strcmp(info.owner_type, owner_type) == 0;
+    LogInfo("coroutinetest", "original child iterator=%s owner=%s last_yield=%s",
+            have_info ? info.iterator_type : "<missing>",
+            have_info ? info.owner_type : "<missing>",
+            have_info ? info.last_yield : "<missing>");
+    pass = CoroutineCheck(owner_ok,
+                          "original waitForSeconds_cr child is owned by receiver") && pass;
+    for (u32 frame = 0; frame < 30; ++frame) interp.UpdateCoroutines(1.0f / 60.0f);
+    bool incomplete30 = interp.GetCoroutineInfo(handle1, &info) && info.running && !info.completed;
+    CoroutineCheck(incomplete30, "original 0.5s wait incomplete on frame 30");
+    interp.UpdateCoroutines(1.0f / 60.0f);
+    bool complete31 = interp.GetCoroutineInfo(handle1, &info) && !info.running &&
+        info.completed && info.state == -1;
+    pass = CoroutineCheck(incomplete30 && complete31,
+                          "original 0.5s wait complete on frame 31 with state=-1") && pass;
+
+    const MemberRefInfo* set_enabled = FindCoroutineMemberRef(
+        pkg, "UnityEngine.Behaviour", "set_enabled", 1, "System.Boolean");
+    const MemberRefInfo* stop_all = FindCoroutineMemberRef(
+        pkg, "UnityEngine.MonoBehaviour", "StopAllCoroutines", 0, 0);
+    const MemberRefInfo* set_active = FindCoroutineMemberRef(
+        pkg, "UnityEngine.GameObject", "SetActive", 1, "System.Boolean");
+    Value wait10[2]; wait10[0] = owner; wait10[1] = Value::R4(10.0f);
+    Value lifecycle_handle;
+    bool lifecycle_start = interp.Invoke(wait_method, wait10, 2, &lifecycle_handle);
+    bool lifecycle_running = interp.IsCoroutineRunning(lifecycle_handle);
+    LogInfo("coroutinetest", "lifecycle start=%d running=%d handle=%d set_enabled_ref=%d stop_all_ref=%d set_active_ref=%d",
+            lifecycle_start ? 1 : 0, lifecycle_running ? 1 : 0,
+            lifecycle_handle.data.obj ? 1 : 0, set_enabled ? 1 : 0,
+            stop_all ? 1 : 0, set_active ? 1 : 0);
+    Value enabled_args[2]; enabled_args[0] = owner; enabled_args[1] = Value::Bool(false);
+    bool disabled_call = InvokeCoroutineMember(interp, set_enabled, enabled_args, 2, 0);
+    LogInfo("coroutinetest", "lifecycle enabled=false call=%d running=%d", disabled_call ? 1 : 0,
+            interp.IsCoroutineRunning(lifecycle_handle) ? 1 : 0);
+    bool enabled_keeps = lifecycle_start && disabled_call &&
+        interp.IsCoroutineRunning(lifecycle_handle);
+    pass = CoroutineCheck(enabled_keeps,
+                          "Behaviour.enabled=false does not stop coroutine") && pass;
+    Value stop_all_args[1]; stop_all_args[0] = owner;
+    bool stop_all_call = InvokeCoroutineMember(interp, stop_all, stop_all_args, 1, 0);
+    bool stop_all_stops = stop_all_call && !interp.IsCoroutineRunning(lifecycle_handle);
+    pass = CoroutineCheck(stop_all_stops,
+                          "StopAllCoroutines(B) stops B-owned handle") && pass;
+    interp.Invoke(wait_method, wait10, 2, &lifecycle_handle);
+    u32 owner_oi = interp.ManagedObjectIndexFor(owner);
+    Value gameobject = interp.ManagedGameObject(owner_oi);
+    Value active_args[2]; active_args[0] = gameobject; active_args[1] = Value::Bool(false);
+    bool inactive_call = InvokeCoroutineMember(interp, set_active, active_args, 2, 0);
+    LogInfo("coroutinetest", "lifecycle SetActive(false) call=%d go=%d running=%d",
+            inactive_call ? 1 : 0, gameobject.data.obj ? 1 : 0,
+            interp.IsCoroutineRunning(lifecycle_handle) ? 1 : 0);
+    bool set_active_stops = inactive_call && !interp.IsCoroutineRunning(lifecycle_handle);
+    pass = CoroutineCheck(set_active_stops,
+                          "GameObject.SetActive(false) stops B-owned handle") && pass;
+    if (gameobject.tag == VT_OBJECT) {
+        Value active_back[2]; active_back[0] = gameobject; active_back[1] = Value::Bool(true);
+        InvokeCoroutineMember(interp, set_active, active_back, 2, 0);
+    }
+    Value enabled_back[2]; enabled_back[0] = owner; enabled_back[1] = Value::Bool(true);
+    InvokeCoroutineMember(interp, set_enabled, enabled_back, 2, 0);
+
+    u32 hud_type = pkg.FindType("LevelHUDPlayerHealth");
+    u32 tween = pkg.FindMethod(hud_type, "ChangedHealthTween");
+    for (u32 ci = 0; hud_type && tween && ci < scene.ComponentCount(); ++ci) {
+        Value component = interp.ManagedComponent(ci);
+        if (component.tag != VT_OBJECT || !component.data.obj ||
+            !interp.IsAssignable(component.data.obj->type_id, hud_type)) continue;
+        Value args[2]; args[0] = component; args[1] = Value::R4(3.0f); Value ret;
+        bool ok = interp.Invoke(tween, args, 2, &ret);
+        LogInfo("coroutinetest", "strict ancestry control LevelHUDPlayerHealth.ChangedHealthTween invoked=%d result=%s",
+                ok ? 1 : 0, ok ? "OK" : "FAULT");
+        break;
+    }
+    LogInfo("coroutinetest", "original result=%s", pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+}
+
+static int RunCoroutineTest(MetadataPackage& pkg, const AppConfig& config) {
+    if (pkg.FindType("CupheadTime")) return RunOriginalCoroutineTest(pkg, config);
+    if (pkg.FindType("CP1FixtureFactory")) return RunFixtureCoroutineTest(pkg);
+    LogError("coroutinetest", "metadata contains neither CupheadTime nor the CP1 fixture");
+    return 1;
+}
+
 static int RunUnityTest(MetadataPackage& pkg, const AppConfig& config) {
     if (!config.scene_path) {
         LogError("unity", "no scene path");
@@ -1435,6 +2233,45 @@ static bool RequestOriginalTutorialRetry(MetadataPackage& pkg, Interpreter& inte
     return strcmp(requested, "scene_level_tutorial") == 0;
 }
 
+static bool IsRootPackCoroutine(const Interpreter::CoroutineInfo& info) {
+    return strncmp(info.iterator_type, "Level/", 6) == 0 ||
+           strncmp(info.owner_type, "VeggiesLevel", 12) == 0 ||
+           strncmp(info.iterator_type, "VeggiesLevel", 12) == 0;
+}
+
+static const char* CoroutineWaitKind(u8 kind) {
+    if (kind == 1) return "seconds";
+    if (kind == 2) return "realtime";
+    if (kind == 3) return "coroutine-handle";
+    if (kind == 4) return "raw-ienumerator";
+    if (kind == 5) return "orphaned";
+    return "none";
+}
+
+static bool FindRootPackStartBattle(Interpreter& interp, Interpreter::CoroutineInfo* out) {
+    for (u32 i = 0; i < interp.CoroutineCount(); ++i) {
+        Interpreter::CoroutineInfo info;
+        if (!interp.GetCoroutineInfo(i, &info)) continue;
+        if (strstr(info.iterator_type, "Level/<startBattle_cr>") == 0) continue;
+        if (out) *out = info;
+        return true;
+    }
+    return false;
+}
+
+static void LogRootPackCoroutines(Interpreter& interp, u32 frame) {
+    for (u32 i = 0; i < interp.CoroutineCount(); ++i) {
+        Interpreter::CoroutineInfo info;
+        if (!interp.GetCoroutineInfo(i, &info)) continue;
+        if (!IsRootPackCoroutine(info)) continue;
+        LogInfo("rootpack-progress",
+                "frame=%u iterator=%s owner=%s state=%d last_yield=%s running=%u completed=%u stopped=%u faulted=%u fault_site=%s",
+                frame, info.iterator_type, info.owner_type, info.state, info.last_yield,
+                info.running, info.completed, info.stopped, info.faulted,
+                info.fault_site[0] ? info.fault_site : "<none>");
+    }
+}
+
 static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play = false) {
     if (!config.scene_path) {
         LogError("level", "no scene path");
@@ -1898,6 +2735,25 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     bool saw_death = false;
     s32 first_hit_health = -1, second_hit_health = -1;
     Value repeated_dealer = Value::Null();
+    Interpreter::CoroutineInfo start_battle_initial;
+    bool start_battle_seen = FindRootPackStartBattle(interp, &start_battle_initial);
+    s32 start_battle_state = start_battle_seen ? start_battle_initial.state : -99;
+    char start_battle_yield[96];
+    strcpy(start_battle_yield, start_battle_seen ? start_battle_initial.last_yield : "<missing>");
+    u32 start_battle_change_frame = 0xFFFFFFFFu;
+    f32 transition_delay = 0.0f;
+    u32 loader_type = pkg.FindType("SceneLoader");
+    if (loader_type) interp.EnsureTypeInitialized(loader_type);
+    u32 transition_field = loader_type
+        ? pkg.FindField(loader_type, "EndTransitionDelay") : 0;
+    if (transition_field) {
+        transition_delay = Interpreter::ToF32(interp.GetField(transition_field, Value::Null()));
+    }
+    u32 computed_wait_frames = (u32)ceilf((0.4f + transition_delay) / config.fixed_dt);
+    LogInfo("rootpack-wait",
+            "initial_state=%d initial_yield=%s transition_delay=%.6f computed_seconds=%.6f computed_frames=%u",
+            start_battle_state, start_battle_yield, transition_delay,
+            0.4f + transition_delay, computed_wait_frames);
     for (u32 i = 0; i < frames; ++i) {
         InputState in_state;
         in_state = InputRead();
@@ -2029,6 +2885,20 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
             }
         }
         interp.UpdateCoroutines(config.fixed_dt);
+        if (start_battle_seen) {
+            Interpreter::CoroutineInfo current;
+            if (FindRootPackStartBattle(interp, &current) &&
+                current.state != start_battle_state &&
+                start_battle_change_frame == 0xFFFFFFFFu) {
+                start_battle_change_frame = i;
+                LogInfo("rootpack-wait",
+                        "state_changed initial=%d current=%d frame=%u last_yield=%s running=%u faulted=%u fault_site=%s",
+                        start_battle_state, current.state, i, current.last_yield,
+                        current.running, current.faulted,
+                        current.fault_site[0] ? current.fault_site : "<none>");
+            }
+        }
+        if (i % 60 == 0) LogRootPackCoroutines(interp, i);
         if (extra_update_seen.Size() < scene.ComponentCount()) {
             u32 old_size = extra_update_seen.Size();
             extra_update_seen.Resize(scene.ComponentCount());
@@ -2283,6 +3153,66 @@ static int RunLevelTest(MetadataPackage& pkg, const AppConfig& config, bool play
     if (config.probe_fields) ProbeGameplayFields(pkg, interp, scene);
     LogInfo("levelplay", "start=%.1f,%.1f max_x=%.1f max_y=%.1f min_y=%.1f collisions=%u result=%s",
             start_x, start_y, max_x, max_y, min_y, collision_events, pass ? "PASS" : "FAIL");
+    if (config.scene_path && strstr(config.scene_path, "veggies")) {
+        LogRootPackCoroutines(interp, frames - 1);
+        u32 ledger_groups = interp.PrintLedgerSummary();
+        char blocked[192];
+        blocked[0] = 0;
+        u32 faulted_entries = 0;
+        u32 running_entries = 0;
+        Interpreter::CoroutineInfo first_faulted;
+        Interpreter::CoroutineInfo first_running;
+        bool have_faulted = false, have_running = false;
+        for (u32 ci = 0; ci < interp.CoroutineCount(); ++ci) {
+            Interpreter::CoroutineInfo info;
+            if (!interp.GetCoroutineInfo(ci, &info) || !IsRootPackCoroutine(info)) continue;
+            if (info.faulted) {
+                ++faulted_entries;
+                if (!have_faulted) { first_faulted = info; have_faulted = true; }
+            }
+            if (info.running && info.last_step_pass != interp.CoroutinePass()) {
+                ++running_entries;
+                if (!have_running) { first_running = info; have_running = true; }
+            }
+        }
+        if (have_faulted && first_faulted.fault_site[0]) {
+            strcpy(blocked, first_faulted.fault_site);
+        } else if (have_running) {
+            char dependent[192]; dependent[0] = 0;
+            u32 iter_type = pkg.FindType(first_running.iterator_type);
+            u32 owner_type = pkg.FindType(first_running.owner_type);
+            bool have_dep = interp.FirstLedgerSiteForRoot(
+                Interpreter::LEDGER_UNSUPPORTED, iter_type, owner_type,
+                dependent, sizeof(dependent));
+            if (!have_dep) {
+                have_dep = interp.FirstLedgerSiteForRoot(
+                    Interpreter::LEDGER_FAULT, iter_type, owner_type,
+                    dependent, sizeof(dependent));
+            }
+            _snprintf(blocked, sizeof(blocked) - 1, "%s wait=%s dependency=%s",
+                      first_running.iterator_type,
+                      CoroutineWaitKind(first_running.wait_kind),
+                      have_dep ? dependent : "<unreported>");
+            blocked[sizeof(blocked) - 1] = 0;
+        } else {
+            strcpy(blocked, "unreported-dependent-operation");
+        }
+        bool hold_ok = start_battle_state != -99 &&
+            (start_battle_change_frame == 0xFFFFFFFFu ||
+             start_battle_change_frame >= computed_wait_frames);
+        pass = hold_ok && pass;
+        LogInfo("rootpack-wait",
+                "state_hold=%s initial_state=%d first_change_frame=%d computed_frames=%u startBattle_starts=%u",
+                hold_ok ? "PASS" : "FAIL", start_battle_state,
+                start_battle_change_frame == 0xFFFFFFFFu ? -1 : (s32)start_battle_change_frame,
+                computed_wait_frames, start_battle_seen ? 1u : 0u);
+        LogInfo("rootpack-chain",
+                "starts=%u faulted=%u parked_running=%u start_after_self_stop_notes=%u ledger_groups=%u cumulative_limit=4096",
+                interp.CoroutineCount(), faulted_entries, running_entries,
+                interp.LedgerSiteCount(Interpreter::LEDGER_NOTE, "start-after-self-stop"),
+                ledger_groups);
+        LogInfo("rootpack", "status=NOT_PLAYABLE blocked_on=%s", blocked);
+    }
     return pass ? 0 : 1;
 }
 
@@ -2612,11 +3542,17 @@ int AppMain(const AppConfig& config) {
     const char* log_path = config.log_path ? config.log_path : PlatformDefaultLogPath();
     LogOpen(log_path, true);
     LogBuildInfo();
+    SetStrictFaultPrefixes(config.strict_fault_prefixes);
     LogEventStr("boot", "command", "name", config.command ? config.command : "run");
 
     MetadataPackage metadata;
     bool wants_metadata = config.metadata_path != 0 ||
         (config.command && (strcmp(config.command, "inspect") == 0 ||
+                            strcmp(config.command, "coroutinetest") == 0 ||
+                            strcmp(config.command, "coroutinetest-extended") == 0 ||
+                            strcmp(config.command, "ledger-sites") == 0 ||
+                            strcmp(config.command, "ledger-deep") == 0 ||
+                            strcmp(config.command, "ledger-exhaust") == 0 ||
                             strcmp(config.command, "logic") == 0 ||
                             strcmp(config.command, "unity") == 0 ||
                             strcmp(config.command, "stack") == 0 ||
@@ -2657,6 +3593,29 @@ int AppMain(const AppConfig& config) {
             result = 1;
         } else {
             result = RunUnityTest(metadata, config);
+        }
+    } else if (config.command && strcmp(config.command, "coroutinetest") == 0) {
+        if (!metadata.IsLoaded()) {
+            LogError("coroutinetest", "metadata required");
+            result = 1;
+        } else {
+            result = RunCoroutineTest(metadata, config);
+        }
+    } else if (config.command && strcmp(config.command, "coroutinetest-extended") == 0) {
+        if (!metadata.IsLoaded()) {
+            LogError("coroutinetest", "metadata required");
+            result = 1;
+        } else {
+            result = RunExtendedFixtureCoroutineTest(metadata);
+        }
+    } else if (config.command && (strcmp(config.command, "ledger-sites") == 0 ||
+                                  strcmp(config.command, "ledger-deep") == 0 ||
+                                  strcmp(config.command, "ledger-exhaust") == 0)) {
+        if (!metadata.IsLoaded()) {
+            LogError("ledger-fixture", "metadata required");
+            result = 1;
+        } else {
+            result = RunLedgerFixtureTest(metadata, config.command);
         }
     } else if (config.command && strcmp(config.command, "stack") == 0) {
         if (!metadata.IsLoaded() || !config.scene_path) {
@@ -2715,6 +3674,10 @@ int AppMain(const AppConfig& config) {
         LogInfo("run", "completed_frames=%u", frames);
     }
 
+    if (LastRunStrictFaultMatched()) {
+        LogError("ledger", "strict fault prefixes matched");
+        result = result ? result : 1;
+    }
     if (metadata.IsLoaded()) metadata.Unload();
     LogInfo("shutdown", "result=%d mem_allocated=%u peak=%u", result,
             MemAllocatedBytes(), MemPeakBytes());

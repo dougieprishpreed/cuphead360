@@ -1,3 +1,350 @@
+## 2026-11-01 accepted CP1 coroutine and fault-ledger checkpoint
+
+This checkpoint implements only the coroutine, ownership, join, and
+fail-visible accounting prerequisite to the opening-flow work. It does not make
+Root Pack playable and does not validate authored attacks, Animator behavior,
+scene transitions, UI, audio, saves, Xenia, or hardware execution.
+
+Opus and the independent Sol host accepted this bounded checkpoint on
+2026-11-01. Sol rehashed the final source and both binaries, reviewed the
+correction, and independently reproduced the distinct-root strict control
+(exit 1) and unrelated-prefix control (exit 0). The external review completed
+on the exact Opus5.5 subscription route with no API-key source or fallback.
+The opening flow remains unaccepted.
+
+Build-time source provenance is CP1 baseline
+`694b9f0eac896dcf35a1f4c8843873485327df87` plus the dirty CP1 production
+diff, on the host docs-only HEAD `bae43a8`. The final corrected source hashes
+were `2A907E37C51B7EF74302E91BA7BF2BC6E3BA110AB5D74BB378AB1E881BE7C19D`
+for `interpreter.cpp` and
+`A831398705844A327791AD14A1577D22B8BAC015D041125541FAA5373206F897`
+for `app.cpp`. The final binaries were:
+
+| Target | Timestamp (UTC) | Size | SHA-256 |
+| --- | --- | ---: | --- |
+| Windows Release EXE | `2026-11-01T03:42:41.0988596Z` | 419,328 | `F4EC7E5F3C4F65B301F2E0BDD51DB7D8584484E26EC62389BD27C612025B64FD` |
+| Xbox 360 Release XEX | `2026-11-01T03:43:08.9490884Z` | 696,320 | `E835924C02C9CAEDFA46815393EDA4E2E54DCDD6EB7DF000BA2105227566C8CB` |
+
+Both final builds exited 0:
+
+```text
+scripts\build_win32.bat Release
+scripts\build_xbox360.bat Release
+```
+
+Windows took 5.361 seconds and Xbox 360 took 13.050 seconds. The final source
+files predate both binaries.
+
+The scheduler gives every entry a stable ID and managed
+`UnityEngine.Coroutine` handle, records the receiver as owner, links a raw child
+before its synchronous first step, and rechecks the entry and all parent entries
+after `MoveNext`, `get_Current`, and nested starts. `new WaitForSeconds(...)`
+and `new WaitForSecondsRealtime(...)` now allocate a real wait object and store
+the argument; the by-reference constructor path remains supported.
+
+The 4096-entry capacity is a pilot limit on cumulative starts per process. It
+does not reclaim entries. Exhaustion records a FAULT and rejects only the new
+start. Same-pass work is limited to 131072 steps and synchronous recursion to
+32 nested steps; exceeding either records a FAULT and rejects or ends only the
+affected work. Guard failures and every subsequent refused step in an exhausted
+pass are recorded against the offending entry's iterator/owner root. The
+refused entries are faulted and ended, rather than deferred; the exhausted
+marker also applies to outside-pass first steps until the next pass begins. The
+earlier name filter, silent 512-step break, silent 1024-entry rejection,
+unbounded synchronous recursion, and summary-order omission are absent.
+
+The ledger stores bounded aggregate groups keyed by category, site, root
+iterator, root owner and root callback, with a count and one sampled ancestry
+chain. Strict prefixes are evaluated at FAULT time against the full live
+managed stack and the root context, before storage or print limits. Prefixes use
+`Type::Method`. A dropped or failed stored fault makes strict mode fail closed.
+The summary counts every stored group but prints only the requested display
+limit and reports `groups`, `observations`, `shown`, `dropped`, `push_fail`,
+`alloc_loss`, and `ancestry_truncated` separately.
+
+Chosen, unverified Unity semantics implemented and tested here:
+
+- A yielded `Coroutine` joins to that handle and resumes the waiter after the
+  handle completes. Stopping the waiter does not stop an independently started
+  child.
+- A child stopped before completion leaves its waiter suspended. This records
+  an `orphaned-waiter` NOTE rather than cancelling the waiter.
+- A raw nested `IEnumerator` is owned by its parent's owner and is recursively
+  stopped with the parent.
+- A completed child wakes its waiter in the same scheduler pass. Entries
+  started during a pass do not execute a second time in that pass.
+- An entry first stepped outside `UpdateCoroutines` gets its next step in the
+  next frame's pass. The current pass's skip tag remains set even when another
+  entry causes the scheduler's inner loop to advance again. This is
+  doc-derived from the Unity 2017.4 ExecutionOrder page; no same-frame
+  finish-order claim is made.
+- Destroy/SetActive stops occur at the API call. Component destroy stops that
+  owner; GameObject destroy/deactivation stops matching descendant ownership.
+  `Behaviour.enabled=false` does not stop a coroutine.
+- Inactive-owner `StartCoroutine` records a FAULT containing the owner type,
+  GameObject and first inactive ancestor, then returns success with a null
+  `Coroutine`, allowing the managed caller to continue.
+- An explicit API `StartCoroutine` made after the current managed entry has
+  stopped itself still proceeds under normal receiver, inactive-owner and
+  capacity rules. It records an aggregated `start-after-self-stop` NOTE naming
+  the cancelled iterator and receiver. Only a scheduler-originated raw child of
+  a cancelled parent is suppressed; that suppression records a
+  `raw-child-suppressed` NOTE.
+
+The execution-order reference used only to choose the scheduler phase is the
+Unity 2017.4 page
+<https://docs.unity3d.com/2017.4/Documentation/Manual/ExecutionOrder.html>.
+The host still needs to confirm the semantics above against Unity 2017.4.
+`WaitForFixedUpdate` and `WaitForEndOfFrame` deliberately approximate the next
+scheduler pass and produce a NOTE.
+
+### T1-A: original wait path
+
+```text
+build\win32\Cuphead360.exe --command coroutinetest ^
+  --metadata work\metadata\metadata.chm ^
+  --scene work\extract_level\scene.chs --headless ^
+  --log work\restart-20261031\cp1-final-narrow-builder\final-original.log
+```
+
+Exit 0. Key output:
+
+```text
+[coroutinetest] original owner=UnityEngine.UI.Image ci=0
+[coroutinetest] original child iterator=CupheadTime/<waitForSeconds_cr>c__Iterator0 owner=UnityEngine.UI.Image
+[coroutinetest] PASS inactive owner records FAULT and returns null Coroutine
+[coroutinetest] PASS original 0.5s wait incomplete on frame 30
+[coroutinetest] PASS original 0.5s wait complete on frame 31 with state=-1
+[coroutinetest] PASS Behaviour.enabled=false does not stop coroutine
+[coroutinetest] PASS StopAllCoroutines(B) stops B-owned handle
+[coroutinetest] PASS GameObject.SetActive(false) stops B-owned handle
+[coroutinetest] original result=PASS
+```
+
+The stop operations use original MemberRef signatures through
+`InvokeMemberRef`; the test records the active `UnityEngine.UI.Image` receiver,
+not merely a C++ helper result. The original `new WaitForSeconds` path now
+returns its allocated managed object and stores the float, rather than pushing
+the constructor's void result.
+
+### T1-B: join fixture
+
+No suitable original parent iterator was found whose pre-yield path was free
+of the required UI or Animator dependencies, so the clearly labelled synthetic
+fallback is used. Build and run:
+
+```text
+tests\fixtures\build_cp1_fixture.bat
+build\win32\Cuphead360.exe --command coroutinetest ^
+  --metadata work\restart-20261031\cp1-final-narrow-builder\fixture\CP1CoroutineFixture.chm ^
+  --headless ^
+  --log work\restart-20261031\cp1-final-narrow-builder\final-core.log
+```
+
+Both commands exited 0. The test observes the fixture's `State` field and
+managed scheduler entries:
+
+```text
+[coroutinetest] PASS fixture parent state=1 after synchronous first step
+[coroutinetest] PASS fixture 0.5s wait incomplete on frame 30
+[coroutinetest] PASS fixture handle completed 0.5s wait and parent resumed on frame 31
+[coroutinetest] PASS stopping a finished handle is a NOTE no-op
+[coroutinetest] PASS StopCoroutine(parent) leaves independent child running
+[coroutinetest] PASS stopped child leaves parent suspended with orphaned-waiter NOTE
+[coroutinetest] PASS stopping raw parent recursively stops its raw child
+```
+
+The extended fixture command was:
+
+```text
+build\win32\Cuphead360.exe --command coroutinetest-extended ^
+  --metadata work\restart-20261031\cp1-final-narrow-builder\fixture\CP1CoroutineFixture.chm ^
+  --headless ^
+  --log work\restart-20261031\cp1-final-narrow-builder\final-extended.log
+```
+
+It exited 0 and verified outside-pass and mixed-entry timing, observed raw-child
+ordering, faulted and stopped waiters, parent cancellation during a raw child's
+first step, and a safe 33-entry recursive chain. Self-stop on the first and later
+steps, and parent stop during the raw child's first step, each allowed the
+explicit nested start exactly once; the nested coroutine completed while the
+self-stopped entries remained frozen. The recursion control recorded
+`coroutine scheduler::step-depth` against the distinct
+`CP1GuardVictimIterator/<Run>` root. Its intentionally failing `MoveNext` was
+never entered. The run then invoked a probe successfully. This is engine
+semantics evidence only, not original-game correctness.
+
+### T1-C: negative and strict controls
+
+Seven temporary local reversions were rebuilt and run after the final ledger
+structure was in place. Each was restored before the final binaries. Evidence
+uses the `negative-*.log` names under `cp1-final-narrow-builder/`:
+
+- Returning a null handle from the StartCoroutine shim made both original and
+  fixture commands exit 1.
+- Storing zero for the `WaitForSeconds` constructor made the frame-30 assertion
+  fail and exit 1.
+- Restoring the original summary index progression omitted one reversed-order
+  group and exited 1.
+- Restricting strict ancestry to the last 32 stored methods missed the
+  outer-only match (`strict_matched=0`, exit 0 instead of the expected 1).
+- Removing the post-`MoveNext` cancellation check marked a self-stopped iterator
+  completed and exited 1.
+- Reinstating suppression when `current_entry_` was stopped made the explicit
+  nested starts disappear and exited 1 (`negative-f1-suppression-reinstated.log`).
+- Linking a raw child only after its first synchronous step left it running
+  after a parent-only stop and exited 1.
+- Raising the depth cap above the finite 40-level fixture removed the scheduler
+  FAULT and exited 1 with 41 starts.
+
+Fault-time strict matching uses the full live stack. The distinguishing
+outer-only fixture has more than 32 ancestors, reports `ancestors=32 truncated`,
+but still matches `CP1LedgerSites::DeepOuterOnly` and exits 1. The reversed-order
+fixture stores two groups and three observations; `FailZ` is sorted after
+`FailA` and still matches:
+
+The F2 guard control runs `coroutinetest-extended --strict-faults
+CP1GuardVictimIterator`; it exits 1. The unrelated prefix exits 0. The depth
+FAULT has `root_iterator=CP1GuardVictimIterator/<Run>`, where that type appears
+at neither the FAULT site nor any live managed ancestor. The victim's
+intentionally failing first `MoveNext` does not run. The per-pass budget path
+uses the same root-first wrapper and aggregates each later refusal by the
+offending root; reproducing 131072 finite steps is impractical in this fixture,
+so that branch is verified by source review rather than a scene run.
+Evidence: `final-f2-root-match.log` and `final-f2-root-nonmatch.log`.
+
+```text
+--strict-faults CP1LedgerSites::FailZ
+[ledger] FAULT count=1 site=CP1LedgerSites::FailA
+[ledger] FAULT count=2 site=CP1LedgerSites::FailZ
+[ledger] summary groups=2 observations=3 shown=2 strict_matched=1
+[shutdown] result=1
+
+--strict-faults Unrelated::Prefix
+[ledger] summary strict_matched=0
+[shutdown] result=0
+```
+
+Distinct-group exhaustion stored exactly 8192 groups, observed one more dropped
+fault, printed only one group, and failed closed:
+
+```text
+[ledger] summary groups=8192 observations=8193 shown=1 dropped=1
+  push_fail=0 alloc_loss=0 strict_prefixes=1 strict_matched=0 strict_loss=1
+[shutdown] result=1
+```
+
+Evidence: `final-ledger-positive.log`, `final-ledger-match.log`,
+`final-ledger-nonmatch.log`, `final-ledger-deep.log`, and
+`final-ledger-exhaust.log`.
+
+### T2: Root Pack progress
+
+One final narrow-correction run postdates both final Release builds. It uses 150
+frames, enough to cover the accepted frame-24 wait release and frame-118 fault:
+
+```text
+build\win32\Cuphead360.exe --metadata work\metadata\metadata.chm ^
+  --scene work\extract_veggies\scene.chs --levelplay --frames 150 ^
+  --headless ^
+  --log work\restart-20261031\cp1-final-narrow-builder\rootpack-150-final.log
+```
+
+Exit 0; duration 77.840 seconds; no process crash. The run emitted bounded
+frame-0 through frame-149 progress rows for the `Level` and `VeggiesLevel`
+coroutine entries, including iterator, owner, `$PC`, last yield, activity and
+fault state. Key rows:
+
+```text
+[rootpack-wait] initial_state=1 initial_yield=UnityEngine.WaitForSeconds transition_delay=0.000000 computed_seconds=0.400000 computed_frames=24
+[rootpack-progress] frame=0 iterator=Level/<startBattle_cr>c__Iterator2 owner=VeggiesLevel state=1 last_yield=UnityEngine.WaitForSeconds running=1 faulted=0
+[rootpack-wait] state_changed initial=1 current=2 frame=24 last_yield=UnityEngine.WaitForSeconds running=1 faulted=0
+[rootpack-progress] frame=120 iterator=Level/<startBattle_cr>c__Iterator2 owner=VeggiesLevel state=-1 last_yield=UnityEngine.WaitForSeconds running=0 faulted=1 fault_site=Level/<startBattle_cr>c__Iterator2::MoveNext
+[levelplay] result=PASS
+[ledger] summary groups=148 observations=9839 shown=32 dropped=0 push_fail=0 alloc_loss=0 ancestry_truncated=0 strict_loss=0
+[rootpack-wait] state_hold=PASS initial_state=1 first_change_frame=24 computed_frames=24 startBattle_starts=1
+[rootpack-chain] starts=104 faulted=1 parked_running=0 start_after_self_stop_notes=0 ledger_groups=148 cumulative_limit=4096
+[rootpack] status=NOT_PLAYABLE blocked_on=Level/<startBattle_cr>c__Iterator2::MoveNext
+```
+
+The blocker is now derived from the earliest faulted coroutine in the
+Level/VeggiesLevel chain. The old first-`Animator`-record-anywhere heuristic is
+gone. The fault is `ldfld on null` at frame 118 after the real 0.4-second wait.
+If no chain entry faulted, Root Pack reports the earliest stalled running entry's
+wait kind and first relevant dependency. That stalled-poller fallback is specific
+to this status report and is not generic deadlock detection.
+The frame-24 and frame-118 rows match the accepted 600-frame run. This run
+contains no `start-after-self-stop` NOTE, so its reported count is 0. No
+didShoot/Shoot call, animation event, health write, teleport, or authored
+attack injection was performed. The 4096 value is the cumulative-start pilot
+limit; this run used 104 entries.
+
+### T3: regressions
+
+All cases below were run once from the final Windows binary:
+
+| Case | Exit | Ledger/main result |
+| --- | ---: | --- |
+| Tutorial `--level` | 0 | PASS; 25 groups, 51 observations |
+| Tutorial `--levelplay --frames 120` | 1 | 112 groups, 6808 observations; `OnlineInterfaceGog::UnlockAchievement` mismatch at frame 101 |
+| Flower `--level` | 0 | PASS; 26 groups, 52 observations |
+| Synthetic `--combat-test --frames 272` | 0 | PASS; 114 groups, 14576 observations; full damage sequence and final health 0 |
+
+The frame-101 failures are an inherited interface-slot misdispatch. At IL PC 375
+in `LevelPlayerMotor.OnGrounded` (method 15783), `callvirt` token `0x06003a9c`
+declares method 15004, `OnlineInterface.SetStat`. Signature 2320 has three
+explicit parameters, `PlayerId`, `string`, and `float`, plus HASTHIS bit `0x20`:
+the authored call supplies 4 stack values including the receiver. That value is
+derived from the package and call code; runtime does not log the count. The
+interface method's numeric vtable slot is 23.
+
+The tools assign interface and class virtual methods in separate slot spaces.
+`InvokeVirtual` preserves the interface slot number but indexes the receiver
+class's vtable. Class slot 23 selects method 15040,
+`OnlineInterfaceGog.UnlockAchievement`, whose signature 2303 has two explicit
+parameters, `PlayerId` and `string`, and therefore requires 3 values including
+the receiver. The fault is emitted because the derived 4-value call reaches a
+3-value callee. If arity happened to match, the same mechanism could silently
+call the wrong method.
+
+This is independent of CP1 scheduling and ledger code and is the subject of the
+separate next D1 interface-dispatch checkpoint. The original operation requests
+`SetStat`, not an achievement. No dispatch change, special native success,
+argument padding, or `Achievement`-parameter claim is made here.
+
+Flower `--level` was CP1-caused and is resolved: inactive-owner StartCoroutine
+no longer aborts `FlowerLevel.Start`; it records the owner/GameObject/ancestor
+FAULT and lets the caller continue. Flower levelplay then reaches the shared
+inherited mismatch at frame 101 and also exposes the real-wait
+`Level/<startBattle_cr>` fault at frame 118.
+
+The combat predicate now passes. The former synchronous TweenValue/Color.get_gray
+failure no longer aborts the test after the inactive StartCoroutine fix. A
+nonterminal `UnityEngine.Color::Lerp` FAULT remains in `HitFlash::SetColor` and
+is a next-checkpoint visual-shim gap, not combat evidence.
+
+Logs are `t3-*.log` under `work/restart-20261031/cp1-final-narrow-builder/`.
+
+### Frame argument order control
+
+The Windows parser now preserves an explicit `--frames N` regardless of its
+position relative to `--motor`, `--motorplay`, or `--levelplay`. Both commands
+below exited 1 because two frames cannot satisfy the existing tutorial movement
+predicate, but both emitted only `frame=0` before the result:
+
+```text
+... --levelplay --frames 2 ...
+... --frames 2 --levelplay ...
+```
+
+Evidence: `frame-order-mode-first.log` and `frame-order-frames-first.log`.
+
+Known ledger omissions remain UI, layers, cameras, materials, and other shims
+outside the explicit CP1 registry. The harness currently invokes `Awake` and
+`Start` on inactive template objects; lifecycle/activation parity is a
+next-checkpoint gap. A Windows PASS or Xbox compile is not Xbox gameplay,
+Xenia, or hardware evidence.
+
 ## 2026-10-31 player-damage engine checkpoint (scope corrected)
 
 This is a checkpoint for the port runtime, not normal tutorial gameplay and
