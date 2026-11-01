@@ -1,78 +1,109 @@
-# Paused checkpoint — 2026-10-31
+# Continuation checkpoint — 2026-10-31
 
-The user requested a pause at the next logical stopping point and a new session
-with the configured Opus external project lead, Sol Codex lead/host acting as
-second lead, and DeepSeek builder. The worker has finished and been closed.
-No opening-flow implementation was started. Use RESTART_PROMPT.md for the new
-session; OPENING_FLOW.md records the agreed outcome, not an accepted architecture.
+The user has revoked the earlier pause and requested continued porting with
+all three configured Codex on Crack agents. This file preserves recovery state;
+it is not a request to stop or acceptance of the opening milestone.
 
-This is an **experimental source checkpoint**, not acceptance of M1 or a merge
-readiness claim. The earlier tutorial combat milestone was mis-scoped: lethal
-damage is injected by the harness, not supplied by normal authored tutorial
-gameplay. The agreed playable outcome is now new game, Elder Kettle, Isle I map,
-Root Pack combat/death/retry/victory, and return to the map.
+## Current work
 
-## Evidence retained
+Source baseline `beb3a87` is experimental. Fundamental audit documentation is
+committed as `694b9f0`; PORT_REVIEW.md is the canonical diagnosis and sequence.
+The conditional strategy retains original IL plus a native Unity service layer
+for a bounded pilot. A whole-engine rewrite has no measured justification.
+Scene transitions/lifecycle, animation/events, dialogue/UI, storage and bounded
+asset residency remain prerequisites for the agreed opening flow.
 
-The builder reports successful Windows and Xbox Release builds, the 272-frame
-synthetic combat probe, and a 60-frame tutorial movement regression. Current EXE
-and XEX timestamps postdate the final source edit. The combat transcript records
-target health 20 -> -4, player health 3 -> 2 -> 1 -> 0, independent dealer/player
-cooldown checks, and original death callbacks. See VERIFICATION.md and evidence/.
+CP1 implements coroutine handles/ownership/joins, stop hooks, fault accounting,
+strict ancestry filtering, diagnostics and synthetic engine fixtures. Its
+source is still uncommitted and NOT accepted. The initial builder completed
+and was closed. Opus source review and independent Sol review rejected this
+version. Their validated consolidated correction is assigned to the sole
+DeepSeek writer. Finish its implementation, tests and acceptance review before
+starting the next checkpoint.
 
-The lead inspected the diff, logs and health-3/health-0 images and checked diff
-whitespace. The images demonstrate the health rectangles changing; they also
-show substantial rendering defects, including exposed atlas-like character art
-in the death capture. They are not evidence of a visually correct playable scene.
+Latest original tests/builds, prior to review corrections:
+- Windows and Xbox Release builds exited0. Exact hashes/timestamps and commands
+  are in VERIFICATION.md. This is compile evidence, not console execution.
+- Original CupheadTime wait/owner and synthetic join controls exited0; temporary
+  null-handle negative builds exited1 and were restored before final builds.
+- Strict ancestry matching native Color.get_gray exited1; unrelated prefix0.
+- RootPack600frames exited0, explicitly NOT_PLAYABLE, blocked on Animator
+  SetInteger. Ledger output completeness is under review; do not trust its
+  group count or strict pass as proof that all failures were accounted for.
+- Tutorial play120frames, Flower boot and synthetic combat272frames exited1.
+  Tutorial reports UnlockAchievement argument mismatch; Flower reports inactive
+  coroutine owners; combat reports synchronous TweenValue failure. Causes must
+  distinguish newly surfaced defects from regressions introduced by CP1.
+- Direct tutorial/platforming/Train/Frogs boots exited0 despite faults. They are
+  smoke tests, not gameplay acceptance.
 
-Original single-player retry is unproven. Audio is muted/stubbed. Manual shoot
-mapping was added but not interactively tested. Full platforming/boss regressions
-and Xenia execution of this checkpoint were not run before the pause. Only final
-checkpoint stabilization, builds and documentation followed the stop request;
-no further feature work or broad test campaign was started.
+Sol found pending issues in summary iteration/strict completeness, fault-time
+ancestry on truncation or ledger exhaustion, reentrant cancellation and the
+synchronous recursion bound. Do not advance on an assumption that CP1 passed.
 
-## Specific findings for the fundamental review
+## Exact workflow and recovery
 
-Preserve these as audit inputs, not as assertions that every other path is sound:
+Sol gpt-6.1-sol stays host and independent second lead. Opus
+claude-opus-5-5 subscription at requested high effort owns architecture,
+assignments and acceptance. DeepSeek opencode-go/deepseek-v4.1-flash router,
+crack_builder at max, implements/tests. Host dispatch only; one writer.
+Do not substitute models/providers, reconfigure roles or spawn a review council.
 
-- `NumericCompare` now handles floating operands, but its floating `.un` branch
-  cases use ordered C++ comparisons; unordered/NaN behavior still needs correction
-  and targeted tests. Wider numeric behavior was not independently validated.
-- The new `Object_GetType` returns an array's element type for an array object.
-  That is not the array's runtime type and needs review.
-- `PlayerEvent_Shared` allocates a new object on each call. The original method
-  caches a static instance. The shim also writes playerId only for argc >= 2
-  using a[1], whereas the original static API has one playerId parameter. Verify
-  actual call conventions and per-player behavior; PlayerOne's default value can
-  conceal this issue.
-- Generic IEnumerable/IEnumerator dispatch now routes broadly through List
-  helpers. Verify actual receiver layout before treating arrays, custom iterators
-  or coroutine state machines as List enumerators.
-- The retry probe can clear SceneLoader.currentlyLoading and checks SceneName.
-  Even a matching name would not by itself prove an engine reload or fresh
-  lifecycle. The recorded run reports UNPROVEN, and no recursive health-reset
-  substitute remains.
-- `--combat-test` silently raises a short frame limit to 272 and renders only
-  health-capture frames. Its PASS covers the synthetic damage sequence, excludes
-  retry, and does not mean the playable milestone passed. Reconsider this command
-  contract as part of the verification review.
-- The old synthetic StartBasic harness path remains alongside the new manual
-  shoot action mapping. Physical input behavior has not been demonstrated.
-- The historical diagnosis excerpt contains `enabled=0 flags=1`, whereas the
-  current logging helper derives enabled from that bit. Keep the raw excerpt,
-  but do not treat its inconsistent fields as a reliable current-state oracle.
+User authorization: existing Max subscription quota only, zero API spend.
+The adapter's required numeric budget reference is0, not a quota observation or
+API permission. Previous Opus summaries verify exact model, subscription,
+apiKeySource none and no fallback. Effort is requested but not observed in its
+stream. The native child's turn_context and exact-thread router telemetry
+corroborate DeepSeek/max/opencode-go; its header separately says openai.
+Preserve that metadata distinction without inventing a route change.
 
-The next session should decide which experimental changes to retain, repair or
-remove. Do not spend more work fitting normal gameplay to the old harness.
+Private ignored recovery files live under work/restart-20261031/:
+- opus-next-request.json: validated CP1 assignment; cp1-host-addendum.md: parser
+  scope extension; cp1-review-context.md: completed worker context.
+- cp1-builder/: detailed positive/negative controls and regression logs.
+- opus-cp1-review-run/ and opus-cp1-consolidate-run/: completed source review
+  and validated correction. Latest completed valid external run is
+  opus-a1-contract-run, Claude session
+  7af156a8-bc69-488c-aa67-4e588bf3c329. Resume only a completed valid run.
+- sol-cp1-review.md and forthcoming opus-cp1-review.md/corrections request.
+- host-runtime-readiness.json and worker-router-activity.json: route evidence.
 
-## Space and routing
+The activity panel registers exact host/worker logs and adapter runs, launch
+disabled. Current host01a193ea-89af-7723-b855-5cbc0f2c06f3; completed/closed
+CP1 child01a193fb-f287-7362-9577-6f09884452a8 (/root/cp1_coroutines).
+The active correction child is01a194be-38be-7b20-8d15-c1ce11be350a
+(/root/cp1_corrections), connected as session-cf4e09f307e7c071. Its exact
+DeepSeek/max turn context and successful opencode-go router samples were
+verified in cp1-correction-readiness.json. Opus's conditional next decision
+places A1 sprite correctness/hard-bounded residency before broad lifecycle;
+opus-next-checkpoint.json is schema-valid but NOT dispatched. Sol's contract
+review was consolidated in opus-a1-contract-run (rev2): hard texture allocation
+cap, eviction between synchronous draws, deterministic over-demand failure,
+and one consistent mesh/packing transform. Its acceptance gate remains accepted
+CP1. cp1-correction-review-context.md is still a DRAFT until the active child
+finishes; do not launch opus-cp1-final-review-prompt.md before completing it.
+Reuse the same worker for corrections if available, otherwise only the exact
+configured crack_builder. Validate lead-authored requests with the adapter.
+Close children on completion. Do not leave a completed worker marked working.
 
-Approved cleanup reclaimed 4,106,863,495 bytes; approximately 15.81 GB remained
-at the cleanup measurement. Unique root captures were checksum-preserved under
-work/cleanup-evidence-20261031. Game data, active regression scenes and metadata
-remain. The raw-texture duplication/eager-loading architecture still needs review.
+## Acceptance boundaries
 
-All four requested workflow roles are configured. The non-spending Opus adapter
-doctor could not find the official Claude Code CLI on PATH in this environment.
-This is a runtime readiness gap, not evidence that the external-lead role was
-never configured. Recheck the existing subscription route in the next session.
+The goal remains new game -> Elder Kettle -> visible controllable Isle I ->
+RootPack -> authored death/retry -> victory/results -> map with progression.
+No scene carousel, forced health, injected animation events or harness reset
+may stand in for original gameplay. The tutorial has no authored lethal hazard;
+its combat probe is synthetic. Peashot already exists in original new inventory;
+do not invent an Elder Kettle inventory grant. Dialogue graph recovery remains
+required. Installed-game saves must never be read/written: implement and verify
+a port-local path/interface before enabling original storage callbacks.
+
+Rendering is visibly broken, HUD native rectangles, audio stubbed/muted, real
+retry unproven. RootPack eagerly retains ~1421MiB raw textures, over the entire
+512MiB Xbox budget; observed Windows working set ~1.5GiB and a600frame render
+~8minutes. Windows execution, XEX build, Xenia and hardware are separate. No new
+Xenia/hardware result exists. A bounded asset/runtime plan is still necessary.
+
+Keep generated data private and bounded. Never commit game assets, decompiled
+source, original DLLs, SDK files or work/build bundles. Approved cleanup evidence
+and active scene data remain preserved. Commit coherent source/docs checkpoints
+only with honest acceptance limits; earlier PASS records are historical.

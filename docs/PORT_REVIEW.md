@@ -12,12 +12,14 @@ Opus audit on the exact `claude-opus-5-5` subscription route with no fallback,
 no API-key source, and `not-billed-via-api` usage provenance. High effort was
 requested through the supported process-local setting; the stream does not
 expose an observed effort value. The user authorized Max quota only, with zero
-API spend. DeepSeek was statically ready at audit time; live worker routing
-must be checked when dispatched. Host and Opus runs are registered in the
-existing activity panel. The exact crack_builder role/model/max assignment
-has been dispatched; live routing and its log registration are pending native
-execution metadata. Scoped source edits show that work is executing, but do
-not establish the serving model. Readiness is not source acceptance.
+API spend. The native worker's turn_context records the exact DeepSeek model
+and max effort. Its exact-thread router_upstream activity reports successful
+opencode-go requests on that model, corroborating the configured router route.
+The session header separately says openai; that metadata discrepancy is retained
+in the local readiness evidence rather than treated as a provider switch.
+Host, Opus runs and the native worker's exact log are registered in the existing
+activity panel. No role, model or provider was substituted. Readiness is not
+source acceptance.
 
 ## Strategy decision
 
@@ -108,6 +110,14 @@ Sol's independent findings, original-scene type inventory, texture inventory,
 baseline logs, and exact adapter records. They are deliberately uncommitted.
 
 ## Runnable sequence
+
+Continuation decision: read-only asset preflight found eight distinct Player
+atlas pages sharing one texture name, which the current cache treats as one
+identity. All 2,392 entries are tightly packed; 356 require packing transforms.
+Opus therefore places a bounded sprite-correctness/residency checkpoint (A1)
+after accepted CP1 and before the broader lifecycle work below. Its contract
+must enforce allocation limits and preserve sprite placement; it is planned,
+not implemented or accepted. See ASSET_PIPELINE.md for measured defects.
 
 The project lead issues one bounded implementation brief at a time, followed
 by Opus review and an independent Sol check:

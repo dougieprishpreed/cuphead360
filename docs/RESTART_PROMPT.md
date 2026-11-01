@@ -1,4 +1,12 @@
-# Prompt for a fresh port review and implementation session
+# Prompt for continuing the port
+
+Continuation note (2026-10-31): the fundamental audit is complete in
+`PORT_REVIEW.md`, committed as `694b9f0`. CP1 coroutine/fault-ledger source is
+implemented but still under Opus acceptance and independent Sol review. Read
+the current `PAUSED_HANDOFF.md` and working tree before repeating tests or
+starting another checkpoint. The user revoked the earlier pause and requested
+continued porting with all three configured agents. Do not stop at a handoff
+or repeat the fundamental audit mechanically.
 
 Use Codex on Crack to take over the Cuphead360 native port at:
 
@@ -39,10 +47,13 @@ them merely because another route is convenient:
 Read the installed `codex-on-crack:crack`, external-lead reference, relevant
 setup/selection instructions and panel skill. Run the native worker and Opus
 readiness checks. These roles are configured; configuration is distinct from
-runtime readiness. The prior non-spending Opus doctor could not find the official
-Claude Code CLI on PATH in that execution environment; login/model access remained
-unverified. Recheck the existing configured subscription route in this session
-and resolve or report its exact readiness gap before claiming Opus is participating.
+runtime readiness. This session successfully ran the official Claude Code CLI
+on the exact Opus subscription model. The CP1 child's exact model/max effort
+and opencode-go router activity were corroborated. Reuse recorded evidence,
+and verify current access on resumed runs. The user explicitly authorized
+Max subscription quota only and zero API spend; the adapter's numeric budget
+reference is zero and does not enable API billing. Do not ask again merely
+because the adapter requires that field.
 Do not silently replace a requested model, switch providers, invent a budget,
 or fall back to an API billing route. Respect existing permissions and approved
 limits. Validate external-lead requests through the adapter; the host chooses
@@ -59,8 +70,9 @@ Read `docs/STATUS.md`, `docs/VERIFICATION.md`, `docs/OPENING_FLOW.md`,
 `docs/PAUSED_HANDOFF.md`,
 `docs/ARCHITECTURE.md`, `docs/ASSET_PIPELINE.md`, `docs/COMPATIBILITY.md`, and
 `docs/BUILDING.md`, plus any applicable AGENTS.md. Inspect git status/log and the
-latest checkpoint. `322b3b5` was the baseline before the paused work; use the
-actual current HEAD and working tree rather than assuming that is still HEAD.
+latest checkpoint. `beb3a87` is the experimental pre-audit source baseline;
+`694b9f0` contains the canonical audit documentation. Use actual current HEAD
+and working tree; CP1 changes may remain uncommitted pending acceptance.
 
 Treat documentation as claims to audit. Several older sections contradict
 newer checkpoints. Build an evidence-backed inventory of what is implemented,

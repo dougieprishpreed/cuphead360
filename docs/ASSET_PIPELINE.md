@@ -85,6 +85,18 @@ must both change. Root Pack attacks, death and phase changes depend on them.
 
 ## Current limitations
 
+- Texture identity is currently incorrect in `AtlasCache`: it caches atlas
+  pages by `Texture2D.m_Name`. The Player bundle has eight distinct 4096x4096
+  textures with the same name, so entries on other pages reuse the first
+  page's pixels. A continuation preflight found prepared ghost/hit sprites
+  completely transparent while independent mesh decoding recovered pixels.
+  Cache keys must include the serialized asset identity and path ID.
+- All 2,392 Player atlas entries use tight packing; 356 also require packing
+  flips or rotation. The current rectangle crop ignores packing settings,
+  mesh masks and trim offsets. Correct page identity alone does not establish
+  correct sprite geometry, alpha or pivots. Library decoding is a comparison
+  source, not original-engine visual conformance evidence.
+
 - GameObjects/transforms, SpriteRenderer/Animator/Camera, BoxCollider2D,
   CircleCollider2D, Rigidbody2D and partial MonoBehaviour serialized fields
   are represented. Complete Canvas/TMP presentation, audio and arbitrary

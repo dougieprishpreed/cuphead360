@@ -22,8 +22,10 @@ the original Retry request successfully reloaded the scene.
 2. Follow the opening into Elder Kettle's house. An original, supported intro
    skip is acceptable; directly selecting the house in a development harness
    does not validate this transition.
-3. Complete the required Elder Kettle interaction and receive the original
-   initial weapon/loadout. The optional tutorial may be entered and exited.
+3. Complete the required Elder Kettle interaction and retain the original
+   loadout/tutorial/power-up behavior. New inventory already contains peashot;
+   do not manufacture a weapon grant. The optional tutorial may be entered and
+   exited.
 4. Leave the house for a visible, controllable Inkwell Isle I map. Walk to the
    Root Pack entrance and use its original interaction/difficulty selection.
 5. Play the Root Pack encounter with authored boss behavior. Demonstrate player
@@ -59,7 +61,7 @@ a scene carousel.
   muted milestone run is permitted under the original task; absent playback is
   still an audio implementation gap.
 - The current empty dialogue scaffold cannot stand in for the required opening
-  dialogue/weapon-grant interaction. Recover the necessary original data.
+  dialogue and its original messages. Recover the necessary original data.
 - Port save/test data stays separate from the installed game's saves. Record
   what progression persists and test it; do not claim full save compatibility
   from a single in-memory map return.
