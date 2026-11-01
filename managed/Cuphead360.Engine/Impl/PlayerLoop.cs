@@ -77,6 +77,7 @@ namespace Cuphead360.Engine
             Clock.Time += Clock.DeltaTime;
 
             SceneLoader.Pump();
+            Atlases.Flush();
             InputUpdate?.Invoke();
 
             // Fixed steps catch up with scaled time.
@@ -90,6 +91,7 @@ namespace Cuphead360.Engine
                 Clock.FixedUnscaledTime += Clock.FixedDeltaTime;
                 RunStarts();
                 ForEach(b => b.Messages.FixedUpdate, null);
+                Animators.FixedStep();
                 PhysicsStep?.Invoke();
                 ResumeCoroutines(fixedPhase: true, endOfFrame: false);
             }
@@ -100,8 +102,13 @@ namespace Cuphead360.Engine
             RunInvokes();
             ResumeCoroutines(fixedPhase: false, endOfFrame: false);
             AnimationStep?.Invoke();
+            Animators.Step();
+            Atlases.Flush();
             RunStarts();
             ForEach(b => b.Messages.LateUpdate, null);
+            UI.WillRender();
+            Atlases.Flush();
+            if (Capture.Wanted(Clock.FrameCount)) Capture.Write(Clock.FrameCount, RenderList.Build());
             RenderFrame?.Invoke();
             ResumeCoroutines(fixedPhase: false, endOfFrame: true);
             ProcessDestroys();

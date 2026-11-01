@@ -1,6 +1,6 @@
 # Status
 
-Not a playable port yet. What is true on 2026-11-01 (round 3), and what
+Not a playable port yet. What is true on 2026-11-01 (round 4), and what
 isn't. Evidence: [VERIFICATION.md](VERIFICATION.md). Architecture:
 [MANAGED_PLAYER.md](MANAGED_PLAYER.md). Plan: [CONSOLE_PLAN.md](CONSOLE_PLAN.md).
 
@@ -17,14 +17,20 @@ isn't. Evidence: [VERIFICATION.md](VERIFICATION.md). Architecture:
 - Engine state for scenes, objects, transforms, coroutines, asset bundles,
   Resources, JsonUtility, PlayerPrefs (port-local), the audio mixer
   (snapshots, exposed parameters), TextAsset.
+- The title sequence plays from the original code: fader, MDHR logo
+  animation, fade, dancing title with the flashing "Press Any Button" text,
+  through the engine's cameras, sprite renderers, late-bound sprite atlases,
+  Animator, Canvas/CanvasRenderer and TextMesh Pro meshes, 0 exceptions.
+- Windows preview: `run --capture` + `tools/preview.py` draw what the engine
+  would render to PNG (BC7 atlases decoded from the player's game files).
 - Converter: all serialized files, built-in resources and asset bundles to
   CHOB object trees, 0 errors.
 - The installed saves are never touched (SHA-256 checked around every run).
 
 ## Not done
 
-- Rendering (nothing is drawn), Animator, sprites/materials, UI/TextMesh Pro
-  layout, cameras.
+- A real renderer: only the Windows preview draws, without the game's
+  post-effect camera (film grain, chromatic aberration, blur).
 - Input (Rewired's native layer), audio playback, physics.
 - Any scene past the title; the opening flow (OPENING_FLOW.md).
 - Texture/audio conversion and the console content archive.

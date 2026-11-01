@@ -76,6 +76,10 @@ namespace Cuphead360.Engine
                             for (int i = 0; i < tags.Count; i++) Tags[20000 + i] = tags[i] as string ?? "";
                             var layers = Tree.List(o.Tree, "layers");
                             for (int i = 0; i < layers.Count && i < 32; i++) Layers[i] = layers[i] as string ?? "";
+                            SortingLayers.Layers.Clear();
+                            foreach (var l in Tree.List(o.Tree, "m_SortingLayers"))
+                                SortingLayers.Layers.Add((Tree.Str(l, "name"), (int)(uint)Tree.Int(l, "uniqueID")));
+                            if (SortingLayers.Layers.Count == 0) SortingLayers.Layers.Add(("Default", 0));
                             break;
                         }
                     case "ResourceManager":
@@ -108,6 +112,7 @@ namespace Cuphead360.Engine
                 return null;
             }
             f = ChobFile.Load(path, key);
+            f.Path = System.IO.Path.GetRelativePath(System.IO.Path.Combine(Root, "objects"), path).Replace('\\', '/');
             files[key] = f;
             return f;
         }
@@ -226,6 +231,7 @@ namespace Cuphead360.Engine
             ["AudioMixerController"] = "AudioMixer",
             ["AudioMixerGroupController"] = "AudioMixerGroup",
             ["AudioMixerSnapshotController"] = "AudioMixerSnapshot",
+            ["AnimatorController"] = "RuntimeAnimatorController",
         };
 
         public static Type UnityType(string className)
@@ -387,7 +393,7 @@ namespace Cuphead360.Engine
         {
             var old = go.Transform;
             var managed = (Transform)Lifecycle.NewManaged(t);
-            var rec = Engine.Objects.Register(managed, new NTransform(), go.Name, persistent: true);
+            var rec = Engine.Objects.Register(managed, t == typeof(RectTransform) ? new NRectTransform() : new NTransform(), go.Name, persistent: true);
             rec.GameObject = go;
             go.Components[go.Components.IndexOf(old)] = rec;
             go.Transform = rec;

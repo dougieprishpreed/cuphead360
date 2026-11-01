@@ -49,6 +49,8 @@ Why:
 | `tools/build_managed.py` | the pipeline, stage by stage |
 | `tools/convert_objects.py` | Unity serialized files -> CHOB value trees (`GameData/objects`) |
 | `tools/save_guard.py` | fingerprint/check of the installed saves |
+| `tools/chob.py` | read CHOB files: class counts, object dumps, scene hierarchies |
+| `tools/preview.py` | draw `run --capture` frames to PNG (Windows preview of engine render state) |
 
 Build and check (Windows, .NET 10 SDK; wasm/c also need wasi-sdk 29 at
 `C:\wasi-sdk-29.0-x86_64-windows` and Spire360's w2c2 build):
@@ -57,7 +59,8 @@ Build and check (Windows, .NET 10 SDK; wasm/c also need wasi-sdk 29 at
 python tools/build_managed.py                       # patcher..selftest
 python tools/build_managed.py --stage wasm,c        # console C
 python -I tools/convert_objects.py --game game --out work/GameData [--bundles]
-dotnet work/managed/jit/Cuphead360.Player.dll run --frames 300
+dotnet work/managed/jit/Cuphead360.Player.dll run --frames 600 --capture 60,300,600
+python -I tools/preview.py --sheet                  # work/preview/frame_*.png, sheet.png
 ```
 
 ## Engine rules that matter
@@ -94,6 +97,41 @@ dotnet work/managed/jit/Cuphead360.Player.dll run --frames 300
 - **Exceptions** in behaviour messages and coroutines are reported with IL
   offsets per frame (the game DLLs have no PDBs) and the frame continues, as
   in Unity.
+- **Built-in components** are engine records (`NCamera`, `NSpriteRenderer`,
+  `NAnimator`, `NCanvas`, `NCanvasRenderer`, `NCanvasGroup`, `NRectTransform`)
+  made by `Builtins.Create`; they load their converted fields (`Load`), copy
+  state on Instantiate (`CopyFrom`) and react to activation.
+- **Sprite atlases are late-bound, as in the shipped game.** Title and level
+  sprites carry atlas tags and no texture. A sprite that is loaded or assigned
+  queues its tag; the engine calls Unity's managed
+  `SpriteAtlasManager.RequestAtlas`, the game's `SpriteAtlasLoader` loads the
+  atlas bundle and answers through `SpriteAtlasManager.Register`, which binds
+  every sprite whose render-data key the atlas holds. UVs come from the atlas
+  entry's `uvTransform` and packing flips (horizontal, vertical, 180; 90 is
+  unverified and reported as a data problem if met).
+- **Animator** runs the controller's runtime constant: layers, states,
+  exit-time and condition transitions (triggers consumed), any-state and
+  selector (entry/exit) transitions, parameters, `Play`/`CrossFade` applied
+  at the next animator update. Clips sample streamed (keyed cubic segments),
+  dense and constant curves; bindings: sprite (PPtr curve), transform
+  position/rotation/scale/euler, GameObject active, Behaviour enabled,
+  SpriteRenderer color/flip, script float/int/bool fields; write defaults.
+  Events go to every script on the GameObject with Unity's parameter rules.
+  The pass runs after Update and coroutines, before LateUpdate (AnimatePhysics
+  in the fixed step, UnscaledTime with unscaled delta). Transition
+  interruptions and multi-clip blend trees aren't implemented (a blend tree
+  with more than one node is reported as a data problem).
+- **UI**: `Canvas.SendWillRenderCanvases` runs after LateUpdate so the game's
+  UGUI and TextMesh Pro build their meshes; CanvasRenderers keep a copy of
+  each mesh, materials, texture, color; CanvasGroup alpha is inherited down
+  the hierarchy; screen-space root canvases are sized to the screen or camera
+  each frame; RectTransform keeps anchoredPosition across parent resizes.
+- **Render list**: cameras by depth; per camera, sprites and canvas meshes
+  sorted by sorting layer, sorting order, then view depth (far first), canvas
+  meshes in hierarchy order; overlay canvases last. `run --capture` writes it
+  as JSON lines; the preview tool draws it. The game's own post-effect camera
+  (`CupheadRenderer` -> `ChromaticAberrationFilmGrain`, `BlurGamma`,
+  `OnRenderImage`) is not drawn yet.
 
 ## Verified (2026-11-01, Windows, this machine)
 
@@ -117,27 +155,37 @@ converted data and are listed in a PROPS ledger, so state-only behaviour stays
 visible. The boot now runs the full `Cuphead.Init` and stops at the GOG Galaxy
 SDK boundary.
 
+Round 4 added render state (cameras, sprite renderers, sprites, late-bound
+sprite atlases, materials, shader property ids), the Animator, UI (Canvas,
+CanvasRenderer, CanvasGroup, RectTransform, Mesh) and the render capture +
+Windows preview. `run --frames 900` plays the original title sequence: 1 s
+black, fader fade-in, the MDHR logo animation (100 frames), its fade-out, then
+the dancing title with the flashing "Press Any Button" (TextMesh Pro), 0
+exceptions, one missing engine method (`AudioSource.PlayOneShotHelper`).
+
 Round 3 added the Galaxy boundary (original unavailable path), AudioMixer
 state from the mixer constant, TextAsset, correct bundle LoadAllAssets, Shader
 stubs and Unity's built-in resources in the converter. `run --frames 300`
 goes scene_start -> scene_title through the original `LoadSceneAsync` with 0
 exceptions, 0 data problems and 556 script objects decoded with 0 mismatches.
 
-## Gaps, in the order the title meets them
+## Gaps, in the order the game meets them
 
-1. Rendering state: Camera rect/size, SpriteRenderer (sprite, color, flip,
-   sorting), Material properties and `Shader.PropertyToID`, Mesh,
-   CanvasRenderer/RectTransform (UI), so a Windows preview renderer can draw
-   the title from an engine snapshot (PNG captures).
-2. Animator: controllers, states, clips (sprite/transform/property curves),
-   events, `GetCurrentAnimatorStateInfo`, `Play`, `StringToHash`.
-3. Input: Rewired's native input layer (redirected P/Invokes) fed from XInput,
-   so the original title "press any button" and slot select work.
-4. Audio playback from AudioSource + mixer state; then the opening flow
-   (OPENING_FLOW.md): slot select, intro, Elder Kettle, world map, Root Pack.
-5. Physics2D (queries, triggers), ParticleSystem, UI/TextMesh Pro layout.
-6. Console: the srt WASI runtime + translated C in an XDK project; memory and
-   frame-time measurement (CONSOLE_PLAN.md gates G-A/G-B).
+1. Input: Rewired's native input layer (redirected P/Invokes) fed from XInput,
+   plus scripted input for repeatable runs, so the title's "press any button"
+   (PlayerManager join) and slot select work.
+2. Audio playback from AudioSource + mixer state (the title already calls
+   `PlayOneShotHelper`; every remaining PROPS entry is audio).
+3. The opening flow (OPENING_FLOW.md): slot select, intro book, Elder Kettle,
+   world map, Root Pack; Physics2D (queries, triggers), ParticleSystem,
+   SpriteMask, render textures as they appear.
+4. The game's post-effect camera (film grain, chromatic aberration, blur):
+   the console renderer needs it; the preview doesn't draw it.
+5. Animator gaps: transition interruptions, multi-node blend trees, root
+   motion (none met on the title).
+6. Console: the srt WASI runtime + translated C in an XDK project, a GPU
+   backend for the render list; memory and frame-time measurement
+   (CONSOLE_PLAN.md gates G-A/G-B).
 
 ## Toolchain transition (user requirement)
 

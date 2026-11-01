@@ -3,6 +3,26 @@
 Newest first. Each entry says what was run, on which build, and what it
 showed. Windows entries use the JIT oracle (`work/managed/jit`).
 
+## 2026-11-01 managed player, round 4
+
+Source: the round-4 commit ("Render state, Animator, UI and a Windows preview
+of the title"). Windows JIT oracle; converted data unchanged from round 3.
+
+| Command | Result |
+| --- | --- |
+| `python tools/build_managed.py --stage gen,engine,redirect,jit,census,selftest` | gen: 792 implemented, 1,605 property-bag accessors, 5,549 stubs; census OK; `SELFTEST PASS: 23 passed, 0 failed` |
+| `run --frames 900 --capture 60,150,...,900` (`work/managed/run17.log`) | scene_start -> scene_title; 0 exceptions, 0 data problems, 556 script objects decoded, 0 mismatches; 1 missing engine method (`AudioSource::PlayOneShotHelper` x2); PROPS: 9 accessors, all AudioSource/AudioClip/AudioMixerGroup |
+| `run --frames 640 --capture-every 5` (`run16.log`) + `tools/preview.py` | the game's own sequence, read from the captures: LevelCamera draws Background, Title_Animation, SplashMDHR, Fader; Fader alpha 1 -> 0 between t=1 s and 2 s (StartScreen.tweenRenderer_cr); `mdhr_logo_0001` .. `mdhr_logo_00100` (anim_splash_mdhr_logo, 24 fps), then the logo's alpha reaches 0 by t=8 s; `cuphead_title_screen_00NN` cycling (animator_title_screen); "Press Any Button" TextMesh Pro meshes (60 vertices, `CupheadVogue-ExtraBold-merged outline SDF Atlas`) toggling every 0.75 s (FlashingPrompt) |
+| Title atlas sprites packed FlipHorizontal / FlipVertical / Rotate180 | all 16 frames of a dance cycle (frames 545-620) draw upright and whole after the flip handling and the preview's least-squares UV fit; no sprite packed Rotate90 was met |
+| Late-bound atlases | Title_Assets, Title and mdhr_logo requested through `SpriteAtlasManager.RequestAtlas`, loaded by the game's `SpriteAtlasLoader` from their bundles, bound via `Register` |
+| `tools/save_guard.py check` before/after every run | `OK, 3 files unchanged (SHA-256)` |
+
+Preview frames: `work/preview/frame_*.png`, contact sheet
+`work/preview/title_round4_sheet.png` (git-ignored, derived from the game).
+Not compared yet with the user's PC game (needs a reference capture); not
+drawn: the game's post-effect camera (film grain, chromatic aberration, blur).
+Not verified: input, audio, anything past the title, any console build.
+
 ## 2026-11-01 managed player, round 3
 
 Source: `bb73ff0` (engine) plus the round-3 docs/cleanup commit.

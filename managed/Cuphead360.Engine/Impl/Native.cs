@@ -58,9 +58,18 @@ namespace Cuphead360.Engine
         public bool Enabled = true;
         /// <summary>The converted object this component was loaded from (null if made at run time).</summary>
         public ChobObject Data;
+
+        // Built-in component modules (render, animation, UI) override these.
+        /// <summary>Scene/prefab load: the component's converted fields.</summary>
+        public virtual void Load(ChobObject co, SceneBuild b) { }
+        /// <summary>Instantiate: copy engine state from the original (map: original -> copy).</summary>
+        public virtual void CopyFrom(NComponent src, Dictionary<NObject, NObject> map) { }
+        public virtual void Added() { }
+        public virtual void Activated(bool on) { }
+        public virtual void Removed() { }
     }
 
-    public sealed class NTransform : NComponent
+    public class NTransform : NComponent
     {
         public Vector3 LocalPosition;
         public Quaternion LocalRotation = Quaternion.identity;

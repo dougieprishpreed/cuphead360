@@ -186,7 +186,6 @@ namespace Cuphead360.Engine
             return b == null ? null : AssetDb.Resolve(b.Main, Tree.Ptr(Tree.Get(b.Manifest.Tree, "m_MainAsset"), "asset"));
         }
 
-        public static int UnityEngine_QualitySettings__get_vSyncCount() => 1;
         public static int UnityEngine_QualitySettings__GetQualityLevel() => 0;
         public static void UnityEngine_QualitySettings__SetQualityLevel(int index, bool applyExpensiveChanges) { }
         public static string[] UnityEngine_QualitySettings__get_names() => new[] { "Default" };

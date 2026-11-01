@@ -43,6 +43,11 @@ namespace Cuphead360.Engine
         {
             if (type == null || !typeof(Component).IsAssignableFrom(type) || type.IsAbstract) return null;
             if (type == typeof(Transform)) return go.Transform;
+            if (type == typeof(RectTransform))
+            {
+                if (go.Transform is NRectTransform have) return have;
+                return SwapTransform(go, true);
+            }
             var managed = (Component)NewManaged(type);
             if (managed is MonoBehaviour mb)
             {
@@ -54,6 +59,26 @@ namespace Cuphead360.Engine
             rec.GameObject = go;
             go.Components.Add(rec);
             Builtins.OnAdded(rec);
+            return rec;
+        }
+
+        /// <summary>Replace a GameObject's Transform with a RectTransform (or back), keeping hierarchy and pose.</summary>
+        public static NTransform SwapTransform(NGameObject go, bool rect, bool persistent = false)
+        {
+            var old = go.Transform;
+            var managed = (Transform)NewManaged(rect ? typeof(RectTransform) : typeof(Transform));
+            NTransform rec = rect ? new NRectTransform() : new NTransform();
+            Objects.Register(managed, rec, go.Name, persistent);
+            rec.GameObject = go;
+            rec.LocalPosition = old.LocalPosition; rec.LocalRotation = old.LocalRotation; rec.LocalScale = old.LocalScale;
+            rec.Parent = old.Parent;
+            if (old.Parent != null) old.Parent.Children[old.Parent.Children.IndexOf(old)] = rec;
+            foreach (var c in old.Children) { c.Parent = rec; rec.Children.Add(c); }
+            old.Children.Clear();
+            go.Components[go.Components.IndexOf(old)] = rec;
+            go.Transform = rec;
+            Objects.Release(old);
+            rec.Invalidate();
             return rec;
         }
 
@@ -177,23 +202,35 @@ namespace Cuphead360.Engine
         static float Div(float a, float b) => b == 0f ? 0f : a / b;
     }
 
-    /// <summary>Built-in (non-script) components: SpriteRenderer, colliders, Animator, ...</summary>
+    /// <summary>Built-in (non-script) components: SpriteRenderer, Camera, Animator, ...</summary>
     public static class Builtins
     {
-        public static Func<Type, NComponent> Factory;
-        public static NComponent Create(Type t) => Factory?.Invoke(t) ?? new NComponent();
-        public static Action<NComponent> Added, Destroyed;
-        public static Action<NComponent, bool> Activated;
-        public static void OnAdded(NComponent c) => Added?.Invoke(c);
-        public static void OnDestroyed(NComponent c) => Destroyed?.Invoke(c);
-        public static void OnActivated(NComponent c, bool on) => Activated?.Invoke(c, on);
+        public static NComponent Create(Type t)
+        {
+            if (typeof(Camera).IsAssignableFrom(t)) return new NCamera();
+            if (typeof(SpriteRenderer).IsAssignableFrom(t)) return new NSpriteRenderer();
+            if (typeof(Renderer).IsAssignableFrom(t)) return new NRenderer();
+            if (typeof(Animator).IsAssignableFrom(t)) return new NAnimator();
+            if (typeof(Canvas).IsAssignableFrom(t)) return new NCanvas();
+            if (typeof(CanvasGroup).IsAssignableFrom(t)) return new NCanvasGroup();
+            if (typeof(CanvasRenderer).IsAssignableFrom(t)) return new NCanvasRenderer();
+            return new NComponent();
+        }
+        public static void OnAdded(NComponent c) => c.Added();
+        public static void OnDestroyed(NComponent c) => c.Removed();
+        public static void OnActivated(NComponent c, bool on) => c.Activated(on);
         /// <summary>Instantiate: engine state of a built-in component (src -> copy).</summary>
-        public static Action<NComponent, NComponent, Dictionary<NObject, NObject>> CopyStateHook;
-        public static void CopyState(NComponent src, NComponent dst, Dictionary<NObject, NObject> map) => CopyStateHook?.Invoke(src, dst, map);
-        public static Action<NObject, NObject> CopyAssetHook;
+        public static void CopyState(NComponent src, NComponent dst, Dictionary<NObject, NObject> map)
+        {
+            if (src.GetType() == dst.GetType()) dst.CopyFrom(src, map);
+        }
+        /// <summary>Instantiate of an asset (Material, Sprite, ...): its engine state.</summary>
+        public static void CopyAsset(NObject src, NObject dst)
+        {
+            if (src.Managed is Material sm && dst.Managed is Material dm) MaterialState.Set(dm, MaterialState.Of(sm).Clone());
+            else if (src.Managed is Sprite ss && dst.Managed is Sprite ds) Sprites.Set(ds, Sprites.Of(ss));
+        }
         /// <summary>Scene/prefab load: a built-in component's converted fields.</summary>
-        public static Action<NComponent, ChobObject, SceneBuild> LoadedHook;
-        public static void OnLoaded(NComponent c, ChobObject co, SceneBuild b) => LoadedHook?.Invoke(c, co, b);
-        public static void CopyAsset(NObject src, NObject dst) => CopyAssetHook?.Invoke(src, dst);
+        public static void OnLoaded(NComponent c, ChobObject co, SceneBuild b) => c.Load(co, b);
     }
 }

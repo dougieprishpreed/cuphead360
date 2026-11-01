@@ -17,9 +17,10 @@ player's PC.
 ## Status
 
 Early. On Windows, the original code boots from the start scene through
-Cuphead's own initialisation to the title scene with no exceptions. Nothing
-renders yet, there's no input or audio, and the console build hasn't been
-compiled or run. Details: [docs/STATUS.md](docs/STATUS.md); recovery state and
+Cuphead's own initialisation and plays the title sequence (studio logo,
+dancing title, "Press Any Button") with no exceptions; a preview tool draws
+what the engine would render to PNG. There's no input or audio yet, and the
+console build hasn't been compiled or run. Details: [docs/STATUS.md](docs/STATUS.md); recovery state and
 next steps: [docs/HANDOFF.md](docs/HANDOFF.md).
 
 Reference build: Cuphead GOG `bundleVersion` 1.3.2 (build id

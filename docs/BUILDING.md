@@ -44,7 +44,14 @@ dotnet work/managed/jit/Cuphead360.Player.dll selftest
 dotnet work/managed/jit/Cuphead360.Player.dll run --frames 300 [--seed 360]
 dotnet work/managed/jit/Cuphead360.Player.dll resource "<path>" [Type]
 dotnet work/managed/jit/Cuphead360.Player.dll fields <file> <pathId>
+dotnet work/managed/jit/Cuphead360.Player.dll run --frames 900 --capture 60,300,600 [--capture-every N] [--capture-out F]
+python -I tools/preview.py [--frames 60,300] [--sheet]           # captures -> work/preview/frame_*.png
+python -I tools/chob.py scene work/GameData/objects/level1.chob   # hierarchy of a converted scene
 ```
+
+`--capture` writes the engine's render list for those frames
+(`work/preview/capture.jsonl`); `preview.py` decodes the textures it names
+from the game folder (cached in `work/preview/tex`) and draws the frames.
 
 `run` writes the port's saves and PlayerPrefs under `work/managed/save`
 (guarded so it can't resolve into the PC's real AppData/Documents). Each run

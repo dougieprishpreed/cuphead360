@@ -24,6 +24,10 @@ as gameplay.
   and field-decode mismatches. Keep them visible; never silence a gap.
 - `tools/save_guard.py check` before and after any run.
 
+- `run --capture ...` + `tools/preview.py`: PNGs of the engine's render list
+  (what the port would draw). Compare against captures of the user's PC game
+  at the same moments; the preview leaves out the game's post-effect camera.
+
 Planned (CONSOLE_PLAN.md V1): render fixtures per material recipe, and a
 test-only trace mod for the user's PC game recording per-frame state under
 recorded input, diffed against port traces.

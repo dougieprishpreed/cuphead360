@@ -22,12 +22,13 @@ Objective: a genuinely playable alpha release candidate on real Xbox 360
 hardware, with gameplay and presentation virtually identical to the user's GOG
 version, plus a practical converter for the user's own game files.
 
-Continue with HANDOFF.md's "Next round" list (render state and a Windows
-preview renderer for the title, then the Animator, then Rewired input from
-XInput, then the opening flow). Rebuild with `python tools/build_managed.py`;
-check with `selftest` and `run --frames N`, run `tools/save_guard.py check`
-around runs, and keep the missing-engine-method, property-bag and
-data-problem ledgers visible rather than hiding gaps.
+Continue with HANDOFF.md's "Next round" list (Rewired input from XInput and
+scripted input so the title advances to slot select, then audio playback,
+then the opening flow). Rebuild with `python tools/build_managed.py`; check
+with `selftest`, `run --frames N` and `run --capture ...` +
+`tools/preview.py` (PNG frames of what the engine draws); run
+`tools/save_guard.py check` around runs, and keep the missing-engine-method,
+property-bag and data-problem ledgers visible rather than hiding gaps.
 
 Verify behaviour with the shared Windows build; Xenia runs are generally not
 needed. Required transition: once genuine in-game status is verified on Xenia

@@ -247,8 +247,9 @@ namespace Cuphead360.Engine
             var sg = st.GameObject;
             var go = Lifecycle.CreateGameObject((GameObject)Lifecycle.NewManaged(typeof(GameObject)), sg.Name);
             go.Layer = sg.Layer; go.Tag = sg.Tag; go.ActiveSelf = sg.ActiveSelf;
-            var t = go.Transform;
+            var t = st is NRectTransform ? Lifecycle.SwapTransform(go, true) : go.Transform;
             t.LocalPosition = st.LocalPosition; t.LocalRotation = st.LocalRotation; t.LocalScale = st.LocalScale;
+            if (t is NRectTransform rt) rt.CopyFrom(st, null);
             map[sg] = go; map[st] = t;
             foreach (var sc in sg.Components)
             {

@@ -100,7 +100,18 @@ namespace Cuphead360.Player
                     case "--frames": frames = int.Parse(a[i + 1]); break;
                     case "--report": report = int.Parse(a[i + 1]); break;
                     case "--seed": seed = int.Parse(a[i + 1]); break;
+                    case "--capture":
+                        foreach (var f in a[i + 1].Split(',')) Capture.Frames.Add(int.Parse(f));
+                        break;
+                    case "--capture-every": Capture.Every = int.Parse(a[i + 1]); break;
+                    case "--capture-out": Capture.Path = System.IO.Path.GetFullPath(a[i + 1]); break;
                 }
+            if ((Capture.Frames.Count > 0 || Capture.Every > 0) && Capture.Path == null) Capture.Path = System.IO.Path.GetFullPath("work/preview/capture.jsonl");
+            if (Capture.Path != null)
+            {
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Capture.Path));
+                System.IO.File.WriteAllText(Capture.Path, "");
+            }
             // Unity seeds Random from the clock; runs here are reproducible.
             Icalls.SeedRandom(seed);
             Platform.SaveRoot = System.IO.Path.GetFullPath(save);

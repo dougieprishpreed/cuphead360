@@ -30,6 +30,8 @@ namespace Cuphead360.Engine
     public sealed class ChobFile
     {
         public string Name;
+        /// <summary>Path below GameData/objects without the extension's effect on lookups (e.g. bundles/atlas_x/CAB-y.chob).</summary>
+        public string Path = "";
         public string[] Externals;
         public readonly Dictionary<long, ChobObject> Objects = new Dictionary<long, ChobObject>();
         public readonly List<ChobObject> Ordered = new List<ChobObject>();

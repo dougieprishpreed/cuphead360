@@ -20,7 +20,10 @@ time (builds, conversions, ILC) so the user's PC stays usable;
   - `5b4ef49` managed AOT player foundation; `9126b86` boot of scene_start;
     `446a2da` decision docs; `2a4d8bc` asset bundles, Galaxy boundary reached.
   - `bb73ff0` round 3: original code boots to scene_title with no exceptions.
-  - Round 3 cleanup + docs commit ("Remove the retired interpreter tree ...").
+  - `98b0439` round 3 cleanup + docs ("Remove the retired interpreter tree ...").
+  - Round 4 commit ("Render state, Animator, UI and a Windows preview of the
+    title"): engine `Impl/Render.cs`, `Animation.cs`, `UI.cs`,
+    `RenderList.cs`; `tools/preview.py`, `tools/chob.py`; docs.
 - Side branch `interpreter-d1-r4-wip` (`ecbff5b`): the interrupted D1 r4
   interpreter edits, committed as found, not accepted, not continued.
 - Uncommitted: nothing intended. `managed/lib`, `managed/**/Generated`,
@@ -34,33 +37,40 @@ time (builds, conversions, ILC) so the user's PC stays usable;
 
 ## Verified (Windows, JIT oracle)
 
-Round 3 (`run13.log`): scene_start -> scene_title through the original
-`LoadSceneAsync`, 300 frames, 0 exceptions, 0 data problems, 556 script
-objects decoded with 0 mismatches; GOG Galaxy takes its original "Failed to
-initialize" path; the game writes its default settings to port PlayerPrefs.
-selftest 23/23. Saves unchanged (SHA-256, `tools/save_guard.py`). Details and
-rounds 1-2: VERIFICATION.md.
+Round 4 (`run16.log`, `run17.log`): the original title sequence plays: 1 s
+black, the fader fades out (t=1-2 s), the MDHR logo animation runs all 100
+frames through the Animator, fades, then the dancing title
+(animator_title_screen) with the flashing TextMesh Pro "Press Any Button".
+900 frames, 0 exceptions, 0 data problems, 1 missing engine method
+(`AudioSource.PlayOneShotHelper`); PROPS: 9, all audio. Sprite atlases are
+late-bound through the game's own `SpriteAtlasLoader`. The Windows preview
+(`run --capture` + `tools/preview.py`) draws the frames: contact sheet
+`work/preview/title_round4_sheet.png`. selftest 23/23; saves unchanged
+(SHA-256). Rounds 1-3: VERIFICATION.md.
 
-Not verified: rendering, Animator, input, audio, any scene past the title,
-XDK/xSDK compile of the translated C, Xenia, hardware, performance or memory.
+Not verified: a comparison with the user's PC game (no reference capture
+yet), the game's post-effect camera (not drawn), input, audio, any scene past
+the title, XDK/xSDK compile of the translated C, Xenia, hardware, performance
+or memory.
 
 ## Next round (in order)
 
-1. **Render state + Windows preview.** Implement the title's ledger: Camera
-   rect/orthographicSize, SpriteRenderer (sprite, color, flip, sorting
-   layer/order, material), Material properties and `Shader.PropertyToID`,
-   Mesh, CanvasRenderer/RectTransform. Build an engine render snapshot and a
-   Windows preview renderer that writes PNGs, converting the sprites' atlas
-   pixels (texture2ddecoder for BC7) on demand. Compare a capture of the
-   title with the user's PC game (ask the user for a screenshot if needed).
-2. **Animator**: controllers, states, transitions, clips (sprite, transform,
-   float curves), events; `GetCurrentAnimatorStateInfo`, `Play`,
-   `StringToHash` (verify the hash).
-3. **Input**: Rewired's redirected native input fed from XInput so the
-   original title and slot select respond; scripted input for repeatable
-   runs.
-4. **Opening flow** on Windows (OPENING_FLOW.md), then audio playback.
-5. **Console host (XDK)**: srt runtime + translated C; Xenia once, hidden,
+1. **Input.** Rewired's redirected native layer (its P/Invokes and the
+   Unity input it polls) fed from XInput on Windows, plus a scripted input
+   file for repeatable runs (`run --input script`). Goal: the original title
+   join (`PlayerManager.OnPlayerJoinedEvent`) -> `SceneLoader.LoadScene
+   (scene_slot_select, Iris, Fade)` -> slot select responds. Check the
+   transition with the preview (iris/fade are sprite and material state).
+2. **Audio playback**: AudioSource/AudioClip state (the PROPS ledger),
+   `PlayOneShotHelper`, mixer volumes; sample conversion of the clips the
+   title uses; a Windows audio backend (or a mixed WAV capture to check).
+3. **Opening flow** on Windows (OPENING_FLOW.md): slot select, intro book,
+   Elder Kettle's house, world map, Root Pack; implement what each meets
+   (Physics2D, ParticleSystem, SpriteMask, render textures, Animator gaps).
+4. **Reference comparison**: ask the user for PC captures of the title (and
+   later scenes) at known times to compare with the preview.
+5. **Console host (XDK)**: srt runtime + translated C, a GPU backend for the
+   render list including the game's post-effect camera; Xenia once, hidden,
    muted, self-driven, to verify genuine in-game status; then **switch to
    xSDK + vulkan4xenon** and test on hardware with the user.
 
