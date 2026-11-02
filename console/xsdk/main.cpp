@@ -54,7 +54,12 @@ std::string g_log_queue;
 FILE* g_log_file = NULL;
 volatile bool g_log_thread = false;
 
-void flush_log() {
+// What the guest thread is doing, for the heartbeat: "game" while the
+// player's own code runs, otherwise the host call or runtime wait it is in.
+volatile const char* g_stage = "start";
+volatile unsigned g_frames_seen = 0;
+
+void flush_log(bool sync = false) {
     std::string lines;
     pthread_mutex_lock(&g_log_lock);
     lines.swap(g_log_queue);
@@ -64,19 +69,37 @@ void flush_log() {
     if (g_log_file) {
         fwrite(lines.data(), 1, lines.size(), g_log_file);
         fflush(g_log_file);
+        // On the drive even if the console freezes next (no fault handler).
+        if (sync) fsync(fileno(g_log_file));
     }
 }
 
-// The USB drive is slow per write: lines queue and a thread writes them every 100 ms.
+void logf(const char* fmt, ...);
+double now_ms();
+
+// The USB drive is slow per write: lines queue and a thread writes them every
+// 100 ms. Every 2 s for the first two minutes, then every 10 s, it logs a
+// heartbeat: the frame count and where the guest thread is, so a stall shows
+// its place, and a log that simply ends means the whole console froze.
 void* log_writer(void*) {
     xsdk_thread_move(5);
-    for (;;) {
+    double start = now_ms();
+    for (unsigned tick = 1;; ++tick) {
         struct timespec ts = { 0, 100000000 };
         nanosleep(&ts, NULL);
-        flush_log();
+        unsigned s = (unsigned)((now_ms() - start) / 1000.0);
+        bool beat = tick % (s < 120 ? 20 : 100) == 0;
+        if (beat) logf("alive %u s: frame %u, %s", s, g_frames_seen, (const char*)g_stage);
+        flush_log(beat);
     }
     return NULL;
 }
+
+struct Stage {
+    const char* prev;
+    explicit Stage(const char* s) : prev((const char*)g_stage) { g_stage = s; }
+    ~Stage() { g_stage = prev; }
+};
 
 void log_text(const char* text, size_t len) {
     pthread_mutex_lock(&g_log_lock);
@@ -248,6 +271,7 @@ private:
     bool upload_open_;
     std::vector<std::pair<VkBuffer, VkDeviceMemory> > staging_;
     bool overflow_logged_;
+    unsigned loads_logged_;
 };
 
 uint32_t Renderer::memory_type(uint32_t bits, VkMemoryPropertyFlags want) {
@@ -300,6 +324,7 @@ bool Renderer::init() {
     texture_bytes_ = 0;
     upload_open_ = false;
     overflow_logged_ = false;
+    loads_logged_ = 0;
     const char* iexts[2] = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_DISPLAY_EXTENSION_NAME };
     VkApplicationInfo app;
     memset(&app, 0, sizeof(app));
@@ -779,7 +804,14 @@ void Renderer::load(Tex& t) {
     if (t.image || t.failed || t.key.empty()) return;
     std::vector<unsigned char> file;
     std::string path = "game:/GameData/ctex/" + t.key + ".ctx";
-    if (!read_file(path, file) || file.size() < 28 || ch360_u32(&file[0]) != 0x31585443u) {
+    double t0 = now_ms();
+    bool ok = read_file(path, file);
+    if (loads_logged_ < 40 && ok && file.size() >= 28) {
+        ++loads_logged_;
+        logf("texture %s: format %u, %ux%u, %u KB in %u ms", t.key.c_str(), ch360_u32(&file[4]), ch360_u32(&file[8]),
+             ch360_u32(&file[12]), (unsigned)(file.size() >> 10), (unsigned)(now_ms() - t0));
+    }
+    if (!ok || file.size() < 28 || ch360_u32(&file[0]) != 0x31585443u) {
         logf("texture %s: missing or unreadable (run tools/convert_console.py)", path.c_str());
         t.failed = true;
         return;
@@ -812,6 +844,7 @@ void Renderer::frame(const unsigned char* d, unsigned len) {
     unsigned views = ch360_u32(d + 4);
 
     // Pass 1: load what the list draws, then run the uploads.
+    Stage marker("vk: loading textures");
     unsigned p = 8;
     for (unsigned v = 0; v < views && p + 40 <= len; ++v) {
         unsigned items = ch360_u32(d + p + 36);
@@ -828,6 +861,7 @@ void Renderer::frame(const unsigned char* d, unsigned len) {
         }
     }
     Frame& f = frames_[frame_];
+    g_stage = "vk: waiting for the frame's fence";
     double w0 = now_ms();
     vkWaitForFences(dev_, 1, &f.fence, VK_TRUE, ~(uint64_t)0);
     gpu_wait_ms += now_ms() - w0;
@@ -840,6 +874,7 @@ void Renderer::frame(const unsigned char* d, unsigned len) {
     }
     f.dead.clear();
     if (upload_open_) {
+        g_stage = "vk: uploading textures";
         vkEndCommandBuffer(upload_cmd_);
         VkSubmitInfo si;
         memset(&si, 0, sizeof(si));
@@ -858,11 +893,13 @@ void Renderer::frame(const unsigned char* d, unsigned len) {
     }
 
     uint32_t image = 0;
+    g_stage = "vk: acquiring a swapchain image";
     VkResult r = vkAcquireNextImageKHR(dev_, swapchain_, ~(uint64_t)0, f.acquired, VK_NULL_HANDLE, &image);
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
         vk(r, "vkAcquireNextImageKHR");
         return;
     }
+    g_stage = "vk: recording";
     VkCommandBuffer cmd = f.cmd;
     vkResetCommandBuffer(cmd, 0);
     VkCommandBufferBeginInfo bi;
@@ -987,6 +1024,7 @@ void Renderer::frame(const unsigned char* d, unsigned len) {
     si.pCommandBuffers = &cmd;
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores = &f.rendered;
+    g_stage = "vk: submitting";
     vk(vkQueueSubmit(queue_, 1, &si, f.fence), "vkQueueSubmit");
     VkPresentInfoKHR pi;
     memset(&pi, 0, sizeof(pi));
@@ -996,10 +1034,12 @@ void Renderer::frame(const unsigned char* d, unsigned len) {
     pi.swapchainCount = 1;
     pi.pSwapchains = &swapchain_;
     pi.pImageIndices = &image;
+    g_stage = "vk: presenting";
     double p0 = now_ms();
     vk(vkQueuePresentKHR(queue_, &pi), "vkQueuePresentKHR");
     present_ms += now_ms() - p0;
     frame_ = (frame_ + 1) % FRAMES;
+    g_stage = "vk: evicting";
     evict();
 }
 
@@ -1056,6 +1096,7 @@ bool g_back_was = false;
 // ------------------------------------------------------------ the platform layer
 
 extern "C" int ch360_plat_frame_begin(void) {
+    g_stage = "host: frame begin";
     double t = now_ms();
     if (g_frames > 0) {
         double ms = t - g_frame_start;
@@ -1067,16 +1108,19 @@ extern "C" int ch360_plat_frame_begin(void) {
     if (g_frames > 0 && g_frames % 600 == 0) {
         unsigned f, tot;
         memory_mb(&f, &tot);
-        logf("frame %u: %.1f ms/frame (worst %.1f, %u over 17.5); gpu wait %.1f, present %.1f; memory %u MB free of %u, player %u MB, "
+        // Times in tenths of a millisecond: newlib's %f takes 64-bit paths built without safecmp.py.
+        logf("frame %u: %u ms/frame x10 (worst %u, %u over 17.5); gpu wait %u, present %u; memory %u MB free of %u, player %u MB, "
              "textures %u MB (%u uploads, %u evicted); audio underruns %u",
-             g_frames, g_logic_ms / 600, g_worst_ms, g_slow, g_renderer->gpu_wait_ms / 600, g_renderer->present_ms / 600, f, tot,
-             ch360_memory_kb() / 1024, (unsigned)(g_renderer->texture_bytes() >> 20), g_renderer->uploads, g_renderer->evictions,
-             g_audio_underruns);
+             g_frames, (unsigned)(g_logic_ms / 60), (unsigned)(g_worst_ms * 10), g_slow, (unsigned)(g_renderer->gpu_wait_ms / 60),
+             (unsigned)(g_renderer->present_ms / 60), f, tot, ch360_memory_kb() / 1024, (unsigned)(g_renderer->texture_bytes() >> 20),
+             g_renderer->uploads, g_renderer->evictions, g_audio_underruns);
         g_logic_ms = g_worst_ms = 0;
         g_slow = 0;
         g_renderer->gpu_wait_ms = g_renderer->present_ms = 0;
     }
     ++g_frames;
+    g_frames_seen = g_frames;
+    if (g_frames <= 3 || g_frames == 10 || g_frames == 60 || g_frames == 300) logf("frame %u", g_frames);
     // Back + Start held for a second quits; Back alone writes the log now.
     unsigned held = 0;
     for (uint32_t user = 0; user < 4; ++user) {
@@ -1093,6 +1137,7 @@ extern "C" int ch360_plat_frame_begin(void) {
         flush_log();
         return 0;
     }
+    g_stage = "game";
     return 1;
 }
 
@@ -1110,16 +1155,21 @@ extern "C" int ch360_plat_pad(int index, ch360_pad* out) {
     return 1;
 }
 
-extern "C" void ch360_plat_submit(const unsigned char* data, unsigned len) { g_renderer->frame(data, len); }
+extern "C" void ch360_plat_submit(const unsigned char* data, unsigned len) {
+    g_renderer->frame(data, len);
+    g_stage = "game";
+}
 
 extern "C" void ch360_plat_texture_file(int id, const char* key) { g_renderer->texture_file(id, key); }
 
 extern "C" void ch360_plat_texture_pixels(int id, int width, int height, const unsigned char* bgra) {
+    Stage stage("vk: run-time texture");
     g_renderer->texture_pixels(id, width, height, bgra);
 }
 
 extern "C" void ch360_plat_audio(const unsigned char* s, int frames) {
     if (!g_audio_open) return;
+    Stage stage("host: audio");
     pthread_mutex_lock(&g_audio_lock);
     for (int i = 0; i < frames; ++i, s += 4) {
         if (g_ring_write - g_ring_read >= AUDIO_RING) ++g_ring_read;   // full: drop the oldest
@@ -1133,6 +1183,24 @@ extern "C" void ch360_plat_audio(const unsigned char* s, int frames) {
 
 extern "C" void ch360_plat_log(const char* text, size_t len) { log_text(text, len); }
 
+// The wasm runtime's waits (poll_oneoff, wasi clocks) and sleeps, marked for
+// the heartbeat; a sleep over two seconds is logged (hex: printf's 64-bit
+// paths come from newlib, built without safecmp.py).
+extern "C" void __real_srt_clock_wait_until(unsigned long long deadline_ns);
+extern "C" void __wrap_srt_clock_wait_until(unsigned long long deadline_ns) {
+    Stage stage("runtime: waiting for a deadline");
+    __real_srt_clock_wait_until(deadline_ns);
+}
+extern "C" void __real_srt_plat_sleep_ns(unsigned long long ns);
+extern "C" void __wrap_srt_plat_sleep_ns(unsigned long long ns) {
+    if (ns > 2000000000ull) logf("runtime: sleep of 0x%08x%08x ns", (unsigned)(ns >> 32), (unsigned)ns);
+    Stage stage("runtime: sleeping");
+    __real_srt_plat_sleep_ns(ns);
+}
+
+extern "C" int ch360_probe64(void (*log)(const char* line));
+static void probe_line(const char* line) { logf("%s", line); }
+
 int main() {
     FILE* fresh = fopen("game:/cuphead360.txt", "wb");
     if (fresh) fclose(fresh);
@@ -1140,6 +1208,8 @@ int main() {
     unsigned f, t;
     memory_mb(&f, &t);
     logf("memory at start: %u MB free of %u MB", f, t);
+    if (ch360_probe64(probe_line) != 0) logf("cpu probe: rewritten 64-bit compares are wrong; the player's results won't be");
+    flush_log(true);
     // The player's linear memory is reserved first (committed as it grows):
     // xsdk's heap takes the free address space at its first growth.
     static const char* const argv[] = { "cuphead360", "run", "--console", "1", "--data", "/GameData", "--save", "/save" };
@@ -1166,6 +1236,7 @@ int main() {
     } else {
         logf("no audio output");
     }
+    g_stage = "game";
     int code = ch360_start(16, 0);
     memory_mb(&f, &t);
     logf("player exit %d after %u frames; memory %u MB free, player %u MB", code, g_frames, f, ch360_memory_kb() / 1024);

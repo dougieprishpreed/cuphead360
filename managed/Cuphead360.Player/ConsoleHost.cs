@@ -77,6 +77,27 @@ namespace Cuphead360.Player
             return 0;
         }
 
+        /// <summary>
+        /// 64-bit integer sanity at start-up: the console compares 64-bit
+        /// registers on their low words alone unless the build rewrites the
+        /// compares (console/xsdk/safecmp.py), which showed as path ids
+        /// formatted with the wrong sign. Values come from strings so nothing
+        /// folds at compile time.
+        /// </summary>
+        public static void SelfCheck()
+        {
+            var bad = new List<string>();
+            foreach (var s in new[] { "5848540871337674781", "-2592357432173453771", "4294967296", "-4294967296", "2147483648", "-1" })
+                if (long.Parse(s).ToString() != s) bad.Add("format " + s + " -> " + long.Parse(s));
+            long two32 = long.Parse("4294967296"), one = long.Parse("1"), two31 = long.Parse("2147483648"), zero = long.Parse("0");
+            if (!(two32 > one)) bad.Add("2^32 > 1");
+            if (!(two31 > zero)) bad.Add("2^31 > 0");
+            if (two32 + 5 == long.Parse("5")) bad.Add("2^32+5 == 5");
+            if (!((ulong)two32 > uint.MaxValue)) bad.Add("(ulong)2^32 > uint.MaxValue");
+            if (!(-two32 < zero)) bad.Add("-2^32 < 0");
+            Console.WriteLine(bad.Count == 0 ? "I64CHECK ok" : "I64CHECK FAIL: " + string.Join("; ", bad));
+        }
+
         static void PollPads()
         {
             byte* s = stackalloc byte[16];

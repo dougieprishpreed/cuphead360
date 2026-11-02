@@ -20,7 +20,7 @@ WASI module, translated to C by w2c2 and compiled for the console's CPU.
 - **The host** (`xsdk/main.cpp`): Vulkan through vulkan4xenon (one pass a
   frame into the swapchain, a pipeline per sprite shader recipe, batched
   draws), textures loaded on first use from `GameData/ctex` and evicted
-  least-recently-used above 200 MB, the pads through `XamInputGetState`,
+  least-recently-used above 112 MB, the pads through `XamInputGetState`,
   audio through xsdk's feeder, the log through a writer thread.
 - **The PC check** (`host_native.c`): the same translated C and glue as a
   headless Windows program (`tools/build_console.py --stage native`): it
@@ -36,6 +36,16 @@ python tools/build_managed.py --stage wasm,c            # player.wasm -> work/ma
 python tools/build_console.py --stage native            # optional PC check (clang)
 python tools/build_console.py --stage xsdk              # -> work/console/xsdk/default.xex
 ```
+
+Every C and C++ source compiles through `console/xsdk/safecmp.py` (CMake's
+compiler launcher): an xSDK title runs in 32-bit mode, where the console's
+doubleword compares (`cmpd`, `cmpdi`, `cmpld`, `cmpldi`) look at the low
+words only, so the launcher compiles to assembly with r12 kept free and
+rewrites each into word compares of the high, then the low words
+(`safecmp.py --self-test` checks the rewrite on every outcome). xsdk,
+vulkan4xenon, newlib and libgcc are prebuilt without it: avoid 64-bit
+`printf` formats (`%f`, `%lld`) in the host. `probe64.c` logs, before the
+player starts, the instructions as they are beside the rewritten compares.
 
 `console/xsdk/build.sh` takes `XSDK`, `VULKAN4XENON`, `GLSLANG`,
 `XSDK_TOOLCHAIN` and `CH360_RUNTIME` (Spire360's checkout) to build
@@ -60,8 +70,14 @@ python tools/stage_console.py --to E:\Games\Cuphead360
 
 That folder holds `default.xex`, `GameData\` (objects, ctex, audio, fonts),
 `save\` and `licenses\`. Start `default.xex` from the dashboard. The game
-writes `cuphead360.txt` (start-up, every 600 frames: frame time, memory,
-textures, audio; the player's own output and exceptions) next to it. Back
+writes `cuphead360.txt` next to it: the CPU probe, start-up memory, the
+first 40 texture loads with their times, frames 1-3, 10, 60 and 300, every
+600 frames frame time (tenths of a ms), memory, textures and audio, the
+player's own output and exceptions, and a heartbeat (every 2 s for two
+minutes, then every 10 s: the frame count and where the game thread is, a
+host call, a renderer step or a runtime wait). The heartbeat lines are
+written through to the drive, so a log that stops means the console froze,
+and one that keeps beating on one stage shows where it is stuck. Back
 writes the log at once; hold Back + Start to quit.
 
 Everything built and staged here holds the player's own game code and

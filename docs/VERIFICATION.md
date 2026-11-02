@@ -3,6 +3,40 @@
 Newest first. Each entry says what was run, on which build, and what it
 showed. Windows entries use the JIT oracle (`work/managed/jit`).
 
+## 2026-11-02 managed player, round 7 (first hardware run, 64-bit compares)
+
+The user's first hardware run (`work/console/hw01/`): the XEX started,
+reserved the player's memory (379 MB free at start, 358 MB after), opened
+Vulkan at 1280x720, loaded scene_start and scene_title, logged "Build
+version 1.3.2", then nothing more; a black screen until the console was
+switched off. Two title atlases were "missing": the player had asked for
+`..._-12598203202371876835.ctx` and `..._15854386641536097845.ctx`, path ids
+5848540871337674781 and -2592357432173453771 formatted as if their sign came
+from the low 32 bits (2^64 - id both times). The built code
+(`f62085`, `Int64.ToString`) loads the id with `ldbrx` into one register,
+tests it with `cmpdi r29,0` and formats that same register, so the compare
+itself got the sign wrong: xsdk documents that a title runs with MSR[SF]
+clear (32-bit mode), and there the console's doubleword compares saw the low
+words. The xsdk GCC (-m32 -mpowerpc64) keeps 64-bit values in one register
+and compares them with `cmpd`/`cmpdi`/`cmpld`/`cmpldi` (3,915 in this XEX's
+translated code, 218 functions in xsdk/vulkan4xenon/newlib). Besides wrong
+values, the wasm runtime's deadline compares on nanosecond clocks can then
+sleep for ~2^64 ns, a candidate for the stall.
+
+| Command | Result |
+| --- | --- |
+| `safecmp.py --self-test` | the rewrites as expected; every signed and unsigned outcome on 14 values differing in high/low words matches a 64-bit compare |
+| xsdk GCC through `safecmp.py` on test sources, `probe64.c`, `main.cpp` | assembled; 0 doubleword compares left; rewritten sequences read correct by disassembly |
+| `build_managed.py --stage jit,wasm,c` | OK (adds `ConsoleHost.SelfCheck`, "I64CHECK") |
+| `build_console.py --stage native` + `host_native --frames 900` (`work/console/hw01/pc_900b.log`) | I64CHECK ok, scene_title, frame 600, 0 exceptions, bad lists 0 |
+| `build_console.py --stage xsdk` | `default.xex` 99,717,120 bytes; every C/C++ object through safecmp.py (record forms kept: CR0 from the low word in 32-bit mode is what GCC expects; out-of-range conditional branches inverted over a `b`) |
+| objdump of the linked image | doubleword compares 5,915 -> 1,122, all in 210 prebuilt library functions (xsdk, vulkan4xenon, newlib) except the probe's three deliberate ones |
+| `stage_console.py --to E:\Apps\cuphead360` | XEX byte-identical on the USB; the data already there (5,911 files, 0 copied; the free-space check now counts only what changes) |
+
+Not verified: that the console's compares behave as concluded (the next
+run's "cpu probe" lines test the raw instructions against the rewritten
+ones), what stalled the first run, anything past the title on hardware.
+
 ## 2026-11-01 managed player, round 6 (audio, memory, first console build)
 
 Source: `acd078c` plus the round-6 commit. Windows JIT oracle, the

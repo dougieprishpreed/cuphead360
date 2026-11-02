@@ -32,6 +32,9 @@ time (builds, conversions, ILC) so the user's PC stays usable;
     console host. Round 6 commit after it: NativeAOT fixes from the
     translated build, console GC/texture budgets, live window on console
     textures, docs.
+  - Round 7 commit after `2ccaad1`: the 64-bit compare rewrite
+    (`console/xsdk/safecmp.py`), the CPU probe, the heartbeat log,
+    I64CHECK; staged on the USB for the second hardware run.
 - Side branch `interpreter-d1-r4-wip` (`ecbff5b`): the interrupted D1 r4
   interpreter edits, committed as found, not accepted, not continued.
 - Uncommitted: nothing intended. `managed/lib`, `managed/**/Generated`,
@@ -43,16 +46,24 @@ time (builds, conversions, ILC) so the user's PC stays usable;
   to `..\cuphead360-interpreter-leftovers\`; its contents were deleted at the
   user's request in round 6 (the empty folder is the user's to remove).
 
-## Console build (round 6)
+## Console build (rounds 6-7)
 
-`E:\Apps\cuphead360` on the user's USB holds the first console build for a
-hardware test: `default.xex` (xSDK + vulkan4xenon, 99.5 MB) and `GameData`
-(objects, ctex, audio, fonts), `save\`, `licenses\`. The layout, build and
-pipeline are in `console/README.md`. The translated C passed the full
-opening loop headless on PC with 0 exceptions; nothing has run on the
-console yet. When the user reports, read `E:\Apps\cuphead360\cuphead360.txt`
-(copy it into work/ first) for start-up memory, per-600-frame timing,
-textures, audio underruns and the player's own exceptions.
+`E:\Apps\cuphead360` on the user's USB holds the console build:
+`default.xex` (xSDK + vulkan4xenon) and `GameData` (objects, ctex, audio,
+fonts), `save\`, `licenses\`. The layout, build and pipeline are in
+`console/README.md`. When the user reports, copy
+`E:\Apps\cuphead360\cuphead360.txt`, `default.log` and `save\` into
+`work/console/hwNN/` first.
+
+The first hardware run (`work/console/hw01/`, round 7) reached scene_title
+and stalled on a black screen. Its log showed that a title's doubleword
+compares (`cmpd`, `cmpdi`, `cmpld`, `cmpldi`) see the low words only (the
+title runs in 32-bit mode): path ids came out with the low word's sign, so
+two title atlases were "missing" (VERIFICATION round 7). Every source we
+compile now goes through `safecmp.py`, which rewrites those compares into
+word compares; xsdk, vulkan4xenon, newlib and libgcc are prebuilt without it
+(218 functions with such compares, mostly xsdk's shader linker and printf).
+The stall's place is unknown: the next log's heartbeat names it.
 
 ## Verified (Windows, JIT oracle)
 
@@ -75,22 +86,40 @@ Xenia, hardware, memory.
 
 ## Next round (in order)
 
-1. **The first hardware test.** The user runs `E:\Apps\cuphead360\default.xex`.
-   Expect memory to be the first limit (XEX ~100 MB + linear memory up to
-   ~315 MB + textures up to 112 MB of 512 MB): the log's per-600-frame lines
-   say how much is free. A silent freeze means a CPU fault (xSDK has no
-   fault handler): trace with write+fsync to the drive around the last log
-   lines. Fix from the log, rebuild (`build_managed.py --stage wasm,c`,
-   `build_console.py --stage native` to check, then `--stage xsdk`) and
-   restage (`stage_console.py --to E:\Apps\cuphead360` copies only what
-   changed).
-2. **Console gaps known now**: stencil masks (UGUI Mask children draw
+1. **The second hardware run.** Read the log in this order: the five
+   "cpu probe" lines (instruction vs rewritten: if the instructions give LT/EQ
+   where GT is wanted and the rewritten ones GT, the conclusion holds; if the
+   instructions are right too, the sign bug had another cause and the
+   rewrite is only a cost), "I64CHECK", the texture loads (names and ms per
+   KB from the USB), frames 1-300, then the heartbeat: a log that stops
+   means a freeze (a CPU fault: no fault handler), one that keeps beating on
+   one stage names the stall. Expect memory to be the next limit (XEX ~100
+   MB + linear memory up to ~315 MB + textures up to 112 MB of 512 MB). Fix,
+   rebuild (`build_managed.py --stage wasm,c`, `build_console.py --stage
+   native` to check, then `--stage xsdk`) and restage (`stage_console.py --to
+   E:\Apps\cuphead360` copies only what changed). If the probe confirms
+   the compares, consider building xsdk and vulkan4xenon (own copies under
+   /opt/cuphead360-xsdk, never the shared checkouts) through safecmp.py too.
+2. **Packs and 720p textures** (the user's request, after the second run's
+   load times are known): staging writes one pack each for textures,
+   objects and audio (an index, compressed blocks, the files grouped as a
+   scene reads them) instead of 5,900 loose files: converted texture names
+   run to ~90 characters, past FATX's 42 (the internal drive), each open
+   searches a huge FAT32 folder, and USB 2 is ~25-30 MB/s. PC development
+   keeps the loose files. Texture pages get sized from their largest
+   on-screen scale at 1280x720 (from the game's sprite sizes and
+   transforms) rather than one factor for all: the current pages are half
+   the source everywhere, so some are likely below what 720p shows and
+   others above. Weigh fidelity against performance with measurements;
+   compression, packing and streaming cut load time and memory without
+   costing detail.
+3. **Console gaps known now**: stencil masks (UGUI Mask children draw
    unclipped), render textures and the post-effect camera (also missing on
    Windows), per-object reads of large converted files (many small USB
    reads at scene loads), the managed heap (~260 MB in a level: its biggest
    holders are not yet measured).
-3. **User play reports on Windows** (`play`): root causes, then a sweep.
-4. **More of the game** beyond the opening loop.
+4. **User play reports on Windows** (`play`): root causes, then a sweep.
+5. **More of the game** beyond the opening loop.
 
 ## Rules that stay
 

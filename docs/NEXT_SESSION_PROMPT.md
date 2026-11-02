@@ -25,10 +25,14 @@ version, plus a practical converter for the user's own game files.
 The full normal gameplay loop (new game through Root Pack and back to the
 map) runs on Windows with sound, headless and in the live window (`play`),
 and as translated C (the console build's code) headless on PC. The first
-console build is staged on the user's USB at `E:\Apps\cuphead360` for a
-hardware test (xSDK + vulkan4xenon; `console/README.md`). Continue with
-HANDOFF.md's "Next round" list: the hardware test's log first, then the
-known console gaps, Windows play reports, more of the game. Rebuild
+hardware run stalled at the title and showed that the console compares
+64-bit registers on their low words (a title runs in 32-bit mode); the build
+now rewrites those compares (`console/xsdk/safecmp.py`) and logs a CPU probe
+and a heartbeat. The second build is staged on the user's USB at
+`E:\Apps\cuphead360` (xSDK + vulkan4xenon; `console/README.md`). Continue
+with HANDOFF.md's "Next round" list: the second run's log first, then packs
+and 720p-sized textures, the known console gaps, Windows play reports, more
+of the game. Rebuild
 with `python tools/build_managed.py --stage jit` after engine changes; check
 with `selftest`, the bot loop (`run --frames 15301 --save
 work/managed/save_bot --bot tests/input/bot_veggies.txt`, deleting the save

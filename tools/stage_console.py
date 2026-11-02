@@ -58,13 +58,20 @@ def main():
     if not os.path.exists(a.xex):
         sys.exit("no XEX at %s (tools/build_console.py --stage xsdk)" % a.xex)
     stats = {"files": 0, "bytes": 0, "copied": 0}
-    total = sum(os.path.getsize(os.path.join(dp, f)) for sub in ("objects", "ctex", "audio")
-                for dp, _, fs in os.walk(os.path.join(a.data, sub)) for f in fs)
+    # Room for what isn't there yet (a file replaced frees its old copy's space).
+    need = os.path.getsize(a.xex) - (os.path.getsize(os.path.join(a.to, "default.xex"))
+                                     if os.path.exists(os.path.join(a.to, "default.xex")) else 0)
+    for sub in ("objects", "ctex", "audio"):
+        for dp, _, fs in os.walk(os.path.join(a.data, sub)):
+            for f in fs:
+                s = os.path.join(dp, f)
+                d = os.path.join(a.to, "GameData", sub, os.path.relpath(s, os.path.join(a.data, sub)))
+                need += os.path.getsize(s) - (os.path.getsize(d) if os.path.exists(d) else 0)
     if not a.dry_run:
         os.makedirs(a.to, exist_ok=True)
         free = shutil.disk_usage(a.to).free
-        if free < total * 1.02:
-            sys.exit("%s has %.1f GB free; the data needs %.1f GB" % (a.to, free / 2**30, total / 2**30))
+        if free < max(need, 0) + (64 << 20):
+            sys.exit("%s has %.1f GB free; staging needs %.1f GB more" % (a.to, free / 2**30, need / 2**30))
     gd = os.path.join(a.to, "GameData")
     copy_tree(os.path.join(a.data, "objects"), os.path.join(gd, "objects"), (".chob",), a.dry_run, stats)
     copy_tree(os.path.join(a.data, "ctex"), os.path.join(gd, "ctex"), (".ctx",), a.dry_run, stats)

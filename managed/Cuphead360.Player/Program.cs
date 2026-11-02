@@ -162,6 +162,7 @@ namespace Cuphead360.Player
             foreach (var arial in new[] { System.IO.Path.Combine(data, "fonts", "arial.ttf"),
                                           System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), "arial.ttf") })
                 if (System.IO.File.Exists(arial)) { FontState.OsFallback = new TrueType(System.IO.File.ReadAllBytes(arial)); break; }
+            if (console) ConsoleHost.SelfCheck();
             AssetDb.Init(System.IO.Path.GetFullPath(data));
             if (audioOut != null) Audio.StartCapture(audioOut);
             Cuphead360.Engine.SceneLoader.Load(0, false);
