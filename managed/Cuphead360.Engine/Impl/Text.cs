@@ -355,7 +355,7 @@ namespace Cuphead360.Engine
             s = new FontState(f);
             var src = (Objects.Of(f) as NAsset)?.Source;
             var data = Tree.Get(src?.Tree, "m_FontData");
-            byte[] ttf = data as byte[];
+            byte[] ttf = data as byte[] ?? (data as ChobBlob)?.Read();
             if (ttf == null && data is List<object> l) { ttf = new byte[l.Count]; for (int i = 0; i < l.Count; i++) ttf[i] = (byte)(l[i] is long v ? v : 0); }
             if (ttf != null && ttf.Length > 12)
                 try { s.TT = new TrueType(ttf); } catch (Exception e) { AssetDb.Problem("font " + Objects.Of(f)?.Name + " TTF unreadable: " + e.Message); }

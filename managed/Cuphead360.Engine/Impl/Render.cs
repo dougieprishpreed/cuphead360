@@ -298,9 +298,13 @@ namespace Cuphead360.Engine
                 if (at + 8 > data.Length) break;
                 i.Vertices[v] = new Vector2(BitConverter.ToSingle(data, at), BitConverter.ToSingle(data, at + 4));
             }
-            var ib = Tree.List(rd, "m_IndexBuffer");
-            var bytes = new byte[ib.Count];
-            for (int k = 0; k < ib.Count; k++) bytes[k] = (byte)(ib[k] is long l ? l : 0);
+            var bytes = Tree.Get(rd, "m_IndexBuffer") as byte[];
+            if (bytes == null)
+            {
+                var ib = Tree.List(rd, "m_IndexBuffer");
+                bytes = new byte[ib.Count];
+                for (int k = 0; k < ib.Count; k++) bytes[k] = (byte)(ib[k] is long l ? l : 0);
+            }
             i.Triangles = new ushort[bytes.Length / 2];
             for (int k = 0; k < i.Triangles.Length; k++) i.Triangles[k] = BitConverter.ToUInt16(bytes, k * 2);
         }

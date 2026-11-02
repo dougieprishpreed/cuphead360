@@ -46,14 +46,23 @@ namespace Cuphead360.Engine
             var seen = new HashSet<string>();
             void Walk(Assembly asm)
             {
-                foreach (var r in asm.GetReferencedAssemblies())
+                AssemblyName[] refs;
+                // (NativeAOT has no references to list: every assembly is compiled in and loaded)
+                try { refs = asm.GetReferencedAssemblies(); }
+                catch (PlatformNotSupportedException) { foreach (var a in AppDomain.CurrentDomain.GetAssemblies()) seen.Add(a.GetName().Name); return; }
+                foreach (var r in refs)
                     if (seen.Add(r.Name))
                         try { Walk(Assembly.Load(r)); } catch (Exception) { }
             }
             Walk(Assembly.Load("Assembly-CSharp"));
             // Unity loads every assembly of the player's Managed folder at
             // startup; Rewired looks for its platform library among them.
-            foreach (var dll in Directory.GetFiles(AppContext.BaseDirectory, "*.dll"))
+            // (An AOT build has no DLL files: the player's own list of them.)
+            string[] dlls;
+            try { dlls = Directory.GetFiles(AppContext.BaseDirectory, "*.dll"); } catch (Exception) { dlls = new string[0]; }
+            if (!Array.Exists(dlls, d => Path.GetFileName(d).StartsWith("Rewired_Core")))
+                dlls = new[] { "Rewired_Core", "Rewired_Windows", "Rewired_Windows_Lib", "Rewired_Config_Manager", "Rewired_Config_ManagerA", "GalaxyCSharp", "Assembly-CSharp-firstpass" };
+            foreach (var dll in dlls)
             {
                 string an = Path.GetFileNameWithoutExtension(dll);
                 if (!(an.StartsWith("Rewired") || an.StartsWith("UnityEngine") || an.StartsWith("Assembly-CSharp") || an.StartsWith("Galaxy"))) continue;

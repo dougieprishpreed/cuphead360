@@ -130,6 +130,7 @@ namespace Cuphead360.Player
                             {
                                 path = Plan(here, new Vector2(target.Value.x, target.Value.y), radius);
                                 planned = t; stuckFrames = 0;
+                                if (path != null && path.Count == 0) { path = null; Next($"closest reachable point ({here.x:0.00},{here.y:0.00}), {d.magnitude:0.00} away"); continue; }
                                 if (path == null) { Console.WriteLine($"BOT no path from ({here.x:0.00},{here.y:0.00}) to {s[1]}"); path = new List<Vector2> { new Vector2(target.Value.x, target.Value.y) }; }
                             }
                             lastHere = here;
@@ -235,6 +236,8 @@ namespace Cuphead360.Player
             }
             // The goal may sit inside a building's collider (map level entrances): go as close as the scenery allows.
             if (end == null && closest != (0, 0) && closestH * cell < 2.5f) end = closest;
+            // Already as close as the scenery allows (standing at a building's entrance).
+            if (end == null && closest == (0, 0) && closestH * cell < 2.5f) return new List<Vector2>();
             if (end == null) return null;
             var cells = new List<(int, int)>();
             for (var c = end.Value; ; c = came[c]) { cells.Add(c); if (!came.ContainsKey(c)) break; }

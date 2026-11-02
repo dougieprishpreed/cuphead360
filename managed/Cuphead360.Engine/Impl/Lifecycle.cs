@@ -212,6 +212,7 @@ namespace Cuphead360.Engine
         public static NComponent Create(Type t)
         {
             if (typeof(Camera).IsAssignableFrom(t)) return new NCamera();
+            if (typeof(AudioSource).IsAssignableFrom(t)) return new NAudioSource();
             if (typeof(SpriteRenderer).IsAssignableFrom(t)) return new NSpriteRenderer();
             if (typeof(Renderer).IsAssignableFrom(t)) return new NRenderer();
             if (typeof(Animator).IsAssignableFrom(t)) return new NAnimator();

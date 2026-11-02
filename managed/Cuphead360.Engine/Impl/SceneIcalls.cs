@@ -12,6 +12,7 @@ namespace Cuphead360.Engine
     /// <summary>Scene loading from the converted build scenes (levelN.chob).</summary>
     public static class SceneLoader
     {
+        static readonly bool traceMem = Environment.GetEnvironmentVariable("CH360_TRACE_MEM") == "1";
         sealed class Pending
         {
             public int BuildIndex;
@@ -74,7 +75,8 @@ namespace Cuphead360.Engine
             if (!additive) { Scenes.ActiveHandle = scene.Handle; Clock.TimeSinceLevelLoadBase = Clock.Time; }
             var build = SceneBuild.Scene(file, scene.Handle);
             Loads++;
-            Log.Line($"SCENE loaded {name} (build {index}): {build.GameObjects.Count} GameObjects, {build.Components.Count} components");
+            Log.Line($"SCENE loaded {name} (build {index}): {build.GameObjects.Count} GameObjects, {build.Components.Count} components"
+                + (traceMem ? $"; heap {GC.GetTotalMemory(true) >> 20} MB, files read {ChobFile.LoadedFiles} ({ChobFile.LoadedBytes >> 20} MB), live objects {Objects.LiveCount}" : ""));
             build.Activate();
             // Managed callbacks the native player makes after a load.
             var mode = additive ? LoadSceneMode.Additive : LoadSceneMode.Single;

@@ -107,7 +107,7 @@ namespace Cuphead360.Player
         {
             string data = "work/GameData", save = "work/managed/save";
             int frames = 600, report = 60, seed = 360;
-            bool live = false;
+            bool live = false, console = false;
             for (int i = 0; i + 1 < a.Length; i += 2)
                 switch (a[i])
                 {
@@ -122,9 +122,13 @@ namespace Cuphead360.Player
                     case "--capture-every": Capture.Every = int.Parse(a[i + 1]); break;
                     case "--capture-out": Capture.Path = System.IO.Path.GetFullPath(a[i + 1]); break;
                     case "--live": live = true; break;
+                    case "--console": console = a[i + 1] != "0"; break;
                     case "--shot": foreach (var f in a[i + 1].Split(',')) LiveHost.Shots.Add(int.Parse(f)); break;
                     case "--max-frames": LiveHost.MaxFrames = int.Parse(a[i + 1]); break;
                     case "--unlocked": LiveHost.Unlocked = a[i + 1] != "0"; break;
+                    case "--hidden": LiveHost.Hidden = a[i + 1] != "0"; break;
+                    case "--audio-out": audioOut = a[i + 1]; break;
+                    case "--mute": LiveHost.Muted = a[i + 1] != "0"; break;
                     case "--inspect": inspect = a[i + 1]; break;
                     case "--dump-at":
                         foreach (var f in a[i + 1].Split(',')) dumpAt.Add(int.Parse(f));
@@ -154,18 +158,34 @@ namespace Cuphead360.Player
             Platform.Guard(Platform.SaveRoot);
             Platform.AssemblyDumpDir = System.IO.Path.GetFullPath("work/managed/dumped");
             // Unity's dynamic fonts fall back to an OS font for characters no game font has.
-            string arial = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), "arial.ttf");
-            if (System.IO.File.Exists(arial)) FontState.OsFallback = new TrueType(System.IO.File.ReadAllBytes(arial));
+            // (the console has no OS fonts: the staging step copies the PC's Arial into GameData/fonts)
+            foreach (var arial in new[] { System.IO.Path.Combine(data, "fonts", "arial.ttf"),
+                                          System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), "arial.ttf") })
+                if (System.IO.File.Exists(arial)) { FontState.OsFallback = new TrueType(System.IO.File.ReadAllBytes(arial)); break; }
             AssetDb.Init(System.IO.Path.GetFullPath(data));
+            if (audioOut != null) Audio.StartCapture(audioOut);
             Cuphead360.Engine.SceneLoader.Load(0, false);
             var sw = System.Diagnostics.Stopwatch.StartNew();
+            if (console)
+            {
+                int rc = ConsoleHost.Play(f =>
+                {
+                    PlayerLoop.Frame(ConsoleHost.Delta);
+                    return !Icalls.QuitRequested;
+                });
+                Audio.EndCapture();
+                return rc;
+            }
             if (live)
-                return LiveHost.Play(f =>
+            {
+                int rc = LiveHost.Play(f =>
                 {
                     PlayerLoop.Frame(1f / 60f);
-                    if (Capture.Wanted(f)) { }
                     return !Icalls.QuitRequested;
                 }, System.IO.Path.GetFullPath(data));
+                Audio.EndCapture();
+                return rc;
+            }
             for (int f = 1; f <= frames && !Icalls.QuitRequested; f++)
             {
                 PlayerLoop.Frame(1f / 60f);
@@ -174,8 +194,15 @@ namespace Cuphead360.Player
                 if (report > 0 && f % report == 0)
                     Console.WriteLine($"FRAME {f} t={UnityEngine.Time.time:0.00} scene={Cuphead360.Engine.Scenes.Active?.Name} objects={Objects.LiveCount} exceptions={Exceptions.Count} missing={Icall.MissingCount}");
             }
+            Audio.EndCapture();
+            if (ChobObject.ParseStats != null)
+                foreach (var kv in ChobObject.ParseStats.OrderByDescending(k => k.Value.bytes).Take(15))
+                    Console.WriteLine($"PARSED {kv.Key}: {kv.Value.n} trees, {kv.Value.bytes >> 10} KB raw");
             Console.WriteLine($"RUN done: {frames} frames in {sw.Elapsed.TotalSeconds:0.0} s; scene loads {Cuphead360.Engine.SceneLoader.Loads}; active scene {Cuphead360.Engine.Scenes.Active?.Name}; "
                 + $"exceptions {Exceptions.Count}; fields decoded {FieldDecoder.Decoded}, mismatched {FieldDecoder.Mismatched}; data problems {AssetDb.Problems.Count}; missing engine methods {Icall.MissingCount}");
+            long peak = 0;
+            try { peak = System.Diagnostics.Process.GetCurrentProcess().PeakWorkingSet64 >> 20; } catch (Exception) { }
+            Console.WriteLine($"MEMORY managed heap {GC.GetTotalMemory(false) >> 20} MB (after GC {GC.GetTotalMemory(true) >> 20} MB), process peak {peak} MB; audio voices {Audio.VoiceCount}; converted files read {ChobFile.LoadedFiles} ({ChobFile.LoadedBytes >> 20} MB)");
             try
             {
                 Console.WriteLine($"INPUT Rewired ready={Rewired.ReInput.isReady}" + (Rewired.ReInput.isReady
@@ -191,6 +218,7 @@ namespace Cuphead360.Player
 
         static readonly HashSet<int> dumpAt = new HashSet<int>();
         static string inspect;
+        static string audioOut;
 
         /// <summary>Debug report: time scale and every live Animator's state.</summary>
         static void DumpState(int frame)

@@ -114,6 +114,7 @@ namespace Cuphead360.Engine
             RenderFrame?.Invoke();
             ResumeCoroutines(fixedPhase: false, endOfFrame: true);
             ProcessDestroys();
+            Audio.Step(realDelta);   // audio runs in unscaled time
             P(-1);
         }
 

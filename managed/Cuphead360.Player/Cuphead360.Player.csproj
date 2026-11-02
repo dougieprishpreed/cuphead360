@@ -30,6 +30,26 @@
     <TrimmerRootAssembly Include="Assembly-CSharp-firstpass" />
     <TrimmerRootAssembly Include="UnityEngine.CoreModule" />
     <TrimmerRootAssembly Include="Cuphead360.Player" />
+    <!-- reached by name or reflection: Rewired loads its config and platform
+         assemblies, UGUI/TMP and the modules are found by type name -->
+    <TrimmerRootAssembly Include="Rewired_Core" />
+    <TrimmerRootAssembly Include="Rewired_Windows" />
+    <TrimmerRootAssembly Include="Rewired_Windows_Lib" />
+    <TrimmerRootAssembly Include="Rewired_Config_Manager" />
+    <TrimmerRootAssembly Include="Rewired_Config_ManagerA" />
+    <TrimmerRootAssembly Include="GalaxyCSharp" />
+    <TrimmerRootAssembly Include="UnityEngine.UI" />
+    <TrimmerRootAssembly Include="UnityEngine.UIModule" />
+    <TrimmerRootAssembly Include="UnityEngine.Physics2DModule" />
+    <TrimmerRootAssembly Include="UnityEngine.AnimationModule" />
+    <TrimmerRootAssembly Include="UnityEngine.AudioModule" />
+    <TrimmerRootAssembly Include="UnityEngine.TextRenderingModule" />
+    <TrimmerRootAssembly Include="UnityEngine.IMGUIModule" />
+    <TrimmerRootAssembly Include="UnityEngine.JSONSerializeModule" />
+    <TrimmerRootAssembly Include="UnityEngine.SpriteMaskModule" />
+    <TrimmerRootAssembly Include="UnityEngine.ParticleSystemModule" />
+    <TrimmerRootAssembly Include="UnityEngine.AssetBundleModule" />
+    <TrimmerRootAssembly Include="UnityEngine.InputModule" />
   </ItemGroup>
 
   <!-- NativeAOT-LLVM to a WASI preview1 core module, as Spire360 builds it. -->

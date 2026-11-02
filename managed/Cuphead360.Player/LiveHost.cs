@@ -111,6 +111,11 @@ namespace Cuphead360.Player
         delegate void CompressedTexImage2DFn(uint target, int level, uint fmt, int w, int h, int border, int size, void* data);
         delegate void GetShaderInfoLogFn(uint s, int max, out int len, byte* log);
         delegate bool SwapIntervalFn(int interval);
+        delegate void GenFn(int n, out uint id);
+        delegate void BindFn(uint target, uint id);
+        delegate void RenderbufferStorageFn(uint target, uint fmt, int w, int h);
+        delegate void FramebufferRenderbufferFn(uint target, uint attachment, uint rbTarget, uint rb);
+        delegate uint CheckFramebufferStatusFn(uint target);
 
         static CreateShaderFn glCreateShader; static ShaderSourceFn glShaderSource; static CompileShaderFn glCompileShader;
         static CreateProgramFn glCreateProgram; static AttachShaderFn glAttachShader; static LinkProgramFn glLinkProgram; static UseProgramFn glUseProgram;
@@ -152,6 +157,10 @@ namespace Cuphead360.Player
         public static int MaxFrames;
         /// <summary>No vsync: frames as fast as possible (test runs; game time still advances 1/60 s per frame).</summary>
         public static bool Unlocked;
+        /// <summary>No window on screen: the same renderer draws into an offscreen framebuffer (scripted checks on a desktop someone is using).</summary>
+        public static bool Hidden;
+        /// <summary>No sound device (scripted checks); hidden runs are always silent.</summary>
+        public static bool Muted;
 
         public static int Play(Func<int, bool> frame, string gameData, int width = 1280, int height = 720)
         {
@@ -160,9 +169,11 @@ namespace Cuphead360.Player
             var hwnd = CreateWindow(width, height);
             var dc = GetDC(hwnd);
             InitGl(dc);
+            if (Hidden) CreateOffscreen(width, height);
+            if (!Hidden && !Muted) Sound.Start();
             var scripted = Inputs.Source;   // --bot / --input drive a live run when given
             if (scripted == null) Inputs.Source = f => input;
-            Console.WriteLine("PLAY window open: XInput pads and the keyboard drive the game; close the window to quit.");
+            if (!Hidden) Console.WriteLine("PLAY window open: XInput pads and the keyboard drive the game; close the window to quit.");
             var clock = System.Diagnostics.Stopwatch.StartNew();
             int n = 0;
             while (!quit)
@@ -178,13 +189,14 @@ namespace Cuphead360.Player
                 if (!frame(++n)) break;
                 long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
                 GetClientRect(hwnd, out var rc);
+                if (Hidden) rc = new RECT { right = width, bottom = height };
                 var views = RenderList.Build();
                 long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
                 Draw(views, rc.right - rc.left, rc.bottom - rc.top);
                 long t3 = System.Diagnostics.Stopwatch.GetTimestamp();
                 if (Shots.Contains(n)) Shot(n, rc.right - rc.left, rc.bottom - rc.top);
                 if (MaxFrames > 0 && n >= MaxFrames) break;
-                SwapBuffers(dc);   // vsync paces the loop (60 Hz)
+                if (!Hidden) SwapBuffers(dc);   // vsync paces the loop (60 Hz)
                 long t4 = System.Diagnostics.Stopwatch.GetTimestamp();
                 double f = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
                 tLogic += (t1 - t0) * f; tBuild += (t2 - t1) * f; tDraw += (t3 - t2) * f; tSwap += (t4 - t3) * f;
@@ -202,8 +214,96 @@ namespace Cuphead360.Player
             return 0;
         }
 
+        /// <summary>
+        /// The sound device: winmm waveOut, 48 kHz 16-bit stereo, fed from the
+        /// engine's mixer. The game thread queues each mixed frame; a thread
+        /// keeps four 20 ms device buffers full (silence on underrun; the queue
+        /// is capped so a stall can't build up latency).
+        /// </summary>
+        static class Sound
+        {
+            [StructLayout(LayoutKind.Sequential)]
+            struct WAVEFORMATEX { public ushort wFormatTag, nChannels; public uint nSamplesPerSec, nAvgBytesPerSec; public ushort nBlockAlign, wBitsPerSample, cbSize; }
+            [StructLayout(LayoutKind.Sequential)]
+            struct WAVEHDR { public IntPtr lpData; public uint dwBufferLength, dwBytesRecorded; public IntPtr dwUser; public uint dwFlags, dwLoops; public IntPtr lpNext, reserved; }
+            [DllImport("winmm")] static extern int waveOutOpen(out IntPtr h, uint dev, ref WAVEFORMATEX fmt, IntPtr cb, IntPtr inst, uint flags);
+            [DllImport("winmm")] static extern int waveOutPrepareHeader(IntPtr h, IntPtr hdr, int size);
+            [DllImport("winmm")] static extern int waveOutWrite(IntPtr h, IntPtr hdr, int size);
+
+            const int Frames = 960, Buffers = 4;   // 20 ms each
+            static readonly Queue<short> queue = new Queue<short>();
+            static IntPtr dev;
+
+            public static void Start()
+            {
+                var fmt = new WAVEFORMATEX { wFormatTag = 1, nChannels = 2, nSamplesPerSec = Audio.Rate, nAvgBytesPerSec = Audio.Rate * 4, nBlockAlign = 4, wBitsPerSample = 16 };
+                if (waveOutOpen(out dev, 0xFFFFFFFF /* WAVE_MAPPER */, ref fmt, IntPtr.Zero, IntPtr.Zero, 0) != 0) { Console.WriteLine("PLAY no sound device"); return; }
+                Audio.Output = (mix, frames) =>
+                {
+                    lock (queue)
+                    {
+                        for (int i = 0; i < frames * 2; i++) queue.Enqueue((short)Math.Round(Math.Clamp(mix[i], -1f, 1f) * 32767f));
+                        while (queue.Count > Audio.Rate / 4 * 2) queue.Dequeue();   // keep at most 250 ms queued
+                    }
+                };
+                var t = new System.Threading.Thread(Pump) { IsBackground = true, Name = "Cuphead360 sound", Priority = System.Threading.ThreadPriority.AboveNormal };
+                t.Start();
+                Console.WriteLine("PLAY sound: waveOut 48 kHz stereo");
+            }
+
+            static void Pump()
+            {
+                int hsize = Marshal.SizeOf<WAVEHDR>();
+                var hdrs = new IntPtr[Buffers];
+                for (int i = 0; i < Buffers; i++)
+                {
+                    hdrs[i] = Marshal.AllocHGlobal(hsize);
+                    var h = new WAVEHDR { lpData = Marshal.AllocHGlobal(Frames * 4), dwBufferLength = Frames * 4, dwFlags = 1 /* WHDR_DONE: free to fill */ };
+                    Marshal.StructureToPtr(h, hdrs[i], false);
+                }
+                var block = new short[Frames * 2];
+                bool[] prepared = new bool[Buffers];
+                while (true)
+                {
+                    bool wrote = false;
+                    for (int i = 0; i < Buffers; i++)
+                    {
+                        var h = Marshal.PtrToStructure<WAVEHDR>(hdrs[i]);
+                        if ((h.dwFlags & 1) == 0) continue;   // still playing
+                        lock (queue)
+                            for (int k = 0; k < block.Length; k++) block[k] = queue.Count > 0 ? queue.Dequeue() : (short)0;
+                        Marshal.Copy(block, 0, h.lpData, block.Length);
+                        h.dwFlags &= ~1u;
+                        Marshal.StructureToPtr(h, hdrs[i], false);
+                        if (!prepared[i]) { waveOutPrepareHeader(dev, hdrs[i], hsize); prepared[i] = true; }
+                        waveOutWrite(dev, hdrs[i], hsize);
+                        wrote = true;
+                    }
+                    if (!wrote) System.Threading.Thread.Sleep(2);
+                }
+            }
+        }
+
+        /// <summary>An offscreen colour + depth/stencil framebuffer the size of the game screen (hidden runs).</summary>
+        static void CreateOffscreen(int w, int h)
+        {
+            const uint GL_FRAMEBUFFER = 0x8D40, GL_RENDERBUFFER = 0x8D41;
+            var genFb = Fn<GenFn>("glGenFramebuffers"); var bindFb = Fn<BindFn>("glBindFramebuffer");
+            var genRb = Fn<GenFn>("glGenRenderbuffers"); var bindRb = Fn<BindFn>("glBindRenderbuffer");
+            var storage = Fn<RenderbufferStorageFn>("glRenderbufferStorage"); var attach = Fn<FramebufferRenderbufferFn>("glFramebufferRenderbuffer");
+            var status = Fn<CheckFramebufferStatusFn>("glCheckFramebufferStatus");
+            genFb(1, out uint fb); bindFb(GL_FRAMEBUFFER, fb);
+            genRb(1, out uint color); bindRb(GL_RENDERBUFFER, color); storage(GL_RENDERBUFFER, 0x8058 /* RGBA8 */, w, h);
+            attach(GL_FRAMEBUFFER, 0x8CE0 /* COLOR_ATTACHMENT0 */, GL_RENDERBUFFER, color);
+            genRb(1, out uint ds); bindRb(GL_RENDERBUFFER, ds); storage(GL_RENDERBUFFER, 0x88F0 /* DEPTH24_STENCIL8 */, w, h);
+            attach(GL_FRAMEBUFFER, 0x821A /* DEPTH_STENCIL_ATTACHMENT */, GL_RENDERBUFFER, ds);
+            uint st = status(GL_FRAMEBUFFER);
+            Console.WriteLine(st == 0x8CD5 ? $"PLAY hidden: drawing offscreen at {w}x{h}" : $"PLAY hidden: framebuffer incomplete (0x{st:X})");
+        }
+
         static void Shot(int n, int w, int h)
         {
+            if (w <= 0 || h <= 0) { Console.WriteLine($"PLAY shot {n} skipped: the window has no drawable area (minimized)"); return; }
             var px = new byte[w * h * 4];
             fixed (byte* p = px) glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, p);
             var flipped = new byte[px.Length];
@@ -228,8 +328,9 @@ namespace Cuphead360.Player
             const uint style = 0x00CF0000;   // WS_OVERLAPPEDWINDOW
             var r = new RECT { right = w, bottom = h };
             AdjustWindowRect(ref r, style, false);
-            var hwnd = CreateWindowExW(0, "Cuphead360", "Cuphead360", style | 0x10000000 /* WS_VISIBLE */, 100, 100, r.right - r.left, r.bottom - r.top, IntPtr.Zero, IntPtr.Zero, inst, IntPtr.Zero);
-            ShowWindow(hwnd, 5);
+            var hwnd = CreateWindowExW(0, "Cuphead360", "Cuphead360", style | (Hidden ? 0u : 0x10000000u) /* WS_VISIBLE */, 100, 100, r.right - r.left, r.bottom - r.top, IntPtr.Zero, IntPtr.Zero, inst, IntPtr.Zero);
+            if (Hidden) ShowWindow(hwnd, 0);   // SW_HIDE
+            else ShowWindow(hwnd, 5);
             return hwnd;
         }
 

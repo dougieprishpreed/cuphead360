@@ -17,5 +17,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="$(CupheadPublicDir)*.dll" Private="false" />
+    <!-- Ogg Vorbis decoding of the converted AudioClips (MIT). -->
+    <PackageReference Include="NVorbis" Version="0.10.5" />
   </ItemGroup>
 </Project>

@@ -31,6 +31,7 @@ from the player's game.
 """
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -166,11 +167,25 @@ def stage_c(a):
     cdir = os.path.join(OUT, "c")
     shutil.rmtree(cdir, ignore_errors=True)
     os.makedirs(cdir)
-    run([find_w2c2(a), "-f", "2000", os.path.join(OUT, "wasm", "Cuphead360.Player.wasm"), os.path.join(cdir, "player.c")])
+    # w2c2 names the module after the file it reads: translate "player.wasm"
+    # from the output folder so the C symbols are m6_player...
+    shutil.copyfile(os.path.join(OUT, "wasm", "Cuphead360.Player.wasm"), os.path.join(cdir, "player.wasm"))
+    run([find_w2c2(a), "-f", "2000", "player.wasm", "player.c"], cwd=cdir)
+    os.remove(os.path.join(cdir, "player.wasm"))
     spire_tools = os.path.join(os.path.dirname(ROOT), "spire360", "tools")
     if os.path.isdir(spire_tools):
         run([sys.executable, os.path.join(spire_tools, "w2c2_fix_tables.py"), os.path.join(cdir, "player.c")])
-        run([sys.executable, os.path.join(spire_tools, "w2c2_imports.py"), os.path.join(cdir, "player.h")], check=False)
+        # Trapping stubs for the imports neither srt nor the console host
+        # implements (wasi:http and stream calls the game never makes); the
+        # console host (console/ch360_imports.c) defines the "ch360" ones.
+        stubs = os.path.join(cdir, "player_stubs.c")
+        run([sys.executable, os.path.join(spire_tools, "w2c2_imports.py"), os.path.join(cdir, "player.h"), "--stubs", stubs], check=False)
+        if os.path.exists(stubs):
+            with open(stubs, "rb") as f:
+                text = f.read().decode("utf-8")
+            text = re.sub(r"(?ms)^\w[^\n]*\bi5_ch360\w*\([^)]*\) \{.*?^\}\r?\n", "", text)
+            with open(stubs, "wb") as f:
+                f.write(text.encode("utf-8"))
     print(len([f for f in os.listdir(cdir) if f.endswith(".c")]), "C files in", cdir)
 
 
