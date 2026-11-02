@@ -91,9 +91,11 @@ namespace Cuphead360.Engine
         public static object Send(NBehaviour b, MethodInfo m, object arg = null)
         {
             if (m == null) return null;
+            long t0 = PlayerLoop.Profile ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             try { return m.Invoke(b.Managed, arg == null && m.GetParameters().Length == 0 ? null : new[] { arg }); }
             catch (TargetInvocationException e) { Exceptions.Report(e.InnerException, b, m.Name); }
             catch (Exception e) { Exceptions.Report(e, b, m.Name); }
+            finally { if (t0 != 0) PlayerLoop.SlowCall(t0, b.Managed?.GetType().Name, m.Name); }
             return null;
         }
 

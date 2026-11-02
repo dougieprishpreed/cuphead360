@@ -1,40 +1,67 @@
-# The console CPU's doubleword compares as they are, for probe64.c. Assembled
-# as written (only C and C++ go through safecmp.py). xsdk's calling
-# convention: 64-bit arguments in single registers r3, r4; the result in r3.
-# Each returns CR0's LT/GT/EQ/SO nibble (8 LT, 4 GT, 2 EQ, 1 SO), or a count.
+# The console CPU's loads and stores as they are, for probe64.c (assembled as
+# written). xsdk's calling convention: a pointer in r3, a 64-bit value in a
+# single register (r4 for a store's value, r3 for a load's result).
 	.machine cell
-	.section .text.ch360_raw_probe,"ax",@progbits
 
-	.globl ch360_raw_cmpd
-	.type ch360_raw_cmpd,@function
-ch360_raw_cmpd:
-	cmpd 0,3,4
-	mfcr 3
-	srwi 3,3,28
-	blr
-	.size ch360_raw_cmpd,.-ch360_raw_cmpd
+	.macro leaf name
+	.section .text.\name,"ax",@progbits
+	.globl \name
+	.type \name,@function
+\name:
+	.endm
 
-	.globl ch360_raw_cmpld
-	.type ch360_raw_cmpld,@function
-ch360_raw_cmpld:
-	cmpld 0,3,4
-	mfcr 3
-	srwi 3,3,28
+	leaf ch360_raw_ld
+	ld 3,0(3)
 	blr
-	.size ch360_raw_cmpld,.-ch360_raw_cmpld
+	.size ch360_raw_ld,.-ch360_raw_ld
 
-	.globl ch360_raw_cmpdi0
-	.type ch360_raw_cmpdi0,@function
-ch360_raw_cmpdi0:
-	cmpdi 0,3,0
-	mfcr 3
-	srwi 3,3,28
+	leaf ch360_raw_std
+	std 4,0(3)
 	blr
-	.size ch360_raw_cmpdi0,.-ch360_raw_cmpdi0
+	.size ch360_raw_std,.-ch360_raw_std
 
-	.globl ch360_raw_cntlzd
-	.type ch360_raw_cntlzd,@function
-ch360_raw_cntlzd:
-	cntlzd 3,3
+	leaf ch360_raw_ldbrx
+	ldbrx 3,0,3
 	blr
-	.size ch360_raw_cntlzd,.-ch360_raw_cntlzd
+	.size ch360_raw_ldbrx,.-ch360_raw_ldbrx
+
+	leaf ch360_raw_stdbrx
+	stdbrx 4,0,3
+	blr
+	.size ch360_raw_stdbrx,.-ch360_raw_stdbrx
+
+	leaf ch360_raw_lwz
+	lwz 3,0(3)
+	blr
+	.size ch360_raw_lwz,.-ch360_raw_lwz
+
+	leaf ch360_raw_stw
+	stw 4,0(3)
+	blr
+	.size ch360_raw_stw,.-ch360_raw_stw
+
+	leaf ch360_raw_lwbrx
+	lwbrx 3,0,3
+	blr
+	.size ch360_raw_lwbrx,.-ch360_raw_lwbrx
+
+	leaf ch360_raw_stwbrx
+	stwbrx 4,0,3
+	blr
+	.size ch360_raw_stwbrx,.-ch360_raw_stwbrx
+
+# ch360_raw_ld_loop(p, n): n doubleword loads from p, for timing.
+	leaf ch360_raw_ld_loop
+	mtctr 4
+1:	ld 5,0(3)
+	bdnz 1b
+	blr
+	.size ch360_raw_ld_loop,.-ch360_raw_ld_loop
+
+# ch360_raw_lwz_loop(p, n): n word loads from p.
+	leaf ch360_raw_lwz_loop
+	mtctr 4
+1:	lwz 5,0(3)
+	bdnz 1b
+	blr
+	.size ch360_raw_lwz_loop,.-ch360_raw_lwz_loop

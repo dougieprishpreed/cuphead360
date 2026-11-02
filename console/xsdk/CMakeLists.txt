@@ -8,13 +8,6 @@ if(NOT XSDK)
     message(FATAL_ERROR "Configure with -DCMAKE_TOOLCHAIN_FILE=<xsdk>/cmake/xsdk.cmake")
 endif()
 
-# A title runs in 32-bit mode, where the console's doubleword compares see the
-# low words only: every C and C++ source here compiles through safecmp.py,
-# which rewrites them into word compares (r12 kept free for it).
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
-set(CMAKE_C_COMPILER_LAUNCHER "${Python3_EXECUTABLE};${CMAKE_CURRENT_LIST_DIR}/safecmp.py")
-set(CMAKE_CXX_COMPILER_LAUNCHER "${Python3_EXECUTABLE};${CMAKE_CURRENT_LIST_DIR}/safecmp.py")
-
 set(VULKAN4XENON "" CACHE PATH "vulkan4xenon checkout, with build/libvulkan4xenon.a built")
 set(CH360_SHADERS "" CACHE PATH "the shaders' folder: ch360_shaders.c/.h (build.sh)")
 set(CH360_PLAYER_C "" CACHE PATH "the translated player (work/managed/c, tools/build_managed.py --stage wasm,c)")
@@ -35,7 +28,9 @@ add_library(ch360_player STATIC ${PLAYER_SOURCES}
     "${CH360_RUNTIME}/runtime/src/srt_core.c" "${CH360_RUNTIME}/runtime/src/srt_wasi.c"
     "${CH360_RUNTIME}/runtime/src/srt_wasi_p2.c" "${CH360_RUNTIME}/runtime/src/srt_plat_posix.c"
     "${CONSOLE}/ch360_imports.c")
-target_include_directories(ch360_player PRIVATE
+# console/w2c2/w2c2_base.h comes first: Spire360's copy with 64-bit memory
+# accesses as two 32-bit ones.
+target_include_directories(ch360_player PRIVATE "${CONSOLE}/w2c2"
     "${CH360_RUNTIME}/runtime/include" "${CH360_RUNTIME}/runtime/src" "${CH360_RUNTIME}/third_party/w2c2/w2c2"
     "${CH360_PLAYER_C}" "${CONSOLE}")
 target_compile_definitions(ch360_player PRIVATE W2C2_HOST_MEMORY)
@@ -61,6 +56,8 @@ set_property(TARGET cuphead360 APPEND PROPERTY LINK_DEPENDS "${VULKAN4XENON}/bui
 target_link_options(cuphead360 PRIVATE "-Wl,--gc-sections,--no-warn-execstack,-Map,${CMAKE_CURRENT_BINARY_DIR}/cuphead360.map")
 # Big blocks from the kernel's pages, given back whole (big_alloc.c).
 target_link_options(cuphead360 PRIVATE "-Wl,--wrap=malloc,--wrap=free,--wrap=realloc,--wrap=calloc")
-# The runtime's waits and sleeps pass through main.cpp, which marks them in the log's heartbeat.
-target_link_options(cuphead360 PRIVATE "-Wl,--wrap=srt_clock_wait_until,--wrap=srt_plat_sleep_ns")
+# The runtime's waits, sleeps and file calls pass through main.cpp, which marks
+# and counts them in the log's heartbeat.
+target_link_options(cuphead360 PRIVATE "-Wl,--wrap=srt_clock_wait_until,--wrap=srt_plat_sleep_ns"
+    "-Wl,--wrap=srt_plat_open,--wrap=srt_plat_read,--wrap=srt_plat_seek")
 xsdk_add_xex(cuphead360 TITLE_ID ${CH360_TITLE_ID} NAME "Cuphead360")

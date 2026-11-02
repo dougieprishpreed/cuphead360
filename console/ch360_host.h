@@ -59,6 +59,10 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
 int ch360_start(unsigned stack_mb, int hw_thread);
 /* The player's linear memory, in KB (committed as it grows). */
 unsigned ch360_memory_kb(void);
+/* Moves the player's buffered stdout into the log now. One thread drains:
+ * each frame unless the host clears ch360_frame_drain and drains itself. */
+void ch360_drain_output(void);
+extern int ch360_frame_drain;
 
 /* Little-endian readers for the draw list. */
 static unsigned ch360_u32(const unsigned char* p) {

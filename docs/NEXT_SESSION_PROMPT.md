@@ -24,15 +24,16 @@ version, plus a practical converter for the user's own game files.
 
 The full normal gameplay loop (new game through Root Pack and back to the
 map) runs on Windows with sound, headless and in the live window (`play`),
-and as translated C (the console build's code) headless on PC. The first
-hardware run stalled at the title and showed that the console compares
-64-bit registers on their low words (a title runs in 32-bit mode); the build
-now rewrites those compares (`console/xsdk/safecmp.py`) and logs a CPU probe
-and a heartbeat. The second build is staged on the user's USB at
-`E:\Apps\cuphead360` (xSDK + vulkan4xenon; `console/README.md`). Continue
-with HANDOFF.md's "Next round" list: the second run's log first, then packs
-and 720p-sized textures, the known console gaps, Windows play reports, more
-of the game. Rebuild
+and as translated C (the console build's code) headless on PC. Two hardware
+runs showed a black screen: the console ran start-up 30x slower than PC
+(still loading the title when switched off), and 64-bit values read through
+memory came out with their low word's sign (the compare instructions were
+proven right). The third build (64-bit memory accesses as two 32-bit ones,
+a memory probe, load/frame/file timing in the log) is staged on the user's
+USB at `E:\Apps\cuphead360` (xSDK + vulkan4xenon; `console/README.md`).
+Continue with HANDOFF.md's "Next round" list: the third run's log first,
+then packs and 720p-sized textures, the known console gaps, Windows play
+reports, more of the game. Rebuild
 with `python tools/build_managed.py --stage jit` after engine changes; check
 with `selftest`, the bot loop (`run --frames 15301 --save
 work/managed/save_bot --bot tests/input/bot_veggies.txt`, deleting the save

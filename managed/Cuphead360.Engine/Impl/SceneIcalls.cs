@@ -13,6 +13,8 @@ namespace Cuphead360.Engine
     public static class SceneLoader
     {
         static readonly bool traceMem = Environment.GetEnvironmentVariable("CH360_TRACE_MEM") == "1";
+        /// <summary>Log each load's time and the converted files it read (the console host sets it).</summary>
+        public static bool Timing;
         sealed class Pending
         {
             public int BuildIndex;
@@ -67,6 +69,7 @@ namespace Cuphead360.Engine
         {
             string path = AssetDb.BuildScenes[index];
             string name = System.IO.Path.GetFileNameWithoutExtension(path);
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp(), files0 = ChobFile.LoadedFiles, bytes0 = ChobFile.LoadedBytes;
             var file = AssetDb.File("level" + index);
             if (file == null) { Log.Line("SCENE level" + index + " (" + name + ") is not converted"); return; }
             if (!additive) UnloadAll();
@@ -77,7 +80,11 @@ namespace Cuphead360.Engine
             Loads++;
             Log.Line($"SCENE loaded {name} (build {index}): {build.GameObjects.Count} GameObjects, {build.Components.Count} components"
                 + (traceMem ? $"; heap {GC.GetTotalMemory(true) >> 20} MB, files read {ChobFile.LoadedFiles} ({ChobFile.LoadedBytes >> 20} MB), live objects {Objects.LiveCount}" : ""));
+            long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
             build.Activate();
+            if (Timing)
+                Log.Line($"SCENE {name}: built in {Ms(t0, t1)} ms ({ChobFile.LoadedFiles - files0} files read, {(ChobFile.LoadedBytes - bytes0) >> 20} MB), "
+                    + $"activated in {Ms(t1, System.Diagnostics.Stopwatch.GetTimestamp())} ms");
             // Managed callbacks the native player makes after a load.
             var mode = additive ? LoadSceneMode.Additive : LoadSceneMode.Single;
             var s = new Scene { m_Handle = scene.Handle };
@@ -87,6 +94,8 @@ namespace Cuphead360.Engine
                 foreach (var b in Typed.Behaviours.ToArray())
                     if (b.Messages.OnLevelWasLoaded != null && Behaviours.ActiveAndEnabled(b)) Behaviours.Send(b, b.Messages.OnLevelWasLoaded, index);
         }
+
+        static long Ms(long a, long b) => (b - a) * 1000 / System.Diagnostics.Stopwatch.Frequency;
 
         static void UnloadAll()
         {

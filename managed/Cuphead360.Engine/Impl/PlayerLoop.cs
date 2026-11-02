@@ -119,7 +119,7 @@ namespace Cuphead360.Engine
         }
 
         // Phase timing (CH360_PROFILE=1): load, fixed scripts, physics, update, animators, late, UI, render/destroy.
-        public static readonly bool Profile = Environment.GetEnvironmentVariable("CH360_PROFILE") == "1";
+        public static bool Profile = Environment.GetEnvironmentVariable("CH360_PROFILE") == "1";
         static readonly string[] phaseNames = { "pump", "fixed", "physics", "update", "animators", "late", "ui", "end" };
         public static readonly double[] PhaseMs = new double[8];
         static int phase = -1;
@@ -131,6 +131,13 @@ namespace Cuphead360.Engine
             if (phase >= 0) PhaseMs[phase] += (now - phaseStart) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
             phase = next; phaseStart = now;
         }
+        /// <summary>With Profile on, a script call over 50 ms is logged with its type and method.</summary>
+        public static void SlowCall(long start, string type, string method)
+        {
+            long ms = (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000 / System.Diagnostics.Stopwatch.Frequency;
+            if (ms >= 50) Log.Line($"SLOW call {type}.{method}: {ms} ms (frame {Clock.FrameCount})");
+        }
+
         public static string ProfileReport(int frames)
         {
             var sb = new System.Text.StringBuilder("PROFILE ms/frame:");
@@ -261,8 +268,10 @@ namespace Cuphead360.Engine
         {
             if (c.Done) return;
             bool more;
+            long t0 = PlayerLoop.Profile ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             try { more = c.Routine.MoveNext(); }
             catch (Exception e) { Exceptions.Report(e, c.Owner, "coroutine " + c.Routine.GetType().Name); more = false; }
+            if (t0 != 0) PlayerLoop.SlowCall(t0, c.Routine.GetType().FullName, "MoveNext");
             if (!more) { Finish(c); return; }
             object y = c.Routine.Current;
             c.Waiting = y; c.FixedWait = false; c.EndOfFrameWait = false; c.WaitOn = null;

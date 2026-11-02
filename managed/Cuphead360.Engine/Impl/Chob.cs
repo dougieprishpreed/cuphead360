@@ -83,10 +83,14 @@ namespace Cuphead360.Engine
         public static long LoadedBytes; public static int LoadedFiles;
         /// <summary>Files above this many bytes are read per object rather than kept in memory.</summary>
         public static int DiskThreshold = 2 << 20;
+        /// <summary>When set, files that take over 100 ms to read and index are reported (the console host sets it).</summary>
+        public static Action<string> Trace;
 
         public static ChobFile Load(string path, string name)
         {
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             var data = System.IO.File.ReadAllBytes(path);
+            long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
             LoadedBytes += data.Length; LoadedFiles++;
             var r = new Reader(data);
             if (r.U32() != 0x424F4843) throw new InvalidDataException(path + ": not a CHOB file");
@@ -111,6 +115,12 @@ namespace Cuphead360.Engine
                 f.Objects[o.PathId] = o;
                 f.Ordered.Add(o);
             }
+            if (Trace != null)
+            {
+                long t2 = System.Diagnostics.Stopwatch.GetTimestamp(), hz = System.Diagnostics.Stopwatch.Frequency;
+                if ((t2 - t0) * 10 > hz)
+                    Trace($"CHOB {name}: {data.Length >> 10} KB, {n} objects; read {(t1 - t0) * 1000 / hz} ms, indexed {(t2 - t1) * 1000 / hz} ms");
+            }
             return f;
         }
 
@@ -122,6 +132,7 @@ namespace Cuphead360.Engine
             public Reader(byte[] data, int pos, string[] strings) { d = data; p = pos; Strings = strings; }
             /// <summary>Where this buffer sits in the file (byte blobs of 1 MB and more become ChobBlobs read from there).</summary>
             public string BlobPath; public long BlobBase;
+            bool lazyKey;   // the value being read is a font's m_FontData
             public int Pos => p;
 
             /// <summary>Step over one value without building it.</summary>
@@ -162,7 +173,19 @@ namespace Cuphead360.Engine
                     case 4: { float f = BitConverter.Int32BitsToSingle(I32()); return f; }
                     case 5: { double v = BitConverter.Int64BitsToDouble(I64()); return v; }
                     case 6: return Str();
-                    case 7: { int n = (int)U32(); var b = new byte[n]; Buffer.BlockCopy(d, p, b, 0, n); p += n; return b; }
+                    case 7:
+                        {
+                            int n = (int)U32();
+                            // A font's data stays in the file until the font is drawn (other
+                            // byte values, TextAssets and script fields, are read as bytes).
+                            if (n >= 1 << 20 && BlobPath != null && lazyKey)
+                            {
+                                var blob = new ChobBlob { Path = BlobPath, Offset = BlobBase + p, Count = n, Raw = true };
+                                p += n;
+                                return blob;
+                            }
+                            var b = new byte[n]; Buffer.BlockCopy(d, p, b, 0, n); p += n; return b;
+                        }
                     case 8:
                         {
                             int n = (int)U32();
@@ -200,7 +223,13 @@ namespace Cuphead360.Engine
                         {
                             int n = (int)U32();
                             var m = new Dictionary<string, object>(n, StringComparer.Ordinal);
-                            for (int i = 0; i < n; i++) { var k = Strings[U32()]; m[k] = Value(); }
+                            for (int i = 0; i < n; i++)
+                            {
+                                var k = Strings[U32()];
+                                lazyKey = k == "m_FontData";
+                                m[k] = Value();
+                                lazyKey = false;
+                            }
                             return m;
                         }
                     case 10: { int f = I32(); long pid = I64(); return new PPtr(f, pid); }
@@ -218,11 +247,23 @@ namespace Cuphead360.Engine
     public sealed class ChobBlob
     {
         public string Path;
-        public long Offset;   // the first element's tag
+        public long Offset;   // the first byte (Raw) or the first element's tag
         public int Count;
+        public bool Raw;      // stored as bytes (tag 7), not an integer list
 
         public byte[] Read()
         {
+            if (Raw)
+            {
+                var whole = new byte[Count];
+                using (var fs = new FileStream(Path, FileMode.Open, FileAccess.Read, FileShare.Read, 1))
+                {
+                    fs.Seek(Offset, SeekOrigin.Begin);
+                    int got = 0, n;
+                    while (got < Count && (n = fs.Read(whole, got, Count - got)) > 0) got += n;
+                }
+                return whole;
+            }
             var raw = new byte[Math.Min((long)Count * 11, new FileInfo(Path).Length - Offset)];
             using (var fs = new FileStream(Path, FileMode.Open, FileAccess.Read, FileShare.Read, 1))
             {

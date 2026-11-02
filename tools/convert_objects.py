@@ -17,6 +17,8 @@ inside the StreamingAssets asset bundles with --bundles) becomes
   Shader             name only ({"m_Name"}); the port draws with its own
                      shaders, but materials and Shader.Find need the object
   TextAsset          m_Script as exact bytes (tag 7)
+  byte lists         integer lists of 4096+ values 0-255 (fonts' m_FontData,
+                     index buffers) as bytes (tag 7)
 
 CHOB v1 (little-endian):
   'CHOB' u32 version
@@ -104,6 +106,11 @@ class Writer:
             for k, x in v.items():
                 self.u32(self.sid(k))
                 self.value("_omitted" if k in OMIT_KEYS and x not in (None, "", b"") else x)
+        elif isinstance(v, (list, tuple)) and len(v) >= 4096 and all(type(x) is int and 0 <= x <= 255 for x in v):
+            # Byte blobs UnityPy reads as integer lists (a font's m_FontData,
+            # mesh index buffers): raw bytes, which the engine skips in one
+            # step and copies whole. It reads such lists as bytes either way.
+            self.u8(7); self.u32(len(v)); self.buf += bytes(v)
         elif isinstance(v, (list, tuple)):
             self.u8(8); self.u32(len(v))
             for x in v:

@@ -32,9 +32,11 @@ time (builds, conversions, ILC) so the user's PC stays usable;
     console host. Round 6 commit after it: NativeAOT fixes from the
     translated build, console GC/texture budgets, live window on console
     textures, docs.
-  - Round 7 commit after `2ccaad1`: the 64-bit compare rewrite
-    (`console/xsdk/safecmp.py`), the CPU probe, the heartbeat log,
-    I64CHECK; staged on the USB for the second hardware run.
+  - `39bbd48` round 7: a 64-bit compare rewrite (removed in round 8: the
+    compares were right), the heartbeat log, I64CHECK.
+  - Round 8 commit after it: 64-bit memory accesses as two 32-bit ones
+    (`console/w2c2/w2c2_base.h`), the memory probe, live log drain, file
+    I/O stats, slow-frame/CHOB/SCENE timing; staged for the third run.
 - Side branch `interpreter-d1-r4-wip` (`ecbff5b`): the interrupted D1 r4
   interpreter edits, committed as found, not accepted, not continued.
 - Uncommitted: nothing intended. `managed/lib`, `managed/**/Generated`,
@@ -46,7 +48,7 @@ time (builds, conversions, ILC) so the user's PC stays usable;
   to `..\cuphead360-interpreter-leftovers\`; its contents were deleted at the
   user's request in round 6 (the empty folder is the user's to remove).
 
-## Console build (rounds 6-7)
+## Console build (rounds 6-8)
 
 `E:\Apps\cuphead360` on the user's USB holds the console build:
 `default.xex` (xSDK + vulkan4xenon) and `GameData` (objects, ctex, audio,
@@ -55,15 +57,25 @@ fonts), `save\`, `licenses\`. The layout, build and pipeline are in
 `E:\Apps\cuphead360\cuphead360.txt`, `default.log` and `save\` into
 `work/console/hwNN/` first.
 
-The first hardware run (`work/console/hw01/`, round 7) reached scene_title
-and stalled on a black screen. Its log showed that a title's doubleword
-compares (`cmpd`, `cmpdi`, `cmpld`, `cmpldi`) see the low words only (the
-title runs in 32-bit mode): path ids came out with the low word's sign, so
-two title atlases were "missing" (VERIFICATION round 7). Every source we
-compile now goes through `safecmp.py`, which rewrites those compares into
-word compares; xsdk, vulkan4xenon, newlib and libgcc are prebuilt without it
-(218 functions with such compares, mostly xsdk's shader linker and printf).
-The stall's place is unknown: the next log's heartbeat names it.
+Two hardware runs so far (`work/console/hw01/`, `hw02/`; VERIFICATION
+rounds 7-8), both a black screen the user switched off:
+- **Not a freeze but a crawl:** the heartbeat beat for 53 s with the game
+  thread in the player's code; start-up took 12 s (PC: 0.36 s), frame 4
+  (Galaxy, scene_title) over 20 s (PC: 1.35 s). Nothing drew because the
+  title never finished loading.
+- **64-bit values through memory read wrong:** path ids and I64CHECK's
+  longs format with the low word's sign, so two title atlases (and, the same
+  way, audio clips) aren't found. The compares themselves were proven right
+  (hw02 probe), so round 7's compare rewrite was removed. Suspect:
+  doubleword loads/stores at 4-byte-aligned addresses, possibly emulated by
+  the kernel (which would also explain part of the slowness). The player's
+  64-bit memory accesses are now two word accesses.
+- **Start-up cost found on PC:** the title's six font loads stepped over
+  every byte of each font, stored as an integer list, twice. The converter
+  now writes byte data as bytes (objects reconverted: 811 MB), which cut
+  those frames from ~600 to ~150 ms on PC. What remains: scene_start's
+  activation (`Cuphead.Init`, Rewired; ~310 ms on PC) and Rewired's
+  exceptions while it probes Windows input APIs.
 
 ## Verified (Windows, JIT oracle)
 
@@ -86,22 +98,23 @@ Xenia, hardware, memory.
 
 ## Next round (in order)
 
-1. **The second hardware run.** Read the log in this order: the five
-   "cpu probe" lines (instruction vs rewritten: if the instructions give LT/EQ
-   where GT is wanted and the rewritten ones GT, the conclusion holds; if the
-   instructions are right too, the sign bug had another cause and the
-   rewrite is only a cost), "I64CHECK", the texture loads (names and ms per
-   KB from the USB), frames 1-300, then the heartbeat: a log that stops
-   means a freeze (a CPU fault: no fault handler), one that keeps beating on
-   one stage names the stall. Expect memory to be the next limit (XEX ~100
-   MB + linear memory up to ~315 MB + textures up to 112 MB of 512 MB). Fix,
-   rebuild (`build_managed.py --stage wasm,c`, `build_console.py --stage
-   native` to check, then `--stage xsdk`) and restage (`stage_console.py --to
-   E:\Apps\cuphead360` copies only what changed). If the probe confirms
-   the compares, consider building xsdk and vulkan4xenon (own copies under
-   /opt/cuphead360-xsdk, never the shared checkouts) through safecmp.py too.
-2. **Packs and 720p textures** (the user's request, after the second run's
-   load times are known): staging writes one pack each for textures,
+1. **The third hardware run.** Read the log in this order:
+   - the "mem probe" lines: which of ld/std/ldbrx/stdbrx/lwz/stw are wrong
+     at which offsets, and the ns per load at offsets 0-7 (a misaligned cost
+     in the hundreds means the kernel emulates it); "player load64/store64"
+     must be 0 wrong;
+   - I64CHECK (ok means the two-word accesses fixed the sign bug);
+   - CHOB and SCENE timing, SLOW frame phases, the heartbeat's file stats
+     (MB and ms read from USB against total time) and runtime call counts:
+     they split the 30x slowness into USB reads, parsing and game code.
+   Then fix the biggest share. If misaligned accesses are emulated, other
+   GCC-generated misaligned doubleword accesses in our code (host side)
+   matter too. Rebuild (`build_managed.py --stage wasm,c`,
+   `build_console.py --stage native` to check, then `--stage xsdk`) and
+   restage (`stage_console.py --to E:\Apps\cuphead360` copies only what
+   changed).
+2. **Packs and 720p textures** (the user's request, once the console's load
+   times are known): staging writes one pack each for textures,
    objects and audio (an index, compressed blocks, the files grouped as a
    scene reads them) instead of 5,900 loose files: converted texture names
    run to ~90 characters, past FATX's 42 (the internal drive), each open

@@ -17,12 +17,19 @@ U8* srt_mem_ptr(U32 ptr);
 
 static m6_playerInstance instance;
 
-/* The player's stdout: drained into the log each frame (and at the end). */
+/* The player's stdout: drained into the log each frame (and at the end), and
+ * by the console's log thread during long frames (the pipe has a lock). */
 static void drain_stdout(void) {
     char buf[4096];
     size_t n;
     while ((n = srt_stdout_read(buf, sizeof(buf), 0)) > 0) ch360_plat_log(buf, n);
 }
+
+void ch360_drain_output(void) {
+    drain_stdout();
+}
+
+int ch360_frame_drain = 1;
 
 static void stderr_sink(const char* text, size_t len, void* user) {
     (void)user;
@@ -31,7 +38,7 @@ static void stderr_sink(const char* text, size_t len, void* user) {
 
 U32 i5_ch36011_frameX5Fbegin(wasmModuleInstance* inst) {
     (void)inst;
-    drain_stdout();
+    if (ch360_frame_drain) drain_stdout();
     return (U32)ch360_plat_frame_begin();
 }
 

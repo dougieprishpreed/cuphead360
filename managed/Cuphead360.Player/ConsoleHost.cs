@@ -60,17 +60,24 @@ namespace Cuphead360.Player
             };
             Console.WriteLine("CONSOLE host loop");
             int n = 0;
-            long last = System.Diagnostics.Stopwatch.GetTimestamp();
+            long last = System.Diagnostics.Stopwatch.GetTimestamp(), hz = System.Diagnostics.Stopwatch.Frequency;
+            PlayerLoop.Profile = true;
             while (FrameBegin() != 0)
             {
                 long now = System.Diagnostics.Stopwatch.GetTimestamp();
-                float real = (float)((now - last) / (double)System.Diagnostics.Stopwatch.Frequency);
+                float real = (float)((now - last) / (double)hz);
                 last = now;
                 // A console frame slower than the vblank still moves the game at its real speed.
                 Delta = scripted != null ? 1f / 60f : Math.Clamp(real, 1f / 60f, 1f / 15f);
                 PollPads();
                 if (!frame(++n)) break;
+                long built = System.Diagnostics.Stopwatch.GetTimestamp();
                 Draw(RenderList.Build());
+                long drawn = System.Diagnostics.Stopwatch.GetTimestamp();
+                // A frame over half a second says where its time went (the player loop's phases, the draw list).
+                if ((drawn - now) * 2 > hz)
+                    Console.WriteLine($"SLOW frame {n}: {(drawn - now) * 1000 / hz} ms; {PlayerLoop.ProfileReport(1)} drawlist={(drawn - built) * 1000 / hz}");
+                else Array.Clear(PlayerLoop.PhaseMs);
                 if (n % 600 == 0)
                     Console.WriteLine($"CONSOLE frame {n} scene={Cuphead360.Engine.Scenes.Active?.Name} heap {GC.GetTotalMemory(false) >> 20} MB exceptions {Exceptions.Count}");
             }
@@ -78,14 +85,17 @@ namespace Cuphead360.Player
         }
 
         /// <summary>
-        /// 64-bit integer sanity at start-up: the console compares 64-bit
-        /// registers on their low words alone unless the build rewrites the
-        /// compares (console/xsdk/safecmp.py), which showed as path ids
-        /// formatted with the wrong sign. Values come from strings so nothing
-        /// folds at compile time.
+        /// Console set-up and a 64-bit integer check at start-up: the first two
+        /// hardware runs formatted path ids with their low word's sign, which
+        /// "I64CHECK" catches (values come from strings so nothing folds at
+        /// compile time).
         /// </summary>
         public static void SelfCheck()
         {
+            // The console reports slow loads and keeps a smaller decoded-audio cache (32 MB).
+            Cuphead360.Engine.SceneLoader.Timing = true;
+            ChobFile.Trace = Console.WriteLine;
+            Audio.CacheFloats = 8L * 1024 * 1024;
             var bad = new List<string>();
             foreach (var s in new[] { "5848540871337674781", "-2592357432173453771", "4294967296", "-4294967296", "2147483648", "-1" })
                 if (long.Parse(s).ToString() != s) bad.Add("format " + s + " -> " + long.Parse(s));

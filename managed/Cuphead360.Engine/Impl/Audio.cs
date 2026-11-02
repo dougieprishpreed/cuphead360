@@ -93,6 +93,8 @@ namespace Cuphead360.Engine
         static readonly List<Voice> voices = new List<Voice>();
         static readonly Dictionary<AudioClip, Clip> clips = new Dictionary<AudioClip, Clip>();
         static long cachedSamples, useCounter, mixedFrames;
+        /// <summary>Decoded short clips kept, in floats (the console host lowers it).</summary>
+        public static long CacheFloats = 128L * 1024 * 1024;
         static double frameCarry;
         static readonly HashSet<string> reported = new HashSet<string>();
         public static bool ListenerPause;
@@ -158,14 +160,14 @@ namespace Cuphead360.Engine
                 c.Pcm = data;
                 cachedSamples += data.Length;
             }
-            // Keep the decoded cache bounded (about 512 MB of floats).
-            if (cachedSamples > 128L * 1024 * 1024)
+            // Keep the decoded cache bounded (CacheFloats; about 512 MB of floats by default).
+            if (cachedSamples > CacheFloats)
             {
                 var all = new List<Clip>(clips.Values);
                 all.Sort((a, b) => a.LastUse.CompareTo(b.LastUse));
                 foreach (var o in all)
                 {
-                    if (cachedSamples <= 96L * 1024 * 1024) break;
+                    if (cachedSamples <= CacheFloats * 3 / 4) break;
                     if (o.Pcm == null || o == c || voices.Exists(v => v.Clip == o)) continue;
                     cachedSamples -= o.Pcm.Length; o.Pcm = null;
                 }

@@ -37,15 +37,13 @@ python tools/build_console.py --stage native            # optional PC check (cla
 python tools/build_console.py --stage xsdk              # -> work/console/xsdk/default.xex
 ```
 
-Every C and C++ source compiles through `console/xsdk/safecmp.py` (CMake's
-compiler launcher): an xSDK title runs in 32-bit mode, where the console's
-doubleword compares (`cmpd`, `cmpdi`, `cmpld`, `cmpldi`) look at the low
-words only, so the launcher compiles to assembly with r12 kept free and
-rewrites each into word compares of the high, then the low words
-(`safecmp.py --self-test` checks the rewrite on every outcome). xsdk,
-vulkan4xenon, newlib and libgcc are prebuilt without it: avoid 64-bit
-`printf` formats (`%f`, `%lld`) in the host. `probe64.c` logs, before the
-player starts, the instructions as they are beside the rewritten compares.
+The player and runtime compile against `console/w2c2/w2c2_base.h`, a copy
+of Spire360's w2c2 header whose only change makes each 64-bit access to the
+player's memory two 32-bit ones: GCC turns w2c2's 8-byte copies into plain
+doubleword loads and stores, the player keeps many 64-bit values only
+4-byte aligned, and the first two hardware runs read such values wrong
+(docs/VERIFICATION.md, rounds 7-8). `probe64.c` logs, before the player
+starts, how the console's loads and stores behave at every alignment.
 
 `console/xsdk/build.sh` takes `XSDK`, `VULKAN4XENON`, `GLSLANG`,
 `XSDK_TOOLCHAIN` and `CH360_RUNTIME` (Spire360's checkout) to build
@@ -62,6 +60,10 @@ python -I tools/convert_console.py --data work/GameData          # BC7 -> DXT1/D
 python -I tools/convert_audio.py --game game --out work/GameData --bundles
 ```
 
+Converted objects from before round 8 still load, but convert them again:
+byte data (fonts' m_FontData) is now stored as bytes, which loads the title
+fonts several times faster.
+
 ## Stage and run
 
 ```
@@ -70,12 +72,16 @@ python tools/stage_console.py --to E:\Games\Cuphead360
 
 That folder holds `default.xex`, `GameData\` (objects, ctex, audio, fonts),
 `save\` and `licenses\`. Start `default.xex` from the dashboard. The game
-writes `cuphead360.txt` next to it: the CPU probe, start-up memory, the
-first 40 texture loads with their times, frames 1-3, 10, 60 and 300, every
-600 frames frame time (tenths of a ms), memory, textures and audio, the
-player's own output and exceptions, and a heartbeat (every 2 s for two
-minutes, then every 10 s: the frame count and where the game thread is, a
-host call, a renderer step or a runtime wait). The heartbeat lines are
+writes `cuphead360.txt` next to it: the memory probe, start-up memory,
+I64CHECK, each slow converted-file load (CHOB lines) and scene load (SCENE
+built/activated times), any frame over half a second with its player-loop
+phases (SLOW lines), the first 40 texture loads with their times, frames
+1-3, 10, 60 and 300, every 600 frames frame time (tenths of a ms), memory,
+textures and audio, the player's own output and exceptions (drained live by
+the log thread), and a heartbeat (every 2 s for two minutes, then every 10
+s: the frame count, where the game thread is (the player's code, a host
+call, a renderer step, a runtime wait or file call), the runtime's call
+count and its file opens, reads, megabytes and milliseconds). The heartbeat lines are
 written through to the drive, so a log that stops means the console froze,
 and one that keeps beating on one stage shows where it is stuck. Back
 writes the log at once; hold Back + Start to quit.

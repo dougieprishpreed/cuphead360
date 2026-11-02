@@ -58,6 +58,11 @@ volatile bool g_log_thread = false;
 // player's own code runs, otherwise the host call or runtime wait it is in.
 volatile const char* g_stage = "start";
 volatile unsigned g_frames_seen = 0;
+volatile bool g_player_started = false;
+// The runtime's file calls (srt_plat_*, wrapped below): counts, bytes, time.
+volatile unsigned g_io_opens = 0, g_io_reads = 0, g_io_seeks = 0;
+volatile unsigned long long g_io_bytes = 0;
+volatile double g_io_ms = 0;
 
 void flush_log(bool sync = false) {
     std::string lines;
@@ -76,6 +81,7 @@ void flush_log(bool sync = false) {
 
 void logf(const char* fmt, ...);
 double now_ms();
+extern "C" void srt_get_stats(void* out);
 
 // The USB drive is slow per write: lines queue and a thread writes them every
 // 100 ms. Every 2 s for the first two minutes, then every 10 s, it logs a
@@ -89,7 +95,15 @@ void* log_writer(void*) {
         nanosleep(&ts, NULL);
         unsigned s = (unsigned)((now_ms() - start) / 1000.0);
         bool beat = tick % (s < 120 ? 20 : 100) == 0;
-        if (beat) logf("alive %u s: frame %u, %s", s, g_frames_seen, (const char*)g_stage);
+        // The player's output during a long frame (otherwise drained at the next frame).
+        if (g_player_started) ch360_drain_output();
+        if (beat) {
+            struct { unsigned long long memory, capacity, stdout_bytes, wasi_calls; } st;
+            srt_get_stats(&st);
+            logf("alive %u s: frame %u, %s; wasi calls %u; files: %u opens, %u reads, %u MB in %u ms, %u seeks",
+                 s, g_frames_seen, (const char*)g_stage, (unsigned)st.wasi_calls, g_io_opens, g_io_reads,
+                 (unsigned)(g_io_bytes >> 20), (unsigned)g_io_ms, g_io_seeks);
+        }
         flush_log(beat);
     }
     return NULL;
@@ -1108,7 +1122,7 @@ extern "C" int ch360_plat_frame_begin(void) {
     if (g_frames > 0 && g_frames % 600 == 0) {
         unsigned f, tot;
         memory_mb(&f, &tot);
-        // Times in tenths of a millisecond: newlib's %f takes 64-bit paths built without safecmp.py.
+        // Times in tenths of a millisecond (integers only in the log).
         logf("frame %u: %u ms/frame x10 (worst %u, %u over 17.5); gpu wait %u, present %u; memory %u MB free of %u, player %u MB, "
              "textures %u MB (%u uploads, %u evicted); audio underruns %u",
              g_frames, (unsigned)(g_logic_ms / 60), (unsigned)(g_worst_ms * 10), g_slow, (unsigned)(g_renderer->gpu_wait_ms / 60),
@@ -1184,8 +1198,7 @@ extern "C" void ch360_plat_audio(const unsigned char* s, int frames) {
 extern "C" void ch360_plat_log(const char* text, size_t len) { log_text(text, len); }
 
 // The wasm runtime's waits (poll_oneoff, wasi clocks) and sleeps, marked for
-// the heartbeat; a sleep over two seconds is logged (hex: printf's 64-bit
-// paths come from newlib, built without safecmp.py).
+// the heartbeat; a sleep over two seconds is logged (in hex).
 extern "C" void __real_srt_clock_wait_until(unsigned long long deadline_ns);
 extern "C" void __wrap_srt_clock_wait_until(unsigned long long deadline_ns) {
     Stage stage("runtime: waiting for a deadline");
@@ -1198,8 +1211,35 @@ extern "C" void __wrap_srt_plat_sleep_ns(unsigned long long ns) {
     __real_srt_plat_sleep_ns(ns);
 }
 
-extern "C" int ch360_probe64(void (*log)(const char* line));
+// The runtime's file calls, counted and timed for the heartbeat.
+extern "C" int __real_srt_plat_open(const char* path, int flags, void** out);
+extern "C" int __wrap_srt_plat_open(const char* path, int flags, void** out) {
+    Stage stage("runtime: opening a file");
+    ++g_io_opens;
+    double t0 = now_ms();
+    int r = __real_srt_plat_open(path, flags, out);
+    g_io_ms += now_ms() - t0;
+    return r;
+}
+extern "C" int __real_srt_plat_read(void* f, void* buf, size_t len, size_t* done);
+extern "C" int __wrap_srt_plat_read(void* f, void* buf, size_t len, size_t* done) {
+    Stage stage("runtime: reading a file");
+    ++g_io_reads;
+    double t0 = now_ms();
+    int r = __real_srt_plat_read(f, buf, len, done);
+    g_io_ms += now_ms() - t0;
+    g_io_bytes += *done;
+    return r;
+}
+extern "C" int __real_srt_plat_seek(void* f, long long offset, int whence, unsigned long long* pos);
+extern "C" int __wrap_srt_plat_seek(void* f, long long offset, int whence, unsigned long long* pos) {
+    ++g_io_seeks;
+    return __real_srt_plat_seek(f, offset, whence, pos);
+}
+
+extern "C" int ch360_probe64(void (*log)(const char* line), void (*sync)(void));
 static void probe_line(const char* line) { logf("%s", line); }
+static void probe_sync() { flush_log(true); }
 
 int main() {
     FILE* fresh = fopen("game:/cuphead360.txt", "wb");
@@ -1208,7 +1248,7 @@ int main() {
     unsigned f, t;
     memory_mb(&f, &t);
     logf("memory at start: %u MB free of %u MB", f, t);
-    if (ch360_probe64(probe_line) != 0) logf("cpu probe: rewritten 64-bit compares are wrong; the player's results won't be");
+    if (ch360_probe64(probe_line, probe_sync) != 0) logf("mem probe: the player's 64-bit accesses are wrong here");
     flush_log(true);
     // The player's linear memory is reserved first (committed as it grows):
     // xsdk's heap takes the free address space at its first growth.
@@ -1237,6 +1277,8 @@ int main() {
         logf("no audio output");
     }
     g_stage = "game";
+    ch360_frame_drain = 0;   // the log thread drains the player's output instead
+    g_player_started = true;
     int code = ch360_start(16, 0);
     memory_mb(&f, &t);
     logf("player exit %d after %u frames; memory %u MB free, player %u MB", code, g_frames, f, ch360_memory_kb() / 1024);

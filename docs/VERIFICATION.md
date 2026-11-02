@@ -3,7 +3,39 @@
 Newest first. Each entry says what was run, on which build, and what it
 showed. Windows entries use the JIT oracle (`work/managed/jit`).
 
+## 2026-11-02 managed player, round 8 (second hardware run)
+
+The second run (`work/console/hw02/`) disproved round 7's conclusion: the
+CPU probe's raw `cmpd`, `cmpdi`, `cmpld` and `cmpldi` all gave the 64-bit
+answer (GT on operands that differ only in the high word), and `cntlzd 1`
+was 63. Yet I64CHECK failed the same way (`2147483648` -> `-18446744071562067968`,
+`-4294967296` -> `18446744069414584320`) while its register compares passed:
+the sign comes from the low word only on the way through memory. The
+compare rewrite fixed nothing and was removed. Suspect now: doubleword
+loads and stores at 4-byte-aligned addresses (in the built code w2c2's
+8-byte accesses became `ld`/`std`, e.g. `ld r10,4(r9)`, and the player keeps
+longs 4-byte aligned).
+
+The run did not freeze: the heartbeat ran for 53 s with the game thread in
+the player's code. Start-up (I64CHECK, AssetDb, scene_start) took 12 s
+against 0.36 s for the same C on PC (`host_native`), and frame 4 (Galaxy,
+scene_title) had not finished after 20 s against 1.35 s on PC, so the
+console ran 30x slower or more; the first run's "freeze" was probably the
+same wait.
+
+| Change | Check |
+| --- | --- |
+| 64-bit memory accesses as two 32-bit ones (`console/w2c2/w2c2_base.h`) | xsdk GCC emits `lwbrx`/`stwbrx` pairs for `i64_load`/`i64_store`/`f64_load` (no merged doubleword access) |
+| `probe64.c`: ld/std/ldbrx/stdbrx/lwz/stw/lwbrx/stwbrx and the player's accessors at offsets 0-7 inside a line, at a line end and a page end; ld/lwz cost per offset | compiles; runs on hardware next |
+| The log thread drains the player's output during long frames; heartbeat adds runtime calls and file opens/reads/MB/ms (srt_plat_* wrapped) | `main.cpp` compiles |
+| SLOW frame lines (player-loop phases), slow script calls (over 50 ms), CHOB file and SCENE load times, decoded-audio cache 32 MB on the console | on PC they named the cost: scene_start's activation 310 ms (`Cuphead.Init`: the Core prefab, Rewired), frames 3-4 ~600 ms each, of which six font loads (`FontLoader.Initialize`) ~420 ms |
+| `dotnet-trace` of the JIT player's first 30 frames (`work/managed/trace/`) | font loads 809 ms: `ChobFile.Load` stepping over every element of fonts' m_FontData (written as integer lists) to index the bundle, then again to build the font |
+| `convert_objects.py`: integer lists of 4096+ byte values written as bytes (tag 7); the engine reads a large m_FontData lazily (other bytes stay `byte[]`) | objects 908 -> 811 MB, 0 errors (163 + 420 files, 37.7 + 73.9 s); first 30 frames 1.2 s -> 405 ms (JIT, trace); host_native frame 3 594 -> 154 ms, linear memory at the title 166 -> 118 MB |
+| A first try made every 1 MB+ byte value lazy: TextAssets and script fields then came back as blobs and the bot run hit NullReferenceExceptions in `CupheadGlyph.Init` at slot select; bisected (not the byte lists, not the converter's Shader stubs) and limited to m_FontData | JIT bot loop 15,301 frames: 14 scene loads to Root Pack, 0 exceptions; selftest 23/23; `host_native` bot 16,001 frames, 0 exceptions, bad lists 0, linear memory 330 MB; saves unchanged |
+
 ## 2026-11-02 managed player, round 7 (first hardware run, 64-bit compares)
+
+(Round 8 disproved this round's conclusion: the compares are right.)
 
 The user's first hardware run (`work/console/hw01/`): the XEX started,
 reserved the player's memory (379 MB free at start, 358 MB after), opened
