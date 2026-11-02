@@ -98,7 +98,22 @@ Xenia, hardware, memory.
 
 ## Next round (in order)
 
-1. **The third hardware run.** Read the log in this order:
+0. **Resume here (hw03 read, VERIFICATION "third hardware run").** The
+   game reaches the tutorial on hardware; the map load stops on memory, and
+   the sign bug (a suspected high-half forwarding hazard) loses atlases,
+   TMP labels and music. In order:
+   - Probe the hazard (raw asm in probe64_raw.S): producers `or`, `sldi`,
+     `add`, `ld`, `lwbrx`+`sldi`+`or`, `mulld` writing a register already
+     holding a known value; consumers `cmpdi`, `cmpd`, `srdi`, `std`, `mr`,
+     `add`; 0-12 `nop`s between. The rule decides the fix: most likely an
+     assembly pass (a compiler launcher, like round 7's removed
+     safecmp.py) that separates high-half consumers from their producers.
+   - Memory: `dotnet-gcdump` / CH360_TRACE_MEM on PC at the tutorial and
+     map; cut the managed heap (parsed CHOB trees kept after building,
+     duplicated data), size the texture budget to what's left; the map
+     must fit with headroom. Smaller heap also shortens the GC pauses.
+   - Then load speed (thousands of small USB reads; packs) and frame time.
+1. **The third hardware run (done, see 0).** Read the log in this order:
    - the "mem probe" lines: which of ld/std/ldbrx/stdbrx/lwz/stw are wrong
      at which offsets, and the ns per load at offsets 0-7 (a misaligned cost
      in the hundreds means the kernel emulates it); "player load64/store64"

@@ -3,6 +3,41 @@
 Newest first. Each entry says what was run, on which build, and what it
 showed. Windows entries use the JIT oracle (`work/managed/jit`).
 
+## 2026-11-02 third hardware run (read; work paused)
+
+`work/console/hw03/`: after a long black screen the game reached the title,
+slot select, the intro, Elder Kettle's house and the tutorial (the user
+played it), slowly; leaving the tutorial for the map it stopped on the
+loading screen; tutorial button labels were missing.
+- **Memory probe clean:** ld/std/ldbrx/stdbrx/lwz/stw/lwbrx/stwbrx correct
+  at offsets 0-7, line and page ends; misaligned loads cost 2 ns like
+  aligned ones. Not the cause of anything.
+- **I64CHECK still fails** the same way. The built `Int64.ToString`
+  (`f62085`) assembles the long with `lwbrx; lwbrx; sldi; or` and tests it
+  with `cmpdi r29,0` on the very next instruction, then passes that same
+  register to the formatter, which formats the full value. All six results
+  fit "the compare saw the low word sign-extended". Round 7's probe found
+  `cmpdi` right on values that arrived through a call; round 7's rewrite
+  (`srdi r12,r7,32` right after `rldimi r7`) failed identically. Suspect: in
+  32-bit mode a consumer of a register's high half right after its producer
+  reads a stale/sign-extended high half (a forwarding hazard). Not yet
+  probed.
+- The sign bug breaks every converted name built from a 64-bit path id:
+  the player and title atlases, `jumpdust`, the TextMeshPro SDF font atlas
+  (the tutorial's missing button labels) and music clips ("AUDIO clip not
+  converted").
+- **The map-load stop is memory:** at frame 1200 (tutorial) 9 MB of 512
+  free (player 215 MB, textures 103 MB); at the map load the heartbeat beat
+  on for 150 s with the frame stuck at 1623 and the runtime-call count
+  barely moving (GC with no room, most likely). PC peaks at 330 MB of linear
+  memory in Root Pack.
+- **Speed:** 76-129 ms a frame on average (13 fps or less); recurring
+  500-1250 ms spikes in the "end" phase and the draw list (GC pauses over a
+  ~170 MB heap, most likely); FixedUpdate ~23 ms a frame in the house;
+  scene_start activation 4.9 s, house built in 9.9 s; files: 9,333 reads,
+  28,078 seeks, 204 MB in 33.5 s (~6 MB/s); audio underruns grow with the
+  slow frames.
+
 ## 2026-11-02 managed player, round 8 (second hardware run)
 
 The second run (`work/console/hw02/`) disproved round 7's conclusion: the

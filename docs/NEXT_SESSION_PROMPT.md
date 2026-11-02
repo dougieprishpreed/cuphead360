@@ -28,12 +28,12 @@ and as translated C (the console build's code) headless on PC. Two hardware
 runs showed a black screen: the console ran start-up 30x slower than PC
 (still loading the title when switched off), and 64-bit values read through
 memory came out with their low word's sign (the compare instructions were
-proven right). The third build (64-bit memory accesses as two 32-bit ones,
-a memory probe, load/frame/file timing in the log) is staged on the user's
-USB at `E:\Apps\cuphead360` (xSDK + vulkan4xenon; `console/README.md`).
-Continue with HANDOFF.md's "Next round" list: the third run's log first,
-then packs and 720p-sized textures, the known console gaps, Windows play
-reports, more of the game. Rebuild
+proven right). The third run (`work/console/hw03/`) reached the
+tutorial on hardware, slowly, then stopped at the map load on memory; the
+sign bug persists (memory accesses proven fine; suspected high-half
+forwarding hazard), losing atlases, TMP labels and music. Continue with
+HANDOFF.md's "Next round" item 0: probe the hazard, cut memory, then load
+speed, packs and 720p-sized textures. Rebuild
 with `python tools/build_managed.py --stage jit` after engine changes; check
 with `selftest`, the bot loop (`run --frames 15301 --save
 work/managed/save_bot --bot tests/input/bot_veggies.txt`, deleting the save
