@@ -148,7 +148,9 @@ void* (*volatile g_memcpy)(void*, const void*, size_t) = memcpy;
 const int W = 1280, H = 720, FRAMES = 2;
 const VkFormat TARGET_FORMAT = VK_FORMAT_B8G8R8A8_UNORM;
 const VkDeviceSize VERTEX_RING = 8 * 1024 * 1024;
-const size_t TEXTURE_BUDGET = 200u << 20;   // evict least recently used textures above this
+// Evict least recently used textures above this: the XEX image is ~100 MB and
+// the player's linear memory reaches ~350 MB in a level, of 512 MB.
+const size_t TEXTURE_BUDGET = 112u << 20;
 
 struct Vertex {
     float x, y, u, v;

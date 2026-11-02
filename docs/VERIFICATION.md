@@ -3,6 +3,37 @@
 Newest first. Each entry says what was run, on which build, and what it
 showed. Windows entries use the JIT oracle (`work/managed/jit`).
 
+## 2026-11-01 managed player, round 6 (audio, memory, first console build)
+
+Source: `acd078c` plus the round-6 commit. Windows JIT oracle, the
+translated C as a headless PC program, and the xSDK build (WSL
+CTR360-XSDK: xsdk `8c58c7a`, vulkan4xenon `df25dc5`).
+
+| Command | Result |
+| --- | --- |
+| `tools/convert_audio.py --bundles` | 3,991 clips, 390.5 MB Ogg, 0 errors, 606 s |
+| `run --frames 5600 --bot ... --audio-out work/managed/audio_run.wav` | 93 s of 48 kHz stereo: music and effects through the opening (RMS 0.01-0.08 per 5 s, peak <= 0.73, no clipping); the audio icalls are gone from the missing ledger |
+| `CH360_TRACE_MEM=1 run ...` | managed heap at the world map 2,596 MB -> 255 MB (fonts' m_FontData was a boxed value per byte; lazy object trees; large files read per object); ~310 MB in a level; the full loop still 0 exceptions |
+| `play --hidden 1 --bot ... --max-frames 40000` (`live9.log`) | the GL renderer offscreen (no window on the desktop): title -> house -> map -> Root Pack, 5 knockouts and retries (death card, retry), won at 26541, results, map at 27104; screenshots of results and King Dice's tooltip match the preview |
+| `build_managed.py --stage wasm,c` | player.wasm 53.4 MB (every patched assembly rooted, rd.xml for XmlSerializer's lists); w2c2 62 C files, module m6_player; 75 imports: srt 35, ch360 6 (console host), 34 wasi:http/io trap stubs |
+| `build_console.py --stage native` + `host_native --frames 16000 -- run --console 1 ... --bot` (`native4.log`) | the translated C on PC: 16 scene loads, title -> slot select -> intro -> house -> map -> Root Pack, knockouts at frames 9027, 12875, 15245 (the same frames as the JIT hidden run), 0 exceptions, every draw list well-formed, 126 textures, 250 s of audio; linear memory 347 MB peak (313 MB with the console's GC settings, `native5.log`) |
+| `build_console.py --stage xsdk` | `default.xex` 99,536,896 bytes; shaders through xost (6), main.cpp clean under -Wall -Wextra |
+| `tools/convert_console.py` | 1,379 textures: DXT5 1,137, DXT1 3, BGRA8 197, 42 run-time; 4,049 MB; 0 errors; 1,732 s; sample pages within 1.7-2.7/255 mean error of the source |
+| `tools/stage_console.py --to E:\Apps\cuphead360` | 5,911 files, 5.22 GB copied to the USB: default.xex (byte-identical to the build), GameData/objects (164 top-level entries), ctex (1,337), audio (3,991), fonts/arial.ttf (the PC's own), save/, licenses/ |
+| `tools/save_guard.py check` | `OK, 3 files unchanged (SHA-256)` |
+
+Bugs the translated build found and fixed: NativeAOT has no
+`Assembly.GetReferencedAssemblies` (AssetDb falls back to the loaded
+assemblies); XmlSerializer needs `List<T>` indexers (rd.xml); a house
+tutorial `AddComponent<BoxCollider>` needed UnityEngine.PhysicsModule
+compiled in (all patched assemblies rooted).
+
+Not verified: anything on the console (the XEX has not run yet: the first
+hardware test is the user's), console frame time and memory, audio output
+through xsdk's feeder, the Vulkan renderer on vulkan4xenon (no PC Vulkan
+check of this renderer was run), stencil masks on the console (not
+implemented there: mask graphics are skipped, children draw unclipped).
+
 ## 2026-11-01 managed player, round 5
 
 Source: `8f3201d` (input, 2D physics, dynamic fonts, bot) and `5c2b512`

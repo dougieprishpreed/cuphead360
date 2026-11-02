@@ -23,10 +23,12 @@ hardware, with gameplay and presentation virtually identical to the user's GOG
 version, plus a practical converter for the user's own game files.
 
 The full normal gameplay loop (new game through Root Pack and back to the
-map) runs on Windows, headless and in the live window (`play`). Continue
-with HANDOFF.md's "Next round" list: the user's play reports first (root
-causes, then a sweep for the same cause), then audio, render textures and
-the post-effect camera, more of the game, then the console host. Rebuild
+map) runs on Windows with sound, headless and in the live window (`play`),
+and as translated C (the console build's code) headless on PC. The first
+console build is staged on the user's USB at `E:\Apps\cuphead360` for a
+hardware test (xSDK + vulkan4xenon; `console/README.md`). Continue with
+HANDOFF.md's "Next round" list: the hardware test's log first, then the
+known console gaps, Windows play reports, more of the game. Rebuild
 with `python tools/build_managed.py --stage jit` after engine changes; check
 with `selftest`, the bot loop (`run --frames 15301 --save
 work/managed/save_bot --bot tests/input/bot_veggies.txt`, deleting the save

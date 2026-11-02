@@ -1,0 +1,17 @@
+<!--
+  Runtime directives for NativeAOT (console build): metadata the game reaches
+  only by reflection. XmlSerializer (Dialoguer's saved variables) reflects on
+  the lists it writes, their indexers included.
+-->
+<Directives xmlns="http://schemas.microsoft.com/netfx/2013/01/metadata">
+  <Application>
+    <Assembly Name="System.Private.CoreLib">
+      <Type Name="System.Collections.Generic.List`1[[System.Boolean,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="System.Collections.Generic.List`1[[System.Int32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="System.Collections.Generic.List`1[[System.Single,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="System.Collections.Generic.List`1[[System.Double,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="System.Collections.Generic.List`1[[System.String,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="System.Collections.Generic.List`1[[System.Int64,System.Private.CoreLib]]" Dynamic="Required All" />
+    </Assembly>
+  </Application>
+</Directives>

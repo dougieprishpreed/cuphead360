@@ -163,6 +163,18 @@ black, fader fade-in, the MDHR logo animation (100 frames), its fade-out, then
 the dancing title with the flashing "Press Any Button" (TextMesh Pro), 0
 exceptions, one missing engine method (`AudioSource.PlayOneShotHelper`).
 
+Round 5 added input (Unity's Input API fed from XInput, the keyboard or a
+script; Rewired runs on its Unity input fallback), Physics2D (convex shapes,
+casts, overlaps, triggers/collisions, collision response for dynamic
+bodies), dynamic TTF/CFF fonts, UGUI layout fixes (Unity keeps
+anchoredPosition when parents change; cloned native state), stencil masks,
+camera clip planes, the live Windows host (`play`: Win32 + OpenGL, XInput,
+waveOut sound, `--hidden` offscreen mode for scripted checks), texture and
+audio export (`tools/convert_textures.py`, `tools/convert_audio.py`), audio
+(`Impl/Audio.cs`: AudioSource voices, AudioMixer group volumes/pitches,
+listener pause, NVorbis decoding, 48 kHz stereo mix, `--audio-out` WAV
+capture) and a bot (`--bot`) that plays the opening loop through the pads.
+
 Round 3 added the Galaxy boundary (original unavailable path), AudioMixer
 state from the mixer constant, TextAsset, correct bundle LoadAllAssets, Shader
 stubs and Unity's built-in resources in the converter. `run --frames 300`
@@ -171,21 +183,17 @@ exceptions, 0 data problems and 556 script objects decoded with 0 mismatches.
 
 ## Gaps, in the order the game meets them
 
-1. Input: Rewired's native input layer (redirected P/Invokes) fed from XInput,
-   plus scripted input for repeatable runs, so the title's "press any button"
-   (PlayerManager join) and slot select work.
-2. Audio playback from AudioSource + mixer state (the title already calls
-   `PlayOneShotHelper`; every remaining PROPS entry is audio).
-3. The opening flow (OPENING_FLOW.md): slot select, intro book, Elder Kettle,
-   world map, Root Pack; Physics2D (queries, triggers), ParticleSystem,
-   SpriteMask, render textures as they appear.
-4. The game's post-effect camera (film grain, chromatic aberration, blur):
-   the console renderer needs it; the preview doesn't draw it.
-5. Animator gaps: transition interruptions, multi-node blend trees, root
-   motion (none met on the title).
+1. Render textures (GlowBossTitle) and the game's post-effect camera (film
+   grain, chromatic aberration, blur); `Texture2D.SetPixel/Apply`.
+2. Audio mixer effects (ducking, low-pass snapshots) and 3D spatial blend;
+   voices currently get group volume and pitch only.
+3. Scene-load hitches (texture and clip reads on the game thread).
+4. The rest of the game beyond the opening loop: other bosses, run-and-gun
+   levels, the shop, ParticleSystem, SpriteMask as they appear.
+5. Animator gaps: transition interruptions, multi-node blend trees.
 6. Console: the srt WASI runtime + translated C in an XDK project, a GPU
-   backend for the render list; memory and frame-time measurement
-   (CONSOLE_PLAN.md gates G-A/G-B).
+   backend for the render list (the GL host is the reference); memory and
+   frame-time measurement (CONSOLE_PLAN.md gates G-A/G-B).
 
 ## Toolchain transition (user requirement)
 

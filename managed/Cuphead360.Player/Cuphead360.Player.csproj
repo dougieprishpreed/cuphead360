@@ -50,6 +50,13 @@
     <TrimmerRootAssembly Include="UnityEngine.ParticleSystemModule" />
     <TrimmerRootAssembly Include="UnityEngine.AssetBundleModule" />
     <TrimmerRootAssembly Include="UnityEngine.InputModule" />
+    <!-- every patched assembly whole: game code creates components of any
+         module by type (AddComponent<BoxCollider> in the house tutorial) -->
+    <TrimmerRootAssembly Include="@(Reference->'%(Filename)')" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(PublishAot)' == 'true' or '$(CupheadWasm)' == 'true'">
+    <RdXmlFile Include="rd.xml" />
   </ItemGroup>
 
   <!-- NativeAOT-LLVM to a WASI preview1 core module, as Spire360 builds it. -->

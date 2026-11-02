@@ -10,6 +10,13 @@ before the round-3 cleanup).
 Everything here is a proposal until measured. Each item names the check that
 confirms or overturns it.
 
+Round 6 (2026-11-01) built the first console version on xSDK +
+vulkan4xenon directly (`console/README.md`): no XDK build and no Xenia
+step, since Xenia can't run xSDK titles and the user verifies behaviour with
+the shared Windows build. The content is the converted files as they are
+(objects, `ctex` DXT1/DXT5/BGRA8 pages halved to 2048, Ogg audio), not yet
+the single archive of 2.1.
+
 ## 1. The shipping executable
 
 - **Boot.** Validate `GameData` (converter identity and version), start the

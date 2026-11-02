@@ -27,6 +27,11 @@ time (builds, conversions, ILC) so the user's PC stays usable;
     on its Unity fallback), Physics2D, dynamic TTF/CFF fonts, the bot.
   - `5c2b512` round 5: live Windows window (`play`), texture export,
     collision response, RectTransform/clone/text/mask/clip fixes.
+  - `7d766c8` round 5 docs.
+  - `acd078c` round 6: audio, the 2.2 GB -> 255 MB heap cut, the xSDK
+    console host. Round 6 commit after it: NativeAOT fixes from the
+    translated build, console GC/texture budgets, live window on console
+    textures, docs.
 - Side branch `interpreter-d1-r4-wip` (`ecbff5b`): the interrupted D1 r4
   interpreter edits, committed as found, not accepted, not continued.
 - Uncommitted: nothing intended. `managed/lib`, `managed/**/Generated`,
@@ -34,9 +39,20 @@ time (builds, conversions, ILC) so the user's PC stays usable;
 - Round 3 removed the interpreter-era tree (`src/`, `projects/`, `scripts/`,
   `tests/`, metadata/scene tools, interpreter docs, M1 evidence) with
   `git rm`; history keeps it. The untracked interpreter-era derived data
-  (old extracts, logs, probe scripts, copied DLLs, `build/`; 9.5 GB) was moved,
-  not deleted, to `..\cuphead360-interpreter-leftovers\` for the user to
-  review and delete (deleting it from here was blocked as irreversible).
+  (old extracts, logs, probe scripts, copied DLLs, `build/`; 9.5 GB) was moved
+  to `..\cuphead360-interpreter-leftovers\`; its contents were deleted at the
+  user's request in round 6 (the empty folder is the user's to remove).
+
+## Console build (round 6)
+
+`E:\Apps\cuphead360` on the user's USB holds the first console build for a
+hardware test: `default.xex` (xSDK + vulkan4xenon, 99.5 MB) and `GameData`
+(objects, ctex, audio, fonts), `save\`, `licenses\`. The layout, build and
+pipeline are in `console/README.md`. The translated C passed the full
+opening loop headless on PC with 0 exceptions; nothing has run on the
+console yet. When the user reports, read `E:\Apps\cuphead360\cuphead360.txt`
+(copy it into work/ first) for start-up memory, per-600-frame timing,
+textures, audio underruns and the player's own exceptions.
 
 ## Verified (Windows, JIT oracle)
 
@@ -59,23 +75,22 @@ Xenia, hardware, memory.
 
 ## Next round (in order)
 
-1. **User play reports first.** The user plays `play` (live window, pad)
-   and reports defects; fix each at its root cause, then sweep for the same
-   cause elsewhere (this round: anchoredPosition, cloned native state, clip
-   planes, masks).
-2. **Audio playback**: AudioSource/AudioClip/mixer state, `PlayOneShotHelper`,
-   `Play`/`Stop`/`UnPause`, `AudioListener.pause`; clip sample conversion
-   (Vorbis in the .resS files and bundles); a Windows audio backend
-   (XAudio2 or WASAPI) in the live host.
-3. **Render textures and the post-effect camera** (GlowBossTitle, film
-   grain, chromatic aberration), `Texture2D.SetPixel/Apply`, scene-load
-   hitches (texture reads: stream or preload).
-4. **More of the game**: other bosses, run-and-gun levels, the shop, saves
-   across sessions; Animator interruptions and blend trees.
-5. **Console host (XDK)**: srt runtime + translated C, a GPU backend for the
-   render list (the GL host is the reference); Xenia once, hidden, muted,
-   self-driven, to verify genuine in-game status; then **switch to xSDK +
-   vulkan4xenon** and test on hardware with the user.
+1. **The first hardware test.** The user runs `E:\Apps\cuphead360\default.xex`.
+   Expect memory to be the first limit (XEX ~100 MB + linear memory up to
+   ~315 MB + textures up to 112 MB of 512 MB): the log's per-600-frame lines
+   say how much is free. A silent freeze means a CPU fault (xSDK has no
+   fault handler): trace with write+fsync to the drive around the last log
+   lines. Fix from the log, rebuild (`build_managed.py --stage wasm,c`,
+   `build_console.py --stage native` to check, then `--stage xsdk`) and
+   restage (`stage_console.py --to E:\Apps\cuphead360` copies only what
+   changed).
+2. **Console gaps known now**: stencil masks (UGUI Mask children draw
+   unclipped), render textures and the post-effect camera (also missing on
+   Windows), per-object reads of large converted files (many small USB
+   reads at scene loads), the managed heap (~260 MB in a level: its biggest
+   holders are not yet measured).
+3. **User play reports on Windows** (`play`): root causes, then a sweep.
+4. **More of the game** beyond the opening loop.
 
 ## Rules that stay
 

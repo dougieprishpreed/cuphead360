@@ -83,13 +83,17 @@ static void run_start(void* p) {
 }
 
 int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsigned memory_mb) {
-    static const char* const env[2] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0" };
+    /* The GC collects early and compacts (the console's memory is tight): a
+     * small gen0 budget and conserve-memory mode keep the linear memory, which
+     * never shrinks, close to the live heap. */
+    static const char* const env[4] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCgen0size=0x800000",
+                                        "DOTNET_GCConserveMemory=7" };
     srt_config cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.root_dir = root_dir;
     cfg.argc = argc;
     cfg.argv = argv;
-    cfg.envc = 2;
+    cfg.envc = 4;
     cfg.envp = env;
     cfg.memory_limit = (srt_u64)memory_mb * 1024 * 1024;
     cfg.stderr_sink = stderr_sink;

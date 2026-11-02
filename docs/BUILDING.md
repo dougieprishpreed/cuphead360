@@ -41,7 +41,15 @@ python -I tools/convert_textures.py --game game --out work/GameData --bundles [-
 ```
 
 Writes `work/GameData/textures/*.tex` (GPU formats as stored; crunched DXT
-unpacked), which the live window uploads. Audio samples are not converted yet.
+unpacked), which the live window uploads at full size; without them it
+draws the console textures (`ctex`). Console textures and audio:
+
+```
+python -I tools/convert_console.py --data work/GameData        # ctex/*.ctx: DXT1/DXT5/BGRA8, pages halved to 2048
+python -I tools/convert_audio.py --game game --out work/GameData --bundles   # audio/*.ogg
+```
+
+The console build itself: `console/README.md`.
 
 ## Run and check
 

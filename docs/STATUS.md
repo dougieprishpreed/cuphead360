@@ -1,7 +1,7 @@
 # Status
 
-Playable on Windows without sound; no console build yet. What is true on
-2026-11-01 (round 5), and what isn't. Evidence: [VERIFICATION.md](VERIFICATION.md). Architecture:
+Playable on Windows with sound; a first console build staged, untested on
+hardware. What is true on 2026-11-01 (round 6), and what isn't. Evidence: [VERIFICATION.md](VERIFICATION.md). Architecture:
 [MANAGED_PLAYER.md](MANAGED_PLAYER.md). Plan: [CONSOLE_PLAN.md](CONSOLE_PLAN.md).
 
 ## Works (Windows, JIT oracle)
@@ -26,8 +26,13 @@ Playable on Windows without sound; no console build yet. What is true on
   and in the live window): pads/keyboard through Rewired's Unity fallback,
   2D physics with collision response, dynamic TTF/CFF fonts, UGUI layout
   and masks.
-- Live Windows window (`play`): OpenGL, compressed textures, XInput, 60 fps
-  once warm.
+- Live Windows window (`play`): OpenGL, compressed textures, XInput, sound
+  (waveOut), 60 fps once warm; `--hidden` draws offscreen for checks.
+- Audio: AudioSources through the game's mixer groups, Ogg clips decoded by
+  NVorbis (`tools/convert_audio.py`).
+- Console build: the player compiled to wasm, translated to C, built with
+  xSDK into `default.xex` with a Vulkan host (`console/`); the translated C
+  plays the opening loop headless on PC with 0 exceptions.
 - Windows preview: `run --capture` + `tools/preview.py` draw what the engine
   would render to PNG (BC7 atlases decoded from the player's game files).
 - Converter: all serialized files, built-in resources and asset bundles to
@@ -36,11 +41,12 @@ Playable on Windows without sound; no console build yet. What is true on
 
 ## Not done
 
-- Audio playback.
+- Anything verified on the console itself (first hardware test pending);
+  stencil masks on the console.
 - Render textures and the game's post-effect camera (film grain, chromatic
   aberration, blur); `Texture2D.SetPixel`.
 - Scenes beyond the opening loop are untested; scene loads hitch 0.6-2 s.
-- Audio conversion and the console content archive.
-- The console host: the translated C has not been compiled by the XDK or
-  xSDK, nothing has run in Xenia or on hardware; no memory or frame-time
-  measurements.
+- The single-archive console content format (CONSOLE_PLAN 2.1): the console
+  reads the converted files directly.
+- Console memory and frame time (no hardware numbers yet). The XDK/Xenia
+  step was skipped: the user's xSDK path goes straight to hardware.

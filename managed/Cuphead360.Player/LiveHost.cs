@@ -165,7 +165,8 @@ namespace Cuphead360.Player
         public static int Play(Func<int, bool> frame, string gameData, int width = 1280, int height = 720)
         {
             textureDir = Path.Combine(gameData, "textures");
-            if (!Directory.Exists(textureDir)) Console.WriteLine("PLAY no converted textures: run tools/convert_textures.py --bundles (sprites draw untextured)");
+            if (!Directory.Exists(textureDir) && !Directory.Exists(Path.Combine(gameData, "ctex")))
+                Console.WriteLine("PLAY no converted textures: run tools/convert_textures.py --bundles (sprites draw untextured)");
             var hwnd = CreateWindow(width, height);
             var dc = GetDC(hwnd);
             InitGl(dc);
@@ -491,10 +492,35 @@ void main() {
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (int)GL_CLAMP_TO_EDGE);
         }
 
+        static uint LoadCtx(string key)
+        {
+            string fn = Path.Combine(Path.GetDirectoryName(textureDir), "ctex", key + ".ctx");
+            if (!File.Exists(fn)) return 0;
+            var b = File.ReadAllBytes(fn);
+            if (b.Length < 28 || BitConverter.ToUInt32(b, 0) != 0x31585443) return 0;
+            int fmt = BitConverter.ToInt32(b, 4), w = BitConverter.ToInt32(b, 8), h = BitConverter.ToInt32(b, 12), size = BitConverter.ToInt32(b, 24);
+            uint id; glGenTextures(1, &id);
+            glBindTexture(GL_TEXTURE_2D, id);
+            Params();
+            fixed (byte* p = &b[28])
+            {
+                if (fmt == 1) glCompressedTexImage2D(GL_TEXTURE_2D, 0, 0x83F1, w, h, 0, size, p);        // DXT1
+                else if (fmt == 2) glCompressedTexImage2D(GL_TEXTURE_2D, 0, 0x83F3, w, h, 0, size, p);   // DXT5
+                else glTexImage2D(GL_TEXTURE_2D, 0, (int)GL_RGBA, w, h, 0, 0x80E1 /* GL_BGRA */, GL_UNSIGNED_BYTE, p);
+            }
+            return id;
+        }
+
         static uint LoadTex(string key)
         {
             string fn = Path.Combine(textureDir, key + ".tex");
-            if (!File.Exists(fn)) { if (missingTex.Add(key)) Console.WriteLine("PLAY texture not converted: " + key); return 0; }
+            if (!File.Exists(fn))
+            {
+                // Without the full-size exports, the console's textures (tools/convert_console.py: pages halved).
+                uint c = LoadCtx(key);
+                if (c == 0 && missingTex.Add(key)) Console.WriteLine("PLAY texture not converted: " + key);
+                return c;
+            }
             var b = File.ReadAllBytes(fn);
             int fmt = BitConverter.ToInt32(b, 8), w = BitConverter.ToInt32(b, 12), h = BitConverter.ToInt32(b, 16), size = BitConverter.ToInt32(b, 24);
             uint id; glGenTextures(1, &id);
