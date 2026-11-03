@@ -66,4 +66,6 @@ target_link_options(cuphead360 PRIVATE "-Wl,--wrap=malloc,--wrap=free,--wrap=rea
 # and counts them in the log's heartbeat.
 target_link_options(cuphead360 PRIVATE "-Wl,--wrap=srt_clock_wait_until,--wrap=srt_plat_sleep_ns"
     "-Wl,--wrap=srt_plat_open,--wrap=srt_plat_read,--wrap=srt_plat_seek")
+# The player's memory growth makes room from textures first (main.cpp).
+target_link_options(cuphead360 PRIVATE "-Wl,--wrap=srt_plat_commit")
 xsdk_add_xex(cuphead360 TITLE_ID ${CH360_TITLE_ID} NAME "Cuphead360")

@@ -104,8 +104,18 @@ Xenia, hardware, memory.
 
 ## Next round (in order)
 
-0. **The sixth run (round 11 build staged: the sign bug's fix, the map
-   freeze's fix, faster loads).** Round 11 found the sign bug's cause: the
+0. **The seventh run (round 11b build staged: the sixth run's crash fixed).**
+   The sixth run (VERIFICATION "sixth hardware run"): I64CHECK ok, the
+   title in ~20 s, the map built in 6.9 s, then a crash in the map's first
+   frame: a texture over the budget freed its own new image while making
+   room (fixed), and the player's memory reached 183 MB against the PC's
+   150 MB (unexplained: the PC check's bot keeps a 1/60 step, the console
+   steps by real time; next, a PC run with the real-time step). Now
+   textures also make room when the player grows (`__wrap_srt_plat_commit`),
+   and each growth is logged with frame and stage. Read: the "memory:
+   player a -> b MB" lines against the PC's growth, whether the map plays,
+   frame times there, then a level.
+   Round 11 found the sign bug's cause: the
    title runs in 32-bit mode (the game thread's MSR 0x200b030, SF clear),
    where a record form (`mr.`, `and.` ...) sets CR0 from its result's low
    word, and xSDK's GCC uses record forms for some 64-bit compares

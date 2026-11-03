@@ -230,6 +230,8 @@ public:
     void texture_file(int id, const char* key);
     void texture_pixels(int id, int w, int h, const unsigned char* bgra);
     size_t texture_bytes() const { return texture_bytes_; }
+    // Frees textures not drawn lately for the player's memory (the commit wrap).
+    size_t make_room(size_t bytes) { return release_unused(bytes); }
     double gpu_wait_ms, present_ms;
     unsigned uploads, evictions;
 
@@ -670,6 +672,9 @@ VkPipeline Renderer::make_pipeline(VkShaderModule frag) {
 // textures not drawn lately: down to the budget, then above the memory floor,
 // then once more if the allocation still fails.
 bool Renderer::make_image(Tex& t, VkFormat format, int w, int h) {
+    // In use from now: making room below must not take this texture's own
+    // image (never drawn, it was the oldest; the sixth run crashed so).
+    t.last_used = frame_no_;
     VkImageCreateInfo ci;
     memset(&ci, 0, sizeof(ci));
     ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -728,14 +733,30 @@ bool Renderer::make_image(Tex& t, VkFormat format, int w, int h) {
     vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     vi.subresourceRange.levelCount = 1;
     vi.subresourceRange.layerCount = 1;
-    vkCreateImageView(dev_, &vi, NULL, &t.view);
+    if (!vk(vkCreateImageView(dev_, &vi, NULL, &t.view), "vkCreateImageView")) {
+        vkDestroyImage(dev_, t.image, NULL);
+        vkFreeMemory(dev_, t.mem, NULL);
+        t.image = VK_NULL_HANDLE;
+        t.mem = VK_NULL_HANDLE;
+        t.view = VK_NULL_HANDLE;
+        return false;
+    }
     VkDescriptorSetAllocateInfo sai;
     memset(&sai, 0, sizeof(sai));
     sai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     sai.descriptorPool = desc_pool_;
     sai.descriptorSetCount = 1;
     sai.pSetLayouts = &set_layout_;
-    vk(vkAllocateDescriptorSets(dev_, &sai, &t.set), "vkAllocateDescriptorSets");
+    if (!vk(vkAllocateDescriptorSets(dev_, &sai, &t.set), "vkAllocateDescriptorSets")) {
+        vkDestroyImageView(dev_, t.view, NULL);
+        vkDestroyImage(dev_, t.image, NULL);
+        vkFreeMemory(dev_, t.mem, NULL);
+        t.image = VK_NULL_HANDLE;
+        t.mem = VK_NULL_HANDLE;
+        t.view = VK_NULL_HANDLE;
+        t.set = VK_NULL_HANDLE;
+        return false;
+    }
     VkDescriptorImageInfo ii;
     ii.sampler = sampler_;
     ii.imageView = t.view;
@@ -1400,6 +1421,32 @@ extern "C" int __real_srt_plat_seek(void* f, long long offset, int whence, unsig
 extern "C" int __wrap_srt_plat_seek(void* f, long long offset, int whence, unsigned long long* pos) {
     ++g_io_seeks;
     return __real_srt_plat_seek(f, offset, whence, pos);
+}
+
+// The player's linear memory grows by committing pages (physical memory:
+// the console has no paging). Textures not drawn lately make room first,
+// so the game gets memory the renderer could give back: in the sixth run
+// the player reached 183 MB at the map (150 MB on PC) with textures at
+// their 96 MB budget and 39 MB free.
+extern "C" int __real_srt_plat_commit(void* base, unsigned long long from, unsigned long long to);
+extern "C" int __wrap_srt_plat_commit(void* base, unsigned long long from, unsigned long long to) {
+    if (g_renderer && to > from) {
+        unsigned free_mb, total_mb;
+        memory_mb(&free_mb, &total_mb);
+        // Each growth, to find why the console's player outgrows the PC's.
+        logf("memory: player %u -> %u MB at frame %u (%s); %u MB free, textures %u MB", (unsigned)(from >> 20),
+             (unsigned)(to >> 20), g_frames_seen, (const char*)g_stage, free_mb, (unsigned)(g_texture_bytes >> 20));
+        unsigned need_mb = (unsigned)((to - from) >> 20) + 1 + MEMORY_FLOOR_MB;
+        if (free_mb < need_mb) {
+            size_t freed = g_renderer->make_room((size_t)(need_mb - free_mb) << 20);
+            logf("memory: the player grows to %u MB with %u MB free; %u KB of textures let go", (unsigned)(to >> 20), free_mb,
+                 (unsigned)(freed >> 10));
+        }
+    }
+    int r = __real_srt_plat_commit(base, from, to);
+    if (r != 0 && g_renderer && g_renderer->make_room((size_t)(to - from) * 2) > 0) r = __real_srt_plat_commit(base, from, to);
+    if (r != 0) logf("memory: the player couldn't grow to %u MB", (unsigned)(to >> 20));
+    return r;
 }
 
 

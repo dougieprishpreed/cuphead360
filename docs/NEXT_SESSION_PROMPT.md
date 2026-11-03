@@ -31,8 +31,10 @@ run on the console, slowly; the map froze while loading its textures
 long values were formatted with their low word's sign, because the title
 runs in 32-bit mode and xSDK's GCC uses record forms for some 64-bit
 compares (fixed by `console/xsdk/record_forms.py`, the build's compiler
-launcher). Continue with HANDOFF.md's "Next round" item 0: the sixth run's
-log (I64CHECK should now be ok; memory through the map load; load times),
+launcher). The sixth run confirmed the sign fix (I64CHECK ok) and much faster loads,
+then crashed at the map on a texture-budget bug (fixed in round 11b).
+Continue with HANDOFF.md's "Next round" item 0: the seventh run's log
+(the player's memory growth on the console against PC; the map, then a level),
 then frame rate on the map and in a level, load speed, packs and
 720p-sized textures. Rebuild
 with `python tools/build_managed.py --stage jit` after engine changes; check

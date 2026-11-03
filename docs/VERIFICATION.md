@@ -3,6 +3,29 @@
 Newest first. Each entry says what was run, on which build, and what it
 showed. Windows entries use the JIT oracle (`work/managed/jit`).
 
+## 2026-11-03 sixth hardware run (round 11 build) and its fix
+
+The sixth run (`work/console/hw06/`): **I64CHECK ok** on the console for
+the first time (the record-form compares), the title up in ~20 s (hw05
+~40 s), the save's map built in 4.4 s and activated in 2.5 s (hw05 9.8 +
+4.4) with 151 opens for the whole load. Then a crash to the dashboard
+while the map's first frame loaded its textures, at 95 of the 96 MB
+budget with 39 MB free; `default.log` had vulkan4xenon's "not supported:
+image views other than the whole of an image...". The player's memory
+grew 118 -> 183 MB across the map load (the PC check: 150 MB, also with
+the console's 448 MB limit and with frames slowed to 50 ms; scripted runs
+keep a 1/60 step, so the console's real-time step is still untested on PC).
+
+| Finding | How |
+| --- | --- |
+| A new texture over the budget made room from textures not drawn lately, and its own image (created, never drawn, so the oldest) was the first one freed; the view and descriptor were then made from a destroyed image | main.cpp's `make_image` order; vulkan4xenon `src/image.c` refuses a view whose image fields don't match |
+
+| Change | Check |
+| --- | --- |
+| `make_image` marks the texture in use before making room; a failed view or descriptor set frees the texture and fails it instead of carrying on | host compiles, no warnings |
+| `__wrap_srt_plat_commit`: before the player's linear memory grows, textures not drawn lately make room down to the memory floor; each growth is logged with its frame and stage | XEX links the wrap; staged to `E:\Apps\cuphead360`, not yet run |
+| host_native: `CH360_FRAME_MS` slows each frame (console-like timing for unscripted runs) | the save-to-map run at 50 ms frames: 150 MB, as at full speed |
+
 ## 2026-11-03 fifth hardware run and round 11 (map freeze, sign bug)
 
 The fifth run (`work/console/hw05/`): the title looked right this time (the

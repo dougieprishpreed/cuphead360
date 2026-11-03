@@ -32,6 +32,11 @@ static unsigned char tex_seen[TRACE_IDS];  /* drawn before */
 static long tex_on_frame[TRACE_IDS], tex_any_frame[TRACE_IDS];
 static long trace_last_total = -1;
 
+/* CH360_FRAME_MS=n: each frame takes at least n ms, as on the console (its
+ * frame step and audio step follow the clock, so the game runs differently). */
+static long frame_ms;
+static clock_t frame_start;
+
 static long tex_cost(int id) {
     if (tex_bytes[id] < 0 && tex_key[id] && trace_dir) {
         char path[1024];
@@ -89,6 +94,11 @@ static void trace_frame(void) {
 }
 
 int ch360_plat_frame_begin(void) {
+    if (frame_ms > 0) {
+        while ((clock() - frame_start) * 1000 / CLOCKS_PER_SEC < frame_ms) {
+        }
+        frame_start = clock();
+    }
     if (frame_no > 0 && frame_no % 600 == 0) {
         double secs = (double)(clock() - started) / CLOCKS_PER_SEC;
         printf("[host] frame %ld: %.1f fps; last frame %lu views, %lu items, %lu vertices; textures %lu files, %lu runtime; "
@@ -217,6 +227,7 @@ int main(int argc, char** argv) {
         if (wav) fwrite("\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 1, 44, wav);
     }
     trace_dir = getenv("CH360_TRACE_TEX");
+    frame_ms = getenv("CH360_FRAME_MS") ? atol(getenv("CH360_FRAME_MS")) : 0;
     for (i = 0; i < TRACE_IDS; i++) tex_bytes[i] = -1;
     started = clock();
     code = ch360_run(root, guestc, guest, memory_mb, 64, -1);
