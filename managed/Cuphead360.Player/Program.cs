@@ -194,6 +194,8 @@ namespace Cuphead360.Player
                 if (PlayerLoop.Profile && f % 600 == 0) Console.WriteLine($"frame {f} " + PlayerLoop.ProfileReport(600));
                 if (report > 0 && f % report == 0)
                     Console.WriteLine($"FRAME {f} t={UnityEngine.Time.time:0.00} scene={Cuphead360.Engine.Scenes.Active?.Name} objects={Objects.LiveCount} exceptions={Exceptions.Count} missing={Icall.MissingCount}");
+                    if (Environment.GetEnvironmentVariable("CH360_OBJECTS_AT") == f.ToString())
+                        foreach (var o in Objects.Live()) Console.WriteLine($"OBJ {o.GetType().Name} {o.Name}");
             }
             Audio.EndCapture();
             if (ChobObject.ParseStats != null)

@@ -198,6 +198,30 @@ namespace Cuphead360.Engine
             public Vector4 Border;
             public Vector2[] Vertices = new Vector2[0];        // local units, pivot at origin
             public ushort[] Triangles = new ushort[0];
+            ushort[] tris32From; int[] tris32;
+            // Atlases.Bound's result while its atlas table is unchanged.
+            internal int BoundVersion;
+            internal SpriteAtlas BoundAtlas;
+            internal Texture2D BoundTex;
+            internal Rect BoundRect;
+            internal Vector4 BoundUv;
+            internal int BoundSettings;
+            // Sprites.RenderUvs' cache and what it was worked out from.
+            internal Vector2[] UvCache, UvVertices;
+            internal Texture UvTex;
+            internal Rect UvRect;
+            internal Vector4 UvMap;
+            internal int UvSettings;
+            internal float UvW, UvH;
+            /// <summary>Triangles as ints for the render list (made once, not per frame).</summary>
+            public int[] Triangles32
+            {
+                get
+                {
+                    if (tris32From != Triangles) { tris32 = Array.ConvertAll(Triangles, t => (int)t); tris32From = Triangles; }
+                    return tris32;
+                }
+            }
             public string[] AtlasTags = new string[0];
             public string RenderKey;                           // GUID + local id, matches SpriteAtlas render data
             public Texture2D Texture;                          // own texture (not late-bound)
@@ -322,14 +346,25 @@ namespace Cuphead360.Engine
         }
 
         /// <summary>Texture coordinates (0..1, Unity orientation) of a sprite's vertices.</summary>
-        public static Vector2[] Uvs(Sprite s)
+        /// <summary>A sprite's UVs, the game's own copy (Sprite.uv).</summary>
+        public static Vector2[] Uvs(Sprite s) => (Vector2[])RenderUvs(s).Clone();
+
+        /// <summary>
+        /// A sprite's UVs for the render list: kept on its Info until its
+        /// binding, texture size or mesh changes (worked out and allocated for
+        /// every sprite every frame before). Callers don't change it.
+        /// </summary>
+        internal static Vector2[] RenderUvs(Sprite s)
         {
             var i = Of(s);
             if (i == null) return new Vector2[0];
-            var uv = new Vector2[i.Vertices.Length];
-            if (!Binding(s, out var tex, out var tr, out var u, out int settings) || tex == null) return uv;
+            if (!Binding(s, out var tex, out var tr, out var u, out int settings) || tex == null) return new Vector2[i.Vertices.Length];
             float w = Icalls.TextureWidth(tex), h = Icalls.TextureHeight(tex);
-            if (w <= 0 || h <= 0) return uv;
+            if (w <= 0 || h <= 0) return new Vector2[i.Vertices.Length];
+            if (i.UvCache != null && ReferenceEquals(i.UvTex, tex) && i.UvRect.Equals(tr) && i.UvMap.Equals(u) && i.UvSettings == settings && i.UvW == w && i.UvH == h
+                && ReferenceEquals(i.UvVertices, i.Vertices))
+                return i.UvCache;
+            var uv = new Vector2[i.Vertices.Length];
             // Packing rotation: the sprite is stored flipped/rotated inside its packed rect.
             int rot = (settings >> 2) & 0xF;
             float cx = tr.x + tr.width * 0.5f, cy = tr.y + tr.height * 0.5f;
@@ -346,6 +381,7 @@ namespace Cuphead360.Engine
                 uv[k] = new Vector2(tx / w, ty / h);
             }
             if (rot == 4) AssetDb.Problem("sprite packed with Rotate90 (UV mapping unverified): " + i.Name);
+            i.UvCache = uv; i.UvTex = tex; i.UvRect = tr; i.UvMap = u; i.UvSettings = settings; i.UvW = w; i.UvH = h; i.UvVertices = i.Vertices;
             return uv;
         }
 
@@ -371,6 +407,9 @@ namespace Cuphead360.Engine
     {
         static readonly Dictionary<string, SpriteAtlas> byTag = new Dictionary<string, SpriteAtlas>(StringComparer.Ordinal);
         static readonly Dictionary<string, (SpriteAtlas atlas, object data)> byKey = new Dictionary<string, (SpriteAtlas, object)>(StringComparer.Ordinal);
+        // Bumped whenever byKey changes: a sprite's Bound result is kept until then (it read the tree each frame).
+        static int version = 1;
+        static readonly bool noBoundCache = Environment.GetEnvironmentVariable("CH360_NO_BOUND_CACHE") == "1";
         static readonly HashSet<string> requested = new HashSet<string>(StringComparer.Ordinal);
         static readonly List<string> pending = new List<string>();
         static readonly HashSet<string> unheard = new HashSet<string>(StringComparer.Ordinal);
@@ -428,17 +467,28 @@ namespace Cuphead360.Engine
                 if (e is List<object> pair && pair.Count == 2)
                 {
                     string key = Sprites.Key(pair[0]);
-                    if (key != null) byKey[key] = (atlas, pair[1]);
+                    if (key != null) { byKey[key] = (atlas, pair[1]); version++; }
                 }
         }
 
         public static bool Bound(Sprites.Info i, out Texture2D tex, out Rect textureRect, out Vector4 uvTransform, out int settings)
         {
+            // Kept while the atlas table is unchanged and the atlas and texture are alive (a
+            // destroyed texture is resolved again, as before).
+            if (i.BoundVersion == version && !noBoundCache
+                && (i.BoundAtlas == null || (Objects.Of(i.BoundAtlas) is NAsset live && !live.Destroyed))
+                && (i.BoundTex == null || (Objects.Of(i.BoundTex) is NObject lt && !lt.Destroyed)))
+            {
+                tex = i.BoundTex; textureRect = i.BoundRect; uvTransform = i.BoundUv; settings = i.BoundSettings;
+                return tex != null;
+            }
             tex = null; textureRect = default; uvTransform = default; settings = 0;
+            i.BoundVersion = version; i.BoundAtlas = null; i.BoundTex = null;
             if (i.RenderKey == null || !byKey.TryGetValue(i.RenderKey, out var b)) return false;
-            if (!(Objects.Of(b.atlas) is NAsset a) || a.Destroyed) return false;
+            if (!(Objects.Of(b.atlas) is NAsset a) || a.Destroyed) { i.BoundVersion = 0; return false; }
             tex = AssetDb.Resolve(a.Source.File, Tree.Ptr(b.data, "texture")) as Texture2D;
             Sprites.ReadBinding(b.data, out textureRect, out _, out uvTransform, out settings);
+            i.BoundAtlas = b.atlas; i.BoundTex = tex; i.BoundRect = textureRect; i.BoundUv = uvTransform; i.BoundSettings = settings;
             return tex != null;
         }
 

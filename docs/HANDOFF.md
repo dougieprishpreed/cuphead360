@@ -104,7 +104,22 @@ Xenia, hardware, memory.
 
 ## Next round (in order)
 
-0. **The seventh run (round 11b build staged: the sixth run's crash fixed).**
+0. **The eighth run (round 12 build staged: map frame rate, chips).** The
+   seventh run (VERIFICATION "seventh hardware run"): the map loaded and
+   held memory (150 MB, as on PC) but ran at 2-3 fps: "end" (the audio mix:
+   12-13 voices, long clips decoded by NVorbis as wasm, up to 0.25 s mixed
+   per slow frame) 220-470 ms and the draw list 165-280 ms a frame. Round
+   12: clips decoded natively (stb_vorbis, `console/ch360_ogg.c`), the
+   mixer without per-sample double conversions, the render list without
+   per-vertex camera inversions or per-frame allocations, and every console
+   texture re-encoded with a fitted DXT encoder (the title's chips). Read:
+   the `FRAMES a-b` lines (300-frame averages per phase, audio decode
+   time, voices) on the title, map and a level; whatever phase now leads
+   is next. Beyond that, the translated code itself is ~20x slower than on
+   PC: float loads from wasm memory go through integer registers
+   (byte-swapped) and memory on the console's CPU; a host-side mixer on
+   another hardware thread would take audio off the game thread.
+   Round 11b's item, kept: the seventh run (round 11b build: the sixth run's crash fixed).
    The sixth run (VERIFICATION "sixth hardware run"): I64CHECK ok, the
    title in ~20 s, the map built in 6.9 s, then a crash in the map's first
    frame: a texture over the budget freed its own new image while making

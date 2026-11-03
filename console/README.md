@@ -13,7 +13,11 @@ WASI module, translated to C by w2c2 and compiled for the console's CPU.
   wasm,c`): the game loop, the engine, audio mixing, the render list. Its
   `ConsoleHost` (`managed/Cuphead360.Player/ConsoleHost.cs`) calls six
   imports each frame: `frame_begin`, `pad`, `submit` (the frame's draw
-  list), `texture_file`, `texture_pixels` and `audio`.
+  list), `texture_file`, `texture_pixels` and `audio`, and `ogg_open`,
+  `ogg_read`, `ogg_seek` and `ogg_close` for its clips: Vorbis is decoded
+  natively by stb_vorbis (`ch360_ogg.c`, `third_party/stb_vorbis`), not by
+  the engine's NVorbis, which as translated wasm took most of a frame on
+  the world map.
 - **The glue** (`ch360_imports.c`): those imports, and the start of the
   module under Spire360's wasm runtime (srt, WASI preview1) on a guest
   thread with a 16 MB stack; its stdout and stderr go to the log.

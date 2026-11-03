@@ -33,8 +33,10 @@ runs in 32-bit mode and xSDK's GCC uses record forms for some 64-bit
 compares (fixed by `console/xsdk/record_forms.py`, the build's compiler
 launcher). The sixth run confirmed the sign fix (I64CHECK ok) and much faster loads,
 then crashed at the map on a texture-budget bug (fixed in round 11b).
-Continue with HANDOFF.md's "Next round" item 0: the seventh run's log
-(the player's memory growth on the console against PC; the map, then a level),
+The seventh run reached the map and held memory, at 2-3 fps (audio decode
+and the draw list; round 12 works on both and re-encodes the textures).
+Continue with HANDOFF.md's "Next round" item 0: the eighth run's log
+(the FRAMES lines: per-phase averages on the title, map and a level),
 then frame rate on the map and in a level, load speed, packs and
 720p-sized textures. Rebuild
 with `python tools/build_managed.py --stage jit` after engine changes; check

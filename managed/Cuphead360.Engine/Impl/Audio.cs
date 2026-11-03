@@ -64,6 +64,33 @@ namespace Cuphead360.Engine
     {
         public const int Rate = 48000;
 
+        /// <summary>A converted clip's decoder: NVorbis here; the console host's native one (ConsoleHost.HostClip).</summary>
+        public interface IClipReader : IDisposable
+        {
+            int Channels { get; }
+            int SampleRate { get; }
+            long TotalSamples { get; }
+            /// <summary>The next read's first frame.</summary>
+            long SamplePosition { set; }
+            /// <summary>Interleaved samples (count of them, not frames); the samples read, 0 at the end.</summary>
+            int ReadSamples(float[] buffer, int offset, int count);
+        }
+
+        sealed class NVorbisClip : IClipReader
+        {
+            readonly VorbisReader r;
+            public NVorbisClip(string path) { r = new VorbisReader(path); }
+            public int Channels => r.Channels;
+            public int SampleRate => r.SampleRate;
+            public long TotalSamples => r.TotalSamples;
+            public long SamplePosition { set => r.SamplePosition = value; }
+            public int ReadSamples(float[] buffer, int offset, int count) => r.ReadSamples(buffer, offset, count);
+            public void Dispose() => r.Dispose();
+        }
+
+        /// <summary>Opens a converted clip (.ogg) for decoding, or null; the console host swaps in its native decoder.</summary>
+        public static Func<string, IClipReader> OpenReader = path => new NVorbisClip(path);
+
         public sealed class Voice
         {
             public NAudioSource Src;
@@ -73,7 +100,7 @@ namespace Cuphead360.Engine
             public bool OneShot, Paused;
             public double Delay;          // seconds until it starts
             // Streaming decode state.
-            public VorbisReader Reader;
+            public IClipReader Reader;
             public float[] Buf;
             public long BufStart, BufFrames;
         }
@@ -108,6 +135,8 @@ namespace Cuphead360.Engine
         static long capturedFrames;
 
         public static double DspTime => mixedFrames / (double)Rate;
+        /// <summary>Stopwatch ticks spent decoding clips (streams and whole short clips).</summary>
+        public static long DecodeTicks;
 
         public static Clip ClipOf(AudioClip c)
         {
@@ -132,16 +161,16 @@ namespace Cuphead360.Engine
 
         static string PathOf(Clip c) => c.Key == null || AssetDb.Root == null ? null : Path.Combine(AssetDb.Root, "audio", c.Key + ".ogg");
 
-        static VorbisReader Open(Clip c)
+        static IClipReader Open(Clip c)
         {
             string fn = PathOf(c);
-            if (fn == null || !File.Exists(fn))
+            var r = fn != null && File.Exists(fn) ? OpenReader(fn) : null;
+            if (r == null)
             {
                 c.Missing = true;
-                if (reported.Add(c.Name ?? "?")) Log.Line($"AUDIO clip not converted: {c.Name} ({c.Key}); run tools/convert_audio.py");
+                if (reported.Add(c.Name ?? "?")) Log.Line($"AUDIO clip not converted or unreadable: {c.Name} ({c.Key}); run tools/convert_audio.py");
                 return null;
             }
-            var r = new VorbisReader(fn);
             if (r.Channels != c.Channels || r.SampleRate != c.Frequency) { c.Channels = r.Channels; c.Frequency = r.SampleRate; }
             if (r.TotalSamples > 0) c.Frames = r.TotalSamples;
             return r;
@@ -151,6 +180,7 @@ namespace Cuphead360.Engine
         {
             c.LastUse = ++useCounter;
             if (c.Pcm != null || c.Missing) return c.Pcm;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             using (var r = Open(c))
             {
                 if (r == null) return null;
@@ -160,6 +190,7 @@ namespace Cuphead360.Engine
                 c.Pcm = data;
                 cachedSamples += data.Length;
             }
+            DecodeTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
             // Keep the decoded cache bounded (CacheFloats; about 512 MB of floats by default).
             if (cachedSamples > CacheFloats)
             {
@@ -352,16 +383,24 @@ namespace Cuphead360.Engine
             ch = c.Channels;
             total = pcm != null ? Math.Min(c.Frames, pcm.Length / ch) : c.Frames;
             if (total <= 0) return true;
+            // The position is a whole frame and a float fraction inside the loop
+            // (a double-to-integer conversion per sample stalls the console's
+            // CPU twice: it goes through memory); the exact double is carried
+            // from block to block as before.
+            double basePos = v.Frame;
+            int stepped = 0;
+            long f0 = (long)basePos, istep = (long)step;
+            float t = (float)(basePos - f0), fstep = (float)(step - istep);
             for (int i = start; i < frames; i++)
             {
-                if (v.Frame >= total)
+                if (f0 >= total)
                 {
-                    if (!loop) return true;
-                    v.Frame -= total;
-                    if (v.Reader != null) { v.BufStart = (long)v.Frame; v.BufFrames = 0; v.Reader.SamplePosition = v.BufStart; }
+                    if (!loop) { v.Frame = basePos + step * stepped; return true; }
+                    f0 -= total;
+                    basePos = f0 + (double)t;
+                    stepped = 0;
+                    if (v.Reader != null) { v.BufStart = f0; v.BufFrames = 0; v.Reader.SamplePosition = v.BufStart; }
                 }
-                long f0 = (long)v.Frame;
-                float t = (float)(v.Frame - f0);
                 float l, r;
                 if (pcm != null)
                 {
@@ -379,8 +418,12 @@ namespace Cuphead360.Engine
                 else l = r = 0f;
                 dst[i * 2] += l * gl;
                 dst[i * 2 + 1] += r * gr;
-                v.Frame += step;
+                f0 += istep;
+                t += fstep;
+                if (t >= 1f) { t -= 1f; f0++; }
+                stepped++;
             }
+            v.Frame = basePos + step * stepped;
             return false;
         }
 
@@ -394,7 +437,9 @@ namespace Cuphead360.Engine
             long drop = f0 - v.BufStart;   // frames already played
             if (drop > 0) { Array.Copy(v.Buf, drop * ch, v.Buf, 0, (v.BufFrames - drop) * ch); v.BufStart = f0; v.BufFrames -= drop; }
             int room = v.Buf.Length / ch - (int)v.BufFrames;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             int got = room > 0 ? v.Reader.ReadSamples(v.Buf, (int)v.BufFrames * ch, room * ch) : 0;
+            DecodeTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
             v.BufFrames += got / ch;
             return f0 < v.BufStart + v.BufFrames;
         }

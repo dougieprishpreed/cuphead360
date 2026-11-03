@@ -7,6 +7,10 @@ Reads <data>/textures/*.tex (tools/convert_textures.py) and writes
 <data>/ctex/<key>.ctx, the format the console host loads. Xenos has no BC7,
 so every texture is decoded (mip 0) and stored as DXT1 (alpha only 0/255),
 DXT5 (partial alpha) or BGRA8 (small, single-channel or font textures).
+A DXT colour half is fitted to its block (principal axis weighted by alpha,
+endpoints refined by least squares), or keeps the bounding-box encoding
+where that has less error: the bounding box alone left dark texels where
+three colours meet (the title's poker chips).
 Pages larger than --max-size (default 2048) are halved until they fit: the
 game's atlases are 4096 px for 1080p and up, the console draws 720p. UVs
 are normalized, so nothing else changes.
@@ -139,6 +143,95 @@ def color_block(px, punch):
     return out
 
 
+def palette4(v0, v1):
+    e0, e1 = from565(v0), from565(v1)
+    return np.stack([e0, e1, (2 * e0 + e1) / 3, (e0 + 2 * e1) / 3], axis=1)   # (N,4,3)
+
+
+def best_indices(rgb, pal):
+    dist = ((rgb[:, :, None, :] - pal[:, None, :, :]) ** 2).sum(axis=-1)   # (N,16,4)
+    return dist.argmin(axis=-1), dist.min(axis=-1)
+
+
+def color_block_fit(px):
+    """Four-colour DXT colour half fitted to the block: endpoints along the
+    principal axis of its pixels (weighted by alpha, so transparent pixels'
+    colours don't pull them), refined by least squares on the indices they
+    get, three rounds. Returns the 565 endpoints (v0 > v1 or equal) and the
+    indices, as color_block's four-colour branch would store them."""
+    rgb = px[..., :3].astype(np.float32)
+    w = px[..., 3].astype(np.float32) / 255.0 + 1.0 / 255.0                 # (N,16)
+    ws = w.sum(axis=1, keepdims=True)
+    mean = (rgb * w[..., None]).sum(axis=1, keepdims=True) / ws[..., None]
+    d = (rgb - mean) * np.sqrt(w)[..., None]
+    cov = np.einsum('nki,nkj->nij', d, d)
+    axis = np.ones((len(px), 3), np.float32) / np.sqrt(3)
+    for _ in range(8):   # power iteration
+        axis = np.einsum('nij,nj->ni', cov, axis)
+        axis /= np.maximum(np.linalg.norm(axis, axis=1, keepdims=True), 1e-6)
+    t = np.einsum('nki,ni->nk', rgb - mean, axis)
+    big = np.where(w > 0.5, t, np.nan)   # endpoints from the opaque pixels when there are any
+    tmin = np.where(np.isnan(big).all(axis=1), t.min(axis=1), np.nanmin(np.where(np.isnan(big), np.inf, big), axis=1))
+    tmax = np.where(np.isnan(big).all(axis=1), t.max(axis=1), np.nanmax(np.where(np.isnan(big), -np.inf, big), axis=1))
+    e0 = mean[:, 0] + tmax[:, None] * axis
+    e1 = mean[:, 0] + tmin[:, None] * axis
+    wa = np.array([1, 0, 2 / 3, 1 / 3], np.float32)
+    for _ in range(3):
+        pal = np.stack([e0, e1, (2 * e0 + e1) / 3, (e0 + 2 * e1) / 3], axis=1)
+        idx, _ = best_indices(rgb, pal)
+        a = wa[idx] * w
+        b = (1 - wa[idx]) * w
+        aa, bb, ab = (wa[idx] * a).sum(1), ((1 - wa[idx]) * b).sum(1), (wa[idx] * b).sum(1)
+        ap = (a[..., None] * rgb).sum(1)
+        bp = (b[..., None] * rgb).sum(1)
+        det = aa * bb - ab * ab
+        ok = np.abs(det) > 1e-6
+        safe = np.where(ok, det, 1)[:, None]
+        n0 = (bb[:, None] * ap - ab[:, None] * bp) / safe
+        n1 = (aa[:, None] * bp - ab[:, None] * ap) / safe
+        e0 = np.where(ok[:, None], np.clip(n0, 0, 255), e0)
+        e1 = np.where(ok[:, None], np.clip(n1, 0, 255), e1)
+    v0, v1 = to565(e0), to565(e1)
+    swap = v0 < v1
+    v0, v1 = np.where(swap, v1, v0), np.where(swap, v0, v1)
+    idx, err = best_indices(rgb, palette4(v0, v1))
+    idx = np.where((v0 == v1)[:, None], 0, idx)
+    return v0, v1, idx.astype(np.uint32), (err * w).sum(axis=1)
+
+
+def pack_color(v0, v1, idx):
+    bits = (idx << (2 * np.arange(16, dtype=np.uint32))).sum(axis=1).astype(np.uint32)
+    out = np.zeros((len(v0), 8), np.uint8)
+    out[:, 0], out[:, 1] = v0 & 255, v0 >> 8
+    out[:, 2], out[:, 3] = v1 & 255, v1 >> 8
+    for k in range(4):
+        out[:, 4 + k] = (bits >> (8 * k)) & 255
+    return out
+
+
+def color_block_best(px):
+    """The four-colour half: the fitted encoding, or color_block's
+    bounding-box one where that has less (alpha-weighted) error."""
+    old = color_block(px, None)
+    ov0 = old[:, 0].astype(np.uint32) | (old[:, 1].astype(np.uint32) << 8)
+    ov1 = old[:, 2].astype(np.uint32) | (old[:, 3].astype(np.uint32) << 8)
+    obits = old[:, 4:8].astype(np.uint32)
+    obits = obits[:, 0] | (obits[:, 1] << 8) | (obits[:, 2] << 16) | (obits[:, 3] << 24)
+    oidx = (obits[:, None] >> (2 * np.arange(16, dtype=np.uint32))) & 3
+    rgb = px[..., :3].astype(np.float32)
+    w = px[..., 3].astype(np.float32) / 255.0 + 1.0 / 255.0
+    opal = palette4(ov0, ov1)
+    oerr = (((rgb - np.take_along_axis(opal, oidx[..., None].astype(np.int64), axis=1)) ** 2).sum(-1) * w).sum(1)
+    # Blocks the old encoding already gets exactly (flat colour, an atlas's empty areas) can't do better: not fitted.
+    need = oerr > 0
+    out = old.copy()
+    if need.any():
+        v0, v1, idx, err = color_block_fit(px[need])
+        new = pack_color(v0, v1, idx)
+        out[need] = np.where((err < oerr[need])[:, None], new, old[need])
+    return out
+
+
 def alpha_block(px):
     a = px[..., 3].astype(np.float32)
     a0, a1 = a.max(axis=1), a.min(axis=1)
@@ -157,9 +250,14 @@ def alpha_block(px):
 def encode(img, kind):
     bl = blocks(pad4(img))
     if kind == 1:
+        # Blocks with transparent texels take three-colour mode; the others the fitted four-colour encoding.
         punch = bl[..., 3] < 128
-        return color_block(bl, punch if punch.any() else None).tobytes()
-    return np.concatenate([alpha_block(bl), color_block(bl, None)], axis=1).tobytes()
+        out = color_block_best(bl)
+        has = punch.any(axis=1)
+        if has.any():
+            out[has] = color_block(bl[has], punch[has])
+        return out.tobytes()
+    return np.concatenate([alpha_block(bl), color_block_best(bl)], axis=1).tobytes()
 
 
 def convert(src, dst, max_size):

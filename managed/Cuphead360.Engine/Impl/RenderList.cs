@@ -64,7 +64,9 @@ namespace Cuphead360.Engine
     {
         public sealed class Item
         {
-            public string Name = "";
+            // The name is for captures and tools: built when asked, not per frame.
+            internal string BaseName = "", Suffix;
+            public string Name => Suffix == null ? BaseName : BaseName + Suffix;
             public Texture Texture;
             public Material Material;
             public Vector2[] Screen;   // pixels, origin bottom-left
@@ -79,6 +81,43 @@ namespace Cuphead360.Engine
             public int GoLayer;
             /// <summary>Stencil state from the material (UGUI masks): ref, comp, op, readMask, writeMask, colorMask; null when off.</summary>
             public int[] Stencil;
+            // Arrays this item fills, kept for its next use from the pool.
+            internal Vector2[] OwnScreen, OwnUv;
+
+            internal Vector2[] ScreenOf(int n) => OwnScreen != null && OwnScreen.Length == n ? OwnScreen : OwnScreen = new Vector2[n];
+            internal Vector2[] UvOf(int n) => OwnUv != null && OwnUv.Length == n ? OwnUv : OwnUv = new Vector2[n];
+        }
+
+        // The lists, items and their vertex arrays are kept from frame to frame
+        // (each Build's result is used before the next Build): built anew,
+        // they were a garbage collection every frame or two on the world map.
+        // Items are handed out in build order, which stays the same while the
+        // same things are drawn, so their arrays mostly fit again.
+        static readonly List<Item> pool = new List<Item>();
+        static int pooled;
+        static readonly List<View> viewPool = new List<View>();
+        static int viewsUsed;
+        static readonly List<View> views = new List<View>();
+        static readonly List<NSpriteRenderer> renderers = new List<NSpriteRenderer>();
+        static readonly List<NCanvas> canvases = new List<NCanvas>();
+        static readonly List<Item> canvasOut = new List<Item>();
+
+        static Item NewItem()
+        {
+            if (pooled == pool.Count) pool.Add(new Item());
+            var it = pool[pooled++];
+            it.BaseName = ""; it.Suffix = null; it.Texture = null; it.Material = null; it.Screen = null; it.Uv = null; it.Colors = null;
+            it.Triangles = null; it.Tint = Color.white; it.Layer = it.Order = 0; it.Depth = 0; it.Sequence = 0; it.Kind = "sprite"; it.GoLayer = 0;
+            it.Stencil = null;
+            return it;
+        }
+
+        static View NewView(NCamera cam, Rect rect)
+        {
+            if (viewsUsed == viewPool.Count) viewPool.Add(new View());
+            var v = viewPool[viewsUsed++];
+            v.Camera = cam; v.PixelRect = rect; v.Items.Clear();
+            return v;
         }
 
         static readonly int stencilCompId = ShaderProps.Id("_StencilComp"), stencilId = ShaderProps.Id("_Stencil"), stencilOpId = ShaderProps.Id("_StencilOp"),
@@ -104,21 +143,44 @@ namespace Cuphead360.Engine
 
         public static Camera Current;
         static readonly Dictionary<NCanvasRenderer, int> depths = new Dictionary<NCanvasRenderer, int>();
+        static readonly bool traceUi = Environment.GetEnvironmentVariable("CH360_TRACE_UI") == "1";
+
+        /// <summary>
+        /// A camera's view and projection, taken once a frame: WorldToViewport
+        /// builds and inverts both for each point (34,500 vertices a frame on
+        /// the world map). The same arithmetic in the same order, so the
+        /// results are the same bits.
+        /// </summary>
+        struct CamXform
+        {
+            public bool Has;
+            public Matrix4x4 View, Proj;
+            public Rect Pixel;
+            public static CamXform Of(NCamera cam) =>
+                cam == null ? default : new CamXform { Has = true, View = cam.WorldToCamera, Proj = cam.Projection, Pixel = cam.PixelRect };
+            public Vector3 Viewport(Vector3 p)
+            {
+                var v = View.MultiplyPoint3x4(p);
+                float depth = -v.z;
+                var clip = Proj * new Vector4(v.x, v.y, v.z, 1f);
+                if (clip.w == 0f) return new Vector3(0.5f, 0.5f, depth);
+                return new Vector3((clip.x / clip.w + 1f) * 0.5f, (clip.y / clip.w + 1f) * 0.5f, depth);
+            }
+        }
 
         public static int DepthOf(NCanvasRenderer r) => r != null && depths.TryGetValue(r, out int d) ? d : -1;
 
         public static List<View> Build()
         {
-            var views = new List<View>();
+            pooled = 0; viewsUsed = 0;
+            views.Clear(); renderers.Clear(); canvases.Clear();
             var cams = Icalls.LiveCameras();
             cams.Sort((a, b) => a.Depth.CompareTo(b.Depth));   // stable: creation order breaks ties
-            var renderers = new List<NSpriteRenderer>();
-            var canvases = new List<NCanvas>();
             foreach (var sr in Typed.SpriteRenderers)
                 if (sr.Enabled && sr.Sprite != null && sr.GameObject != null && sr.GameObject.ActiveInHierarchy) renderers.Add(sr);
             foreach (var cv in Typed.Canvases)
                 if (cv.Enabled && cv.GameObject != null && cv.GameObject.ActiveInHierarchy && cv.IsRoot) canvases.Add(cv);
-            if (Environment.GetEnvironmentVariable("CH360_TRACE_UI") == "1")
+            if (traceUi)
                 foreach (var cv in canvases)
                 {
                     var t = cv.GameObject.Transform;
@@ -127,12 +189,13 @@ namespace Cuphead360.Engine
             foreach (var cam in cams)
             {
                 if (cam.Target != null) continue;   // render textures: not drawn by the preview yet
-                var v = new View { Camera = cam, PixelRect = cam.PixelRect };
+                var v = NewView(cam, cam.PixelRect);
+                var xf = CamXform.Of(cam);
                 int seq = 0;
                 foreach (var sr in renderers)
                 {
                     if ((cam.CullingMask & (1 << sr.GameObject.Layer)) == 0) continue;
-                    var it = SpriteItem(cam, sr);
+                    var it = SpriteItem(cam, xf, sr);
                     if (it == null) continue;
                     it.Sequence = seq++;
                     v.Items.Add(it);
@@ -142,7 +205,7 @@ namespace Cuphead360.Engine
                     bool mine = cv.Mode == RenderMode.WorldSpace || (cv.Mode == RenderMode.ScreenSpaceCamera && cv.WorldCamera != null && Objects.Of(cv.WorldCamera) == cam)
                         || (cv.Mode == RenderMode.ScreenSpaceCamera && cv.WorldCamera == null && false);
                     if (!mine || (cam.CullingMask & (1 << cv.GameObject.Layer)) == 0) continue;
-                    foreach (var it in CanvasItems(cam, cv)) { it.Sequence = seq++; v.Items.Add(it); }
+                    foreach (var it in CanvasItems(cam, xf, cv)) { it.Sequence = seq++; v.Items.Add(it); }
                 }
                 v.Items.Sort((a, b) =>
                 {
@@ -155,59 +218,58 @@ namespace Cuphead360.Engine
                 views.Add(v);
             }
             // Screen-space overlay canvases draw last, over every camera.
-            var overlay = new View { Camera = null, PixelRect = new Rect(0, 0, Icalls.ScreenWidth, Icalls.ScreenHeight) };
+            var overlay = NewView(null, new Rect(0, 0, Icalls.ScreenWidth, Icalls.ScreenHeight));
             canvases.Sort((a, b) => { int c = SortingLayers.Index(a.SortingLayerID).CompareTo(SortingLayers.Index(b.SortingLayerID)); return c != 0 ? c : a.SortingOrder.CompareTo(b.SortingOrder); });
             int oseq = 0;
             foreach (var cv in canvases)
                 if (cv.Mode == RenderMode.ScreenSpaceOverlay || (cv.Mode == RenderMode.ScreenSpaceCamera && cv.WorldCamera == null))
-                    foreach (var it in CanvasItems(null, cv)) { it.Sequence = oseq++; overlay.Items.Add(it); }
+                    foreach (var it in CanvasItems(null, default, cv)) { it.Sequence = oseq++; overlay.Items.Add(it); }
             if (overlay.Items.Count > 0) views.Add(overlay);
             return views;
         }
 
-        static Vector2 ToScreen(NCamera cam, Vector3 world)
+        static Vector2 ToScreen(in CamXform xf, Vector3 world)
         {
-            if (cam == null) return new Vector2(world.x, world.y);
-            var vp = cam.WorldToViewport(world);
-            var p = cam.PixelRect;
+            if (!xf.Has) return new Vector2(world.x, world.y);
+            var vp = xf.Viewport(world);
+            var p = xf.Pixel;
             return new Vector2(p.x + vp.x * p.width, p.y + vp.y * p.height);
         }
 
-        static Item SpriteItem(NCamera cam, NSpriteRenderer sr)
+        static Item SpriteItem(NCamera cam, in CamXform xf, NSpriteRenderer sr)
         {
             var info = Sprites.Of(sr.Sprite);
             if (info == null || info.Vertices.Length == 0 || info.Triangles.Length == 0) return null;
             if (!Sprites.Binding(sr.Sprite, out var tex, out _, out _)) tex = null;
             var m = sr.GameObject.Transform.LocalToWorld;
-            var uv = Sprites.Uvs(sr.Sprite);
-            var screen = new Vector2[info.Vertices.Length];
+            var uv = Sprites.RenderUvs(sr.Sprite);
+            var pos = sr.GameObject.Transform.Position;
+            float depth = xf.Viewport(pos).z;
+            if (depth < cam.Near || depth > cam.Far) return null;   // outside the clip planes
+            var it = NewItem();
+            var screen = it.ScreenOf(info.Vertices.Length);
             for (int i = 0; i < screen.Length; i++)
             {
                 var v = info.Vertices[i];
                 if (sr.FlipX) v.x = -v.x;
                 if (sr.FlipY) v.y = -v.y;
-                screen[i] = ToScreen(cam, m.MultiplyPoint3x4(new Vector3(v.x, v.y, 0)));
+                screen[i] = ToScreen(xf, m.MultiplyPoint3x4(new Vector3(v.x, v.y, 0)));
             }
-            var tris = new int[info.Triangles.Length];
-            for (int i = 0; i < tris.Length; i++) tris[i] = info.Triangles[i];
-            var pos = sr.GameObject.Transform.Position;
-            float depth = cam.WorldToViewport(pos).z;
-            if (depth < cam.Near || depth > cam.Far) return null;   // outside the clip planes
-            return new Item
-            {
-                Name = sr.GameObject.Name + " [" + info.Name + "]", Texture = tex, Material = sr.Materials.Length > 0 ? sr.Materials[0] : null,
-                Screen = screen, Uv = uv, Triangles = tris, Tint = sr.Color,
-                Layer = SortingLayers.Index(sr.SortingLayerID), Order = sr.SortingOrder,
-                Depth = depth, GoLayer = sr.GameObject.Layer,
-            };
+            it.BaseName = sr.GameObject.Name; it.Suffix = " [" + info.Name + "]"; it.Texture = tex;
+            it.Material = sr.Materials.Length > 0 ? sr.Materials[0] : null;
+            it.Screen = screen; it.Uv = uv; it.Triangles = info.Triangles32; it.Tint = sr.Color;
+            it.Layer = SortingLayers.Index(sr.SortingLayerID); it.Order = sr.SortingOrder;
+            it.Depth = depth; it.GoLayer = sr.GameObject.Layer;
+            return it;
         }
 
-        static IEnumerable<Item> CanvasItems(NCamera cam, NCanvas root)
+        static List<Item> CanvasItems(NCamera cam, CamXform xf, NCanvas root)
         {
-            var list = new List<Item>();
+            var list = canvasOut;
+            list.Clear();
             int depth = 0;
             int layer = SortingLayers.Index(root.SortingLayerID), order = root.SortingOrder;
-            float d = cam != null ? cam.WorldToViewport(root.GameObject.Transform.Position).z : 0f;
+            float d = cam != null ? xf.Viewport(root.GameObject.Transform.Position).z : 0f;
             // A canvas on or behind the camera's near plane (or past the far one) is clipped away.
             if (cam != null && (d < cam.Near || d > cam.Far)) return list;
             void Walk(NTransform t)
@@ -222,9 +284,12 @@ namespace Cuphead360.Engine
                         if (cr.Cull || cr.Mesh == null || cr.Mesh.Vertices.Length == 0) continue;
                         var mesh = cr.Mesh;
                         var mtx = t.LocalToWorld;
-                        var screen = new Vector2[mesh.Vertices.Length];
-                        for (int i = 0; i < screen.Length; i++) screen[i] = ToScreen(cam, mtx.MultiplyPoint3x4(mesh.Vertices[i]));
-                        var uv = new Vector2[screen.Length];
+                        // The first item made here owns the arrays; the renderer's other submeshes and pops share them.
+                        var owner = NewItem();
+                        var screen = owner.ScreenOf(mesh.Vertices.Length);
+                        for (int i = 0; i < screen.Length; i++) screen[i] = ToScreen(xf, mtx.MultiplyPoint3x4(mesh.Vertices[i]));
+                        var uv = owner.UvOf(screen.Length);
+                        bool ownerUsed = false;
                         var uv0 = mesh.Uv[0];
                         for (int i = 0; i < uv.Length; i++) uv[i] = uv0 != null && i < uv0.Length ? new Vector2(uv0[i].x, uv0[i].y) : Vector2.zero;
                         var tint = cr.Color; tint.a *= cr.InheritedAlpha;
@@ -233,7 +298,7 @@ namespace Cuphead360.Engine
                             if (mesh.SubMeshes[sm].Length == 0) continue;
                             var mat = sm < cr.Materials.Length ? cr.Materials[sm] : null;
                             var tex = sm == 0 && cr.Texture != null ? cr.Texture : MainTexture(mat);
-                            if (tex == null && Environment.GetEnvironmentVariable("CH360_TRACE_UI") == "1")
+                            if (tex == null && traceUi)
                                 foreach (var c2 in go.Components)
                                     if (c2.Managed != null && c2.Managed.GetType().Name == "Image")
                                     {
@@ -241,22 +306,24 @@ namespace Cuphead360.Engine
                                         var si = Sprites.Of(sp);
                                         Log.Line($"TRACE untextured {go.Name}: sprite={(sp == null ? "null" : si?.Name)} tags={string.Join(",", si?.AtlasTags ?? new string[0])} included={si?.IncludedAtlas != null} key={si?.RenderKey} bound={Sprites.Binding(sp, out _, out _, out _)}");
                                     }
-                            list.Add(new Item
-                            {
-                                Name = go.Name, Texture = tex, Material = mat, Screen = screen, Uv = uv, Colors = mesh.Colors,
-                                Triangles = mesh.SubMeshes[sm], Tint = tint, Layer = layer, Order = order, Depth = d, Kind = "ui", GoLayer = go.Layer,
-                                Stencil = StencilOf(mat),
-                            });
+                            var it = ownerUsed ? NewItem() : owner;
+                            ownerUsed = true;
+                            it.BaseName = go.Name; it.Texture = tex; it.Material = mat; it.Screen = screen; it.Uv = uv; it.Colors = mesh.Colors;
+                            it.Triangles = mesh.SubMeshes[sm]; it.Tint = tint; it.Layer = layer; it.Order = order; it.Depth = d; it.Kind = "ui";
+                            it.GoLayer = go.Layer; it.Stencil = StencilOf(mat);
+                            list.Add(it);
                         }
                         // Pop materials draw after the children (a Mask clearing its stencil).
                         foreach (var pm in cr.PopMaterials)
                             if (pm != null && mesh.SubMeshes.Count > 0)
-                                (pops ??= new List<Item>()).Add(new Item
-                                {
-                                    Name = go.Name + " (pop)", Texture = cr.Texture, Material = pm, Screen = screen, Uv = uv, Colors = mesh.Colors,
-                                    Triangles = mesh.SubMeshes[0], Tint = tint, Layer = layer, Order = order, Depth = d, Kind = "ui", GoLayer = go.Layer,
-                                    Stencil = StencilOf(pm),
-                                });
+                            {
+                                var it = ownerUsed ? NewItem() : owner;
+                                ownerUsed = true;
+                                it.BaseName = go.Name; it.Suffix = " (pop)"; it.Texture = cr.Texture; it.Material = pm; it.Screen = screen; it.Uv = uv;
+                                it.Colors = mesh.Colors; it.Triangles = mesh.SubMeshes[0]; it.Tint = tint; it.Layer = layer; it.Order = order; it.Depth = d;
+                                it.Kind = "ui"; it.GoLayer = go.Layer; it.Stencil = StencilOf(pm);
+                                (pops ??= new List<Item>()).Add(it);
+                            }
                     }
                 foreach (var ch in t.Children) Walk(ch);
                 if (pops != null) list.AddRange(pops);

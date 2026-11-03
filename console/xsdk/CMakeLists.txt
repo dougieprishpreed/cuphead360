@@ -33,7 +33,7 @@ file(GLOB PLAYER_SOURCES "${CH360_PLAYER_C}/*.c")
 add_library(ch360_player STATIC ${PLAYER_SOURCES}
     "${CH360_RUNTIME}/runtime/src/srt_core.c" "${CH360_RUNTIME}/runtime/src/srt_wasi.c"
     "${CH360_RUNTIME}/runtime/src/srt_wasi_p2.c" "${CH360_RUNTIME}/runtime/src/srt_plat_posix.c"
-    "${CONSOLE}/ch360_imports.c")
+    "${CONSOLE}/ch360_imports.c" "${CONSOLE}/ch360_ogg.c")
 # console/w2c2/w2c2_base.h comes first: Spire360's copy with 64-bit memory
 # accesses as two 32-bit ones.
 target_include_directories(ch360_player PRIVATE "${CONSOLE}/w2c2"

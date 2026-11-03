@@ -100,6 +100,7 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
     srt_config cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.root_dir = root_dir;
+    ch360_ogg_root(root_dir);
     cfg.argc = argc;
     cfg.argv = argv;
     cfg.envc = 3;

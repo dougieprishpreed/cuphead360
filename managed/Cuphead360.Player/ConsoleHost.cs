@@ -38,6 +38,47 @@ namespace Cuphead360.Player
         static extern void TexturePixels(int id, int width, int height, byte* bgra);
         [DllImport("ch360", EntryPoint = "audio"), WasmImportLinkage]
         static extern void AudioOut(short* samples, int frames);
+        [DllImport("ch360", EntryPoint = "ogg_open"), WasmImportLinkage]
+        static extern int OggOpen(byte* path, int length, int* info);
+        [DllImport("ch360", EntryPoint = "ogg_read"), WasmImportLinkage]
+        static extern int OggRead(int handle, float* samples, int frames);
+        [DllImport("ch360", EntryPoint = "ogg_seek"), WasmImportLinkage]
+        static extern int OggSeek(int handle, int frame);
+        [DllImport("ch360", EntryPoint = "ogg_close"), WasmImportLinkage]
+        static extern void OggClose(int handle);
+
+        /// <summary>
+        /// A clip decoded by the host (stb_vorbis in native code, console/ch360_ogg.c):
+        /// NVorbis as translated wasm took most of a world map frame on the console.
+        /// </summary>
+        sealed class HostClip : Audio.IClipReader
+        {
+            int h;
+            public int Channels { get; }
+            public int SampleRate { get; }
+            public long TotalSamples { get; }
+            HostClip(int handle, int channels, int rate, long frames) { h = handle; Channels = channels; SampleRate = rate; TotalSamples = frames; }
+
+            public static HostClip Open(string path)
+            {
+                var b = Encoding.UTF8.GetBytes(path);
+                int* info = stackalloc int[3];
+                int h;
+                fixed (byte* p = b) h = OggOpen(p, b.Length, info);
+                return h < 0 || info[0] <= 0 ? null : new HostClip(h, info[0], info[1], (uint)info[2]);
+            }
+
+            public long SamplePosition { set { if (h >= 0) OggSeek(h, (int)Math.Clamp(value, 0, int.MaxValue)); } }
+
+            public int ReadSamples(float[] buffer, int offset, int count)
+            {
+                int frames = count / Channels;
+                if (h < 0 || frames <= 0) return 0;
+                fixed (float* p = &buffer[offset]) return OggRead(h, p, frames) * Channels;
+            }
+
+            public void Dispose() { if (h >= 0) OggClose(h); h = -1; }
+        }
 
         static readonly InputFrame input = new InputFrame();
         static byte[] buf = new byte[1 << 20];
@@ -52,6 +93,8 @@ namespace Cuphead360.Player
         /// time (PlayerLoop.AudioDelta). Scripted runs keep 1/60.
         /// </summary>
         public static float Delta = 1f / 60f;
+        static readonly double[] phaseSum = new double[PlayerLoop.PhaseMs.Length + 2];
+        static double frameSum;
 
         public static int Play(Func<int, bool> frame)
         {
@@ -78,12 +121,31 @@ namespace Cuphead360.Player
                 PollPads();
                 if (!frame(++n)) break;
                 long built = System.Diagnostics.Stopwatch.GetTimestamp();
-                Draw(RenderList.Build());
+                var views = RenderList.Build();
+                long listed = System.Diagnostics.Stopwatch.GetTimestamp();
+                Draw(views);
                 long drawn = System.Diagnostics.Stopwatch.GetTimestamp();
+                var ph = PlayerLoop.PhaseMs;
+                for (int i = 0; i < ph.Length; i++) phaseSum[i] += ph[i];
+                phaseSum[ph.Length] += (listed - built) * 1000.0 / hz;
+                phaseSum[ph.Length + 1] += (drawn - listed) * 1000.0 / hz;
+                frameSum += (drawn - now) * 1000.0 / hz;
                 // A frame over half a second says where its time went (the player loop's phases, the draw list).
                 if ((drawn - now) * 2 > hz)
-                    Console.WriteLine($"SLOW frame {n}: {(drawn - now) * 1000 / hz} ms; {PlayerLoop.ProfileReport(1)} drawlist={(drawn - built) * 1000 / hz}");
+                    Console.WriteLine($"SLOW frame {n}: {(drawn - now) * 1000 / hz} ms; {PlayerLoop.ProfileReport(1)} list={(listed - built) * 1000 / hz} submit={(drawn - listed) * 1000 / hz}");
                 else Array.Clear(PlayerLoop.PhaseMs);
+                // Where an ordinary frame's time goes, averaged over 300 frames.
+                if (n % 300 == 0)
+                {
+                    var sb = new StringBuilder($"FRAMES {n - 299}-{n}: {frameSum / 300:0.0} ms/frame;");
+                    for (int i = 0; i < ph.Length; i++) sb.Append(' ').Append(PlayerLoop.PhaseNames[i]).Append('=').Append((phaseSum[i] / 300).ToString("0.0"));
+                    sb.Append(" list=").Append((phaseSum[ph.Length] / 300).ToString("0.0")).Append(" submit=").Append((phaseSum[ph.Length + 1] / 300).ToString("0.0"));
+                    sb.Append("; audio decode ").Append((Audio.DecodeTicks * 1000.0 / hz / 300).ToString("0.0")).Append(" ms/frame, ").Append(Audio.VoiceCount).Append(" voices");
+                    Audio.DecodeTicks = 0;
+                    Console.WriteLine(sb.ToString());
+                    Array.Clear(phaseSum);
+                    frameSum = 0;
+                }
                 if (n % 600 == 0)
                     Console.WriteLine($"CONSOLE frame {n} scene={Cuphead360.Engine.Scenes.Active?.Name} heap {GC.GetTotalMemory(false) >> 20} MB exceptions {Exceptions.Count}; "
                         + $"GCs {GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)} (gen0/1/2), paused {(long)GC.GetTotalPauseDuration().TotalMilliseconds} ms in all; "
@@ -103,6 +165,7 @@ namespace Cuphead360.Player
         {
             // The console reports slow loads and keeps a smaller decoded-audio cache (32 MB).
             Cuphead360.Engine.SceneLoader.Timing = true;
+            Audio.OpenReader = HostClip.Open;
             ChobFile.Trace = Console.WriteLine;
             Audio.CacheFloats = 4L * 1024 * 1024;   // 16 MB
             if (ChobObject.TreeBudget == long.MaxValue) ChobObject.TreeBudget = 24L << 20;   // parsed trees kept (estimated bytes)
@@ -194,13 +257,7 @@ namespace Cuphead360.Player
             if (it.Stencil != null && it.Stencil[5] == 0) return false;
             int tex = -1;
             if (it.Texture != null && (tex = TextureId(it.Texture)) < 0) return false;   // not drawable (render textures)
-            string shader = Objects.Of(MaterialState.Of(it.Material)?.Shader)?.Name ?? "";
-            uint mode = 0;
-            if (shader.Contains("SpriteBlendDynamic/Screen") || shader.EndsWith("/ScreenBlend")) mode = 1;
-            else if (shader.Contains("ScreenIgnoreColor")) mode = 0;
-            else if (shader.Contains("SpriteBlendDynamic/Multiply") || shader.EndsWith("/MultiplyBlend")) mode = 2;
-            else if (shader.Contains("SpriteBlendDynamic/Overlay") || shader.EndsWith("/OverlayBlend")) mode = 3;
-            else if (shader.Contains("Distance Field")) mode = 5;
+            uint mode = ModeOf(MaterialState.Of(it.Material)?.Shader);
             var tint = it.Tint;
             I32(tex); U32(mode);
             F32(tint.r); F32(tint.g); F32(tint.b); F32(tint.a);
@@ -228,6 +285,22 @@ namespace Cuphead360.Player
                 len += 20;
             }
             return true;
+        }
+
+        // A shader's blend mode, worked out from its name once.
+        static readonly Dictionary<Shader, uint> modes = new Dictionary<Shader, uint>();
+        static uint ModeOf(Shader sh)
+        {
+            if (sh == null) return 0;
+            if (modes.TryGetValue(sh, out uint mode)) return mode;
+            string shader = Objects.Of(sh)?.Name ?? "";
+            if (shader.Contains("SpriteBlendDynamic/Screen") || shader.EndsWith("/ScreenBlend")) mode = 1;
+            else if (shader.Contains("ScreenIgnoreColor")) mode = 0;
+            else if (shader.Contains("SpriteBlendDynamic/Multiply") || shader.EndsWith("/MultiplyBlend")) mode = 2;
+            else if (shader.Contains("SpriteBlendDynamic/Overlay") || shader.EndsWith("/OverlayBlend")) mode = 3;
+            else if (shader.Contains("Distance Field")) mode = 5;
+            modes[sh] = mode;
+            return mode;
         }
 
         static int TextureId(Texture t)

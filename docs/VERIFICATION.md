@@ -3,6 +3,34 @@
 Newest first. Each entry says what was run, on which build, and what it
 showed. Windows entries use the JIT oracle (`work/managed/jit`).
 
+## 2026-11-03 seventh hardware run and round 12 (frame rate on the map, the title's chips)
+
+The seventh run (`work/console/hw07/`): the round 11b build loaded the
+save's map after a ~20 s first frame (frame 828: 19.5 s, 6.8 s of it the
+map's 41 textures) and ran it at **2-3 frames a second**; the user switched
+off. The player stayed at 150 MB (as on PC; the sixth run's 183 MB didn't
+recur), no "memory: ... let go" lines. The title had run at ~50-60 fps.
+The map's slow frames (500+ ms) split: fixed 5.7, physics 2.5, update
+18-20, animators 2.3, late 1.8, ui 2-5 ms, **end 220-470 ms**, draw list
+**165-280 ms**. The user also saw corrupted squares on the title's poker
+chips.
+
+| Finding | How |
+| --- | --- |
+| "end" held the audio mix: the console mixes the frame's real time (up to 0.25 s), every long clip decoded by NVorbis as translated wasm, and the map plays 12-13 voices at once (music, ambience); a slower frame means more to decode next frame | PlayerLoop phases; the PC check's per-frame audio and voice counts on the map |
+| The draw list transformed each vertex with `NCamera.WorldToViewport`, which builds and inverts the view and builds the projection per call (34,500 vertices a frame on the map); it also built debug names, copied triangles, worked out UVs and atlas bindings (from the parsed tree, by string keys) and allocated items and vertex arrays for every sprite every frame: in a JIT trace of the map, 27% of `RenderList.Build` was garbage collection set off by its own allocations | code; dotnet-trace of `play --hidden` from the hw05 save to the map, `ss.py` |
+| The chips' squares are DXT5 error: the converter's colour endpoints were the block's bounding box with transparent texels' colours included, so blocks where red, white and the black outline meet got dark texels; the source is BC7 | the console texture decoded on PC (`ctx_png.py`), against the source the encoder was given |
+
+| Change | Check |
+| --- | --- |
+| `console/ch360_ogg.c`: the "ch360" ogg imports, stb_vorbis (vendored, public domain/MIT) decoding clips natively from a whole-file read through the runtime's file calls; the engine's `Audio.IClipReader` (NVorbis on the JIT build; `ConsoleHost.HostClip` on the console and in host_native) | native bot 16,001 frames: BOT lines identical; its audio against the JIT run's NVorbis audio over 255 s: the same within a few 16-bit steps except ~950 runs of 1-10 samples (one decoder trims or primes clip ends differently), inaudible |
+| The mixer keeps a voice's position as a whole frame and a float fraction inside a block (no double-to-integer conversion per sample: on the console's CPU each goes through memory), the exact double carried between blocks as before | native bot audio before/after: max difference 1 step over 267 s |
+| Render list: the camera's view and projection taken once per camera per frame (same arithmetic, same bits); names built only when asked; sprites' int triangles, UVs (`Sprites.RenderUvs`) and atlas bindings (`Atlases.Bound`, until the atlas table changes or the atlas or texture is destroyed) kept; lists, items and vertex arrays pooled from frame to frame; the console host's blend mode per shader cached | JIT bot 15,301 frames with captures every 500 frames: the capture file byte-identical to before; every FRAME/SCENE/BOT line identical but one: at frame 1020 (a scene change) one object fewer, the loading hourglass atlas's texture, which the old per-frame binding lookup re-created after the scene change destroyed it (from frame 1080 the counts match) |
+| Profile: an "audio" phase split from "end", the draw list split into "list" (build) and "submit"; a `FRAMES a-b` line every 300 frames averages them, with audio decode time and voices | PC check on the map: 4-6 ms a frame (list 1.7-2.4, update 0.9-1.3, submit 0.6-0.8, audio 0.2-0.3; machine load varies) |
+| DXT colour halves fitted: principal axis of the block's texels weighted by alpha, endpoints refined by least squares on their indices (three rounds); per block the fitted or the old encoding, whichever has less alpha-weighted error; DXT1 blocks without transparent texels get it too | the title atlas (2048x2048 from 4096): colour RMSE 10.79 -> 8.57 (PSNR 27.5 -> 29.5 dB), blocks over the error threshold 19,924 -> 14,662; the chips' edge specks gone (`dxt_compare.py`) |
+| All console textures re-encoded: `convert_textures.py --bundles` again (1,379 textures, 14 GB in `work/GameData/textures`), then `convert_console.py` (the fit skipped where the old encoding is exact: the same bytes, twice as fast) | 1,337 `.ctx`, 0 errors |
+| Built and staged: PC check from the hw05 save to the map and the native bot 16,001 frames (BOT lines as round 11b's, 0 exceptions, 216 MB); the XEX (19 files with 64-bit compares added, no carry patterns) and the 1,337 textures to `E:\Apps\cuphead360`, saves untouched | not yet run on the console |
+
 ## 2026-11-03 sixth hardware run (round 11 build) and its fix
 
 The sixth run (`work/console/hw06/`): **I64CHECK ok** on the console for

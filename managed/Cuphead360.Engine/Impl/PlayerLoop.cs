@@ -117,14 +117,14 @@ namespace Cuphead360.Engine
             RenderFrame?.Invoke();
             ResumeCoroutines(fixedPhase: false, endOfFrame: true);
             ProcessDestroys();
-            Audio.Step(AudioDelta >= 0 ? AudioDelta : realDelta);   // audio runs in unscaled time
+            P(8); Audio.Step(AudioDelta >= 0 ? AudioDelta : realDelta);   // audio runs in unscaled time
             P(-1);
         }
 
-        // Phase timing (CH360_PROFILE=1): load, fixed scripts, physics, update, animators, late, UI, render/destroy.
+        // Phase timing (CH360_PROFILE=1): load, fixed scripts, physics, update, animators, late, UI, render/destroy, audio.
         public static bool Profile = Environment.GetEnvironmentVariable("CH360_PROFILE") == "1";
-        static readonly string[] phaseNames = { "pump", "fixed", "physics", "update", "animators", "late", "ui", "end" };
-        public static readonly double[] PhaseMs = new double[8];
+        public static readonly string[] PhaseNames = { "pump", "fixed", "physics", "update", "animators", "late", "ui", "end", "audio" };
+        public static readonly double[] PhaseMs = new double[9];
         static int phase = -1;
         static long phaseStart;
         static void P(int next)
@@ -144,7 +144,7 @@ namespace Cuphead360.Engine
         public static string ProfileReport(int frames)
         {
             var sb = new System.Text.StringBuilder("PROFILE ms/frame:");
-            for (int i = 0; i < 8; i++) { sb.Append(' ').Append(phaseNames[i]).Append('=').Append((PhaseMs[i] / Math.Max(1, frames)).ToString("0.00")); PhaseMs[i] = 0; }
+            for (int i = 0; i < PhaseMs.Length; i++) { sb.Append(' ').Append(PhaseNames[i]).Append('=').Append((PhaseMs[i] / Math.Max(1, frames)).ToString("0.00")); PhaseMs[i] = 0; }
             return sb.ToString();
         }
 

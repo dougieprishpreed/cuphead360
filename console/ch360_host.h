@@ -57,6 +57,8 @@ int ch360_run(const char* root_dir, int argc, const char* const* argv, unsigned 
  * address space at its first growth), then the guest thread. */
 int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsigned memory_mb);
 int ch360_start(unsigned stack_mb, int hw_thread);
+/* The folder the guest's "/" is (ch360_ogg.c opens clips under it). */
+void ch360_ogg_root(const char* root_dir);
 /* The player's linear memory, in KB (committed as it grows). */
 unsigned ch360_memory_kb(void);
 /* Moves the player's buffered stdout into the log now. One thread drains:
