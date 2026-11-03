@@ -124,7 +124,7 @@ namespace Cuphead360.Engine
                 ci.Stream = Tree.Int(t, "m_LoadType") == 2 || Tree.Float(t, "m_Length") > 12f;
                 string k = src.File.Path.Replace('/', '_');
                 if (k.EndsWith(".chob")) k = k.Substring(0, k.Length - 5);
-                ci.Key = k + "_" + src.PathId;
+                ci.Key = k + "_" + IdText.Of(src.PathId);
             }
             clips[c] = ci;
             return ci;

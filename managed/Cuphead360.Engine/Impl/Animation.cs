@@ -880,8 +880,13 @@ namespace Cuphead360.Engine
         Target Bind(ClipData.Binding b)
         {
             var key = (b.Path, b.Attribute, b.TypeId, b.CustomType, b.Script);
-            if (targets.TryGetValue(key, out var tg)) return tg;
-            tg = new Target { B = b };
+            return targets.TryGetValue(key, out var tg) ? tg : BindNew(b, key);
+        }
+
+        // The first binding of a curve (kept apart: its lambdas allocate on every call of the method holding them).
+        Target BindNew(ClipData.Binding b, (uint, uint, int, int, Type) key)
+        {
+            var tg = new Target { B = b };
             targets[key] = tg;
             var tr = PathTarget(b.Path);
             if (tr == null) { tg.Unbound = "path " + b.Path; return tg; }
@@ -1210,20 +1215,32 @@ namespace Cuphead360.Engine
         public static void Step()
         {
             all.RemoveAll(a => { if (a.Destroyed) { set.Remove(a); return true; } return false; });
-            foreach (var a in all.ToArray())
+            int count = all.Count;
+            var batch = System.Buffers.ArrayPool<NAnimator>.Shared.Rent(count);
+            all.CopyTo(batch);
+            for (int i = 0; i < count; i++)
             {
+                var a = batch[i];
                 if (a.Destroyed || !a.Enabled || a.GameObject == null || !a.GameObject.ActiveInHierarchy) continue;
                 if (a.UpdateMode == AnimatorUpdateMode.AnimatePhysics) continue;
                 float dt = a.UpdateMode == AnimatorUpdateMode.UnscaledTime ? Clock.UnscaledDeltaTime : Clock.DeltaTime;
                 a.Update(dt);
             }
+            System.Buffers.ArrayPool<NAnimator>.Shared.Return(batch, true);
         }
 
         public static void FixedStep()
         {
-            foreach (var a in all.ToArray())
+            int count = all.Count;
+            var batch = System.Buffers.ArrayPool<NAnimator>.Shared.Rent(count);
+            all.CopyTo(batch);
+            for (int i = 0; i < count; i++)
+            {
+                var a = batch[i];
                 if (!a.Destroyed && a.Enabled && a.GameObject != null && a.GameObject.ActiveInHierarchy && a.UpdateMode == AnimatorUpdateMode.AnimatePhysics)
                     a.Update(Clock.FixedDeltaTime);
+            }
+            System.Buffers.ArrayPool<NAnimator>.Shared.Return(batch, true);
         }
     }
 

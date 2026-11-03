@@ -18,6 +18,8 @@ namespace Cuphead360.Engine
         public readonly List<CoroutineState> Coroutines = new List<CoroutineState>();
         public readonly List<InvokeState> Invokes = new List<InvokeState>();
         public long Order;
+        /// <summary>Messages without arguments, bound to this behaviour (reflection's Invoke is slow and allocates).</summary>
+        public Dictionary<MethodInfo, Action> Calls;
     }
 
     public sealed class MessageSet
@@ -54,12 +56,31 @@ namespace Cuphead360.Engine
         /// </summary>
         public static MethodInfo Find(Type t, string name, int parms = 0)
         {
+            if (found.TryGetValue((t, name, parms), out var hit)) return hit;
             const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
-            for (var c = t; c != null && c != typeof(MonoBehaviour) && c != typeof(Behaviour); c = c.BaseType)
+            MethodInfo r = null;
+            for (var c = t; r == null && c != null && c != typeof(MonoBehaviour) && c != typeof(Behaviour); c = c.BaseType)
                 foreach (var m in c.GetMethods(F))
-                    if (m.Name == name && m.GetParameters().Length == parms && !m.IsGenericMethodDefinition)
-                        return m;
-            return null;
+                    if (m.Name == name && m.GetParameters().Length == parms && !m.IsGenericMethodDefinition) { r = m; break; }
+            found[(t, name, parms)] = r;
+            return r;
+        }
+
+        static readonly Dictionary<(Type, string, int), MethodInfo> found = new Dictionary<(Type, string, int), MethodInfo>();
+        static readonly Dictionary<MethodInfo, bool> noArgVoid = new Dictionary<MethodInfo, bool>();
+
+        /// <summary>Whether a message takes no arguments and returns nothing (callable as an Action).</summary>
+        public static bool NoArgVoid(MethodInfo m)
+        {
+            if (!noArgVoid.TryGetValue(m, out bool r))
+                noArgVoid[m] = r = m.ReturnType == typeof(void) && m.GetParameters().Length == 0;
+            return r;
+        }
+        static readonly Dictionary<MethodInfo, int> parmCounts = new Dictionary<MethodInfo, int>();
+        public static int Params(MethodInfo m)
+        {
+            if (!parmCounts.TryGetValue(m, out int n)) parmCounts[m] = n = m.GetParameters().Length;
+            return n;
         }
     }
 
@@ -92,7 +113,20 @@ namespace Cuphead360.Engine
         {
             if (m == null) return null;
             long t0 = PlayerLoop.Profile ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-            try { return m.Invoke(b.Managed, arg == null && m.GetParameters().Length == 0 ? null : new[] { arg }); }
+            try
+            {
+                if (arg == null && MessageSet.NoArgVoid(m))
+                {
+                    var calls = b.Calls ??= new Dictionary<MethodInfo, Action>();
+                    if (!calls.TryGetValue(m, out var call))
+                    {
+                        try { call = (Action)m.CreateDelegate(typeof(Action), b.Managed); } catch (Exception) { call = null; }
+                        calls[m] = call;
+                    }
+                    if (call != null) { call(); return null; }
+                }
+                return m.Invoke(b.Managed, arg == null && MessageSet.Params(m) == 0 ? null : new[] { arg });
+            }
             catch (TargetInvocationException e) { Exceptions.Report(e.InnerException, b, m.Name); }
             catch (Exception e) { Exceptions.Report(e, b, m.Name); }
             finally { if (t0 != 0) PlayerLoop.SlowCall(t0, b.Managed?.GetType().Name, m.Name); }

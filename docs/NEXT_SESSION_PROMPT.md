@@ -32,9 +32,10 @@ proven right). The third run (`work/console/hw03/`) reached the
 tutorial on hardware, slowly, then stopped at the map load on memory; the
 sign bug persists (memory accesses proven fine; suspected high-half
 forwarding hazard), losing atlases, TMP labels and music. Continue with
-HANDOFF.md's "Next round" item 0: the fourth run's log (round 9 build:
-hazard probe and padding pass, parsed-tree budget), then load speed, packs
-and 720p-sized textures. Rebuild
+HANDOFF.md's "Next round" item 0: the fifth run's log (round 10 build:
+allocation and physics optimizations, texture memory retry, IdText names,
+the CPU probe per thread), then frame rate from its numbers, load speed,
+packs and 720p-sized textures. Rebuild
 with `python tools/build_managed.py --stage jit` after engine changes; check
 with `selftest`, the bot loop (`run --frames 15301 --save
 work/managed/save_bot --bot tests/input/bot_veggies.txt`, deleting the save

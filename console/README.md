@@ -42,13 +42,13 @@ of Spire360's w2c2 header whose only change makes each 64-bit access to the
 player's memory two 32-bit ones: GCC turns w2c2's 8-byte copies into plain
 doubleword loads and stores, the player keeps many 64-bit values only
 4-byte aligned (the third run showed alignment wasn't the problem; the
-split costs little). Every C and C++ source also compiles through
-`console/xsdk/hazard.py` (CMake's compiler launcher): an instruction that
-reads a register's high word gets at least four instructions after the
-register's last write, nops inserted (~1% more instructions). The third run
-pointed at such a read seeing a wrong high word right after the write;
-`probe64.c` measures it before the player starts (`hazard.py --self-test`
-checks the pass).
+split costs little). An open question (docs/VERIFICATION.md, rounds 7-10):
+on the game's thread a 64-bit compare of a value just built has taken the
+low word's sign, while the same instructions are right at start-up;
+`probe64.c` runs the CPU probe on the main thread, on fresh threads and on
+the game thread (frames 1 and 600) with each thread's MSR. Names built
+from 64-bit ids (converted textures and clips) use `IdText`, 32-bit
+arithmetic only, so they are right whatever the cause.
 
 `console/xsdk/build.sh` takes `XSDK`, `VULKAN4XENON`, `GLSLANG`,
 `XSDK_TOOLCHAIN` and `CH360_RUNTIME` (Spire360's checkout) to build

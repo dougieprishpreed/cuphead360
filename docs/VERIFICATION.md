@@ -3,6 +3,31 @@
 Newest first. Each entry says what was run, on which build, and what it
 showed. Windows entries use the JIT oracle (`work/managed/jit`).
 
+## 2026-11-02 fourth hardware run and round 10 (frame rate)
+
+The fourth run (`work/console/hw04/`): the CPU probe found **0 of 200**
+producer/consumer pairs wrong at any distance on the main thread, yet
+I64CHECK failed exactly as before on the game thread, so neither a
+forwarding hazard nor alignment explains it (hazard.py removed). The
+player reached the map: built 7.6 s, activated 5.1 s; then
+`vkAllocateMemory` failed (-2), `sbrk` failed and `std::bad_alloc`
+aborted to the dashboard (84 MB free before the map; player 166 MB,
+textures 77 MB). Also: the long pause before the logo, "press any button"
+showing behind the logo (its atlas name was one of the sign-bug misses),
+hitches and loading-screen stalls.
+
+| Change | Check |
+| --- | --- |
+| `IdText.Of`: path ids in decimal with 32-bit arithmetic (texture, clip names) | I64CHECK compares it with long.ToString; PC equal |
+| Render textures get no converted-file request (GlowBossTitle) | PC bot run |
+| Probe on the main thread, two fresh threads (one made like the game's) and the game thread (frames 1, 600), each with its MSR | host compiles |
+| Texture memory: a failed allocation frees textures not drawn for 3+ frames and retries; a texture read that can't get memory makes room or skips (no abort); budget 96 MB; tree budget 24 MB, decoded audio 16 MB | host compiles |
+| dotnet-trace of the Root Pack fight (JIT, bot excluded): GC 60% of frame time; sampled allocations 782 MB in 8 s, 47% `MethodInfo[]` from uncached message lookups in `NAnimator.Apply` | after: 218 MB in 8 s |
+| Message lookup cached; no-argument script messages through cached delegates (no `MethodInfo.Invoke`, no `GetParameters()` per call); mesh channels typed, arrays reused, no boxing; `CanvasRenderer.SetMesh` reuses its arrays; root canvases refit only when changed; key names memoized; per-frame list copies pooled; animator binding closure only on first bind; typed registries compact lazily (order kept) | JIT bot 15,301 frames: every FRAME/SCENE/BOT line identical to round 9's run, 0 exceptions; selftest 23/23 |
+| Physics: shapes whose boxes are apart skip the Minkowski test (exact); Minkowski/Hull/negation use scratch buffers | bot loop identical again; 18.2 s against 22.3 s |
+| GC: `DOTNET_GCgen0size=0x800000` was ignored (the 0x); native counts showed 32,149 gen0 GCs by frame 6000, 8.7 s of pause, most of the bot's path-planning geometry (7.5 of 8.6 GB sampled across the map load) | after the allocation fixes, native bot 16,001 frames: the runtime's own small gen0 budget 2,490/250/51 GCs, 3.4 s of pause in all, linear memory 215 MB; an 8 MB gen0 budget (honoured as `800000`) 326/326/175, every GC gen1+, 16.4 s, 247 MB. The default is kept (the ignored setting removed) |
+| Console frame step capped at 1/30 s (at most two fixed steps a frame; the game slows below 30 fps instead of falling further behind); the mixer gets the real frame time | |
+
 ## 2026-11-02 managed player, round 9 (memory, high-word hazard)
 
 | Change | Check |

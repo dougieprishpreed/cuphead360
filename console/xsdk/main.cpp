@@ -22,7 +22,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <map>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -186,8 +188,9 @@ const int W = 1280, H = 720, FRAMES = 2;
 const VkFormat TARGET_FORMAT = VK_FORMAT_B8G8R8A8_UNORM;
 const VkDeviceSize VERTEX_RING = 8 * 1024 * 1024;
 // Evict least recently used textures above this: the XEX image is ~100 MB and
-// the player's linear memory reaches ~350 MB in a level, of 512 MB.
-const size_t TEXTURE_BUDGET = 112u << 20;
+// the player's linear memory reaches ~220 MB in a level, of 512 MB; a failed
+// allocation also frees textures not drawn lately and tries again.
+const size_t TEXTURE_BUDGET = 96u << 20;
 
 struct Vertex {
     float x, y, u, v;
@@ -250,6 +253,7 @@ private:
     void destroy(Tex& t, bool now);
     void load(Tex& t);
     void evict();
+    size_t release_unused(size_t want);
     Tex* tex(int id);
 
     VkInstance instance_;
@@ -684,7 +688,9 @@ bool Renderer::upload(Tex& t, VkFormat format, int w, int h, const unsigned char
         ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         ai.allocationSize = req.size;
         ai.memoryTypeIndex = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (!vk(vkAllocateMemory(dev_, &ai, NULL, &t.mem), "vkAllocateMemory (texture)")) {
+        VkResult r = vkAllocateMemory(dev_, &ai, NULL, &t.mem);
+        if (r != VK_SUCCESS && release_unused((size_t)req.size * 2) > 0) r = vkAllocateMemory(dev_, &ai, NULL, &t.mem);
+        if (!vk(r, "vkAllocateMemory (texture)")) {
             vkDestroyImage(dev_, t.image, NULL);
             t.image = VK_NULL_HANDLE;
             return false;
@@ -819,7 +825,19 @@ void Renderer::load(Tex& t) {
     std::vector<unsigned char> file;
     std::string path = "game:/GameData/ctex/" + t.key + ".ctx";
     double t0 = now_ms();
-    bool ok = read_file(path, file);
+    bool ok = false;
+    // Memory is tight: a file that doesn't fit makes room from textures not drawn lately, then tries once more.
+    for (int attempt = 0; attempt < 2 && !ok; ++attempt) {
+        try {
+            ok = read_file(path, file);
+            if (!ok) break;
+        } catch (const std::bad_alloc&) {
+            file = std::vector<unsigned char>();
+            if (attempt == 0 && release_unused(16u << 20) > 0) continue;
+            logf("texture %s: no memory to read it", t.key.c_str());
+            return;
+        }
+    }
     if (loads_logged_ < 40 && ok && file.size() >= 28) {
         ++loads_logged_;
         logf("texture %s: format %u, %ux%u, %u KB in %u ms", t.key.c_str(), ch360_u32(&file[4]), ch360_u32(&file[8]),
@@ -837,6 +855,25 @@ void Renderer::load(Tex& t) {
     }
     VkFormat f = fmt == 1 ? VK_FORMAT_BC1_RGBA_UNORM_BLOCK : fmt == 2 ? VK_FORMAT_BC3_UNORM_BLOCK : TARGET_FORMAT;
     if (!upload(t, f, (int)w, (int)h, &file[28], n)) t.failed = true;
+}
+
+// Frees textures not drawn in the last three frames (the GPU is done with
+// them: two frames are in flight), oldest first, until want bytes are freed.
+size_t Renderer::release_unused(size_t want) {
+    std::vector<std::pair<unsigned, size_t> > order;
+    for (size_t i = 0; i < textures_.size(); ++i)
+        if (textures_[i].image && !textures_[i].key.empty() && frame_no_ - textures_[i].last_used > 2)
+            order.push_back(std::make_pair(textures_[i].last_used, i));
+    std::sort(order.begin(), order.end());
+    size_t freed = 0;
+    for (size_t k = 0; k < order.size() && freed < want; ++k) {
+        Tex& t = textures_[order[k].second];
+        freed += t.bytes;
+        destroy(t, true);
+        ++evictions;
+    }
+    if (freed) logf("vk: out of memory, freed %u KB of unused textures", (unsigned)(freed >> 10));
+    return freed;
 }
 
 // Textures not drawn for a while go when the set passes the budget.
@@ -1109,6 +1146,31 @@ bool g_back_was = false;
 
 // ------------------------------------------------------------ the platform layer
 
+extern "C" int ch360_probe64(void (*log)(const char* line), void (*sync)(void), const char* where, int detail);
+static void probe_line(const char* line) { logf("%s", line); }
+static void probe_sync() { flush_log(true); }
+
+// The CPU probe on a thread of its own: the hardware thread to move to (or -1),
+// created as the runtime creates the game's thread (pthread, its stack size).
+struct ProbeThread { int hw; const char* where; };
+static void* probe_thread(void* arg) {
+    ProbeThread* p = (ProbeThread*)arg;
+    if (p->hw >= 0) xsdk_thread_move((uint32_t)p->hw);
+    ch360_probe64(probe_line, probe_sync, p->where, 0);
+    return NULL;
+}
+static void probe_on_thread(int hw, size_t stack, const char* where) {
+    static ProbeThread arg;
+    arg.hw = hw;
+    arg.where = where;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    if (stack) pthread_attr_setstacksize(&attr, stack);
+    pthread_t th;
+    if (pthread_create(&th, &attr, probe_thread, &arg) == 0) pthread_join(th, NULL);
+    pthread_attr_destroy(&attr);
+}
+
 extern "C" int ch360_plat_frame_begin(void) {
     g_stage = "host: frame begin";
     double t = now_ms();
@@ -1135,6 +1197,8 @@ extern "C" int ch360_plat_frame_begin(void) {
     ++g_frames;
     g_frames_seen = g_frames;
     if (g_frames <= 3 || g_frames == 10 || g_frames == 60 || g_frames == 300) logf("frame %u", g_frames);
+    if (g_frames == 1) ch360_probe64(probe_line, probe_sync, "game thread, frame 1", 0);
+    if (g_frames == 600) ch360_probe64(probe_line, probe_sync, "game thread, frame 600", 0);
     // Back + Start held for a second quits; Back alone writes the log now.
     unsigned held = 0;
     for (uint32_t user = 0; user < 4; ++user) {
@@ -1237,9 +1301,6 @@ extern "C" int __wrap_srt_plat_seek(void* f, long long offset, int whence, unsig
     return __real_srt_plat_seek(f, offset, whence, pos);
 }
 
-extern "C" int ch360_probe64(void (*log)(const char* line), void (*sync)(void));
-static void probe_line(const char* line) { logf("%s", line); }
-static void probe_sync() { flush_log(true); }
 
 int main() {
     FILE* fresh = fopen("game:/cuphead360.txt", "wb");
@@ -1248,7 +1309,10 @@ int main() {
     unsigned f, t;
     memory_mb(&f, &t);
     logf("memory at start: %u MB free of %u MB", f, t);
-    ch360_probe64(probe_line, probe_sync);
+    // The second to fourth runs: compares right here, wrong in the game (VERIFICATION rounds 9-10).
+    ch360_probe64(probe_line, probe_sync, "main thread", 1);
+    probe_on_thread(0, 16u << 20, "new thread like the game's (hw 0, 16 MB stack)");
+    probe_on_thread(2, 0, "new thread on hw 2");
     flush_log(true);
     // The player's linear memory is reserved first (committed as it grows):
     // xsdk's heap takes the free address space at its first growth.

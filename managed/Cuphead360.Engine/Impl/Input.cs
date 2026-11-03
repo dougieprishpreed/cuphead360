@@ -175,9 +175,20 @@ namespace Cuphead360.Engine
         }
 
         /// <summary>A Unity key name ("left ctrl", "joystick 2 button 3", "mouse 0") as a KeyCode value, or -1.</summary>
+        static readonly Dictionary<string, int> codes = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        /// <summary>A key name's KeyCode (memoized: the game asks by name every frame).</summary>
         public static int Code(string name)
         {
             if (string.IsNullOrEmpty(name)) return -1;
+            if (codes.TryGetValue(name, out int known)) return known;
+            int code = CodeOf(name);
+            if (codes.Count < 4096) codes[name] = code;
+            return code;
+        }
+
+        static int CodeOf(string name)
+        {
             name = name.Trim();
             if (name.StartsWith("joystick", StringComparison.OrdinalIgnoreCase))
             {

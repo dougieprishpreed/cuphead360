@@ -45,7 +45,12 @@ namespace Cuphead360.Player
         static readonly Dictionary<Texture, int> ids = new Dictionary<Texture, int>();
         static readonly Dictionary<int, int> versions = new Dictionary<int, int>();
         static short[] pcm = new short[0];
-        /// <summary>The last frame's real duration in seconds (Unity's deltaTime), 1/60 to 1/15; scripted runs keep 1/60.</summary>
+        /// <summary>
+        /// The last frame's real duration in seconds (Unity's deltaTime), 1/60 to
+        /// 1/30: a slower frame moves the game less than real time rather than run
+        /// more fixed steps and fall further behind; the mixer still gets the real
+        /// time (PlayerLoop.AudioDelta). Scripted runs keep 1/60.
+        /// </summary>
         public static float Delta = 1f / 60f;
 
         public static int Play(Func<int, bool> frame)
@@ -68,7 +73,8 @@ namespace Cuphead360.Player
                 float real = (float)((now - last) / (double)hz);
                 last = now;
                 // A console frame slower than the vblank still moves the game at its real speed.
-                Delta = scripted != null ? 1f / 60f : Math.Clamp(real, 1f / 60f, 1f / 15f);
+                Delta = scripted != null ? 1f / 60f : Math.Clamp(real, 1f / 60f, 1f / 30f);
+                PlayerLoop.AudioDelta = scripted != null ? -1 : Math.Clamp(real, 0f, 0.25f);
                 PollPads();
                 if (!frame(++n)) break;
                 long built = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -79,7 +85,8 @@ namespace Cuphead360.Player
                     Console.WriteLine($"SLOW frame {n}: {(drawn - now) * 1000 / hz} ms; {PlayerLoop.ProfileReport(1)} drawlist={(drawn - built) * 1000 / hz}");
                 else Array.Clear(PlayerLoop.PhaseMs);
                 if (n % 600 == 0)
-                    Console.WriteLine($"CONSOLE frame {n} scene={Cuphead360.Engine.Scenes.Active?.Name} heap {GC.GetTotalMemory(false) >> 20} MB exceptions {Exceptions.Count}");
+                    Console.WriteLine($"CONSOLE frame {n} scene={Cuphead360.Engine.Scenes.Active?.Name} heap {GC.GetTotalMemory(false) >> 20} MB exceptions {Exceptions.Count}; "
+                        + $"GCs {GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)} (gen0/1/2), paused {(long)GC.GetTotalPauseDuration().TotalMilliseconds} ms in all");
             }
             return 0;
         }
@@ -95,12 +102,14 @@ namespace Cuphead360.Player
             // The console reports slow loads and keeps a smaller decoded-audio cache (32 MB).
             Cuphead360.Engine.SceneLoader.Timing = true;
             ChobFile.Trace = Console.WriteLine;
-            Audio.CacheFloats = 8L * 1024 * 1024;
-            if (ChobObject.TreeBudget == long.MaxValue) ChobObject.TreeBudget = 32L << 20;   // parsed trees kept (estimated bytes)
+            Audio.CacheFloats = 4L * 1024 * 1024;   // 16 MB
+            if (ChobObject.TreeBudget == long.MaxValue) ChobObject.TreeBudget = 24L << 20;   // parsed trees kept (estimated bytes)
             var bad = new List<string>();
             foreach (var s in new[] { "5848540871337674781", "-2592357432173453771", "4294967296", "-4294967296", "2147483648", "-1" })
                 if (long.Parse(s).ToString() != s) bad.Add("format " + s + " -> " + long.Parse(s));
             long two32 = long.Parse("4294967296"), one = long.Parse("1"), two31 = long.Parse("2147483648"), zero = long.Parse("0");
+            foreach (var s in new[] { "5848540871337674781", "-2592357432173453771", "-9223372036854775808", "0" })
+                if (IdText.Of(long.Parse(s)) != s) bad.Add("IdText " + s + " -> " + IdText.Of(long.Parse(s)));
             if (!(two32 > one)) bad.Add("2^32 > 1");
             if (!(two31 > zero)) bad.Add("2^31 > 0");
             if (two32 + 5 == long.Parse("5")) bad.Add("2^32+5 == 5");
@@ -213,11 +222,12 @@ namespace Cuphead360.Player
                 id = ids.Count;
                 ids[t] = id;
                 var src = (Objects.Of(t) as NAsset)?.Source;
+                if (t is RenderTexture) { ids[t] = -1; return -1; }   // not drawn yet (no converted file)
                 if (src != null && RuntimePixels.Get(t) == null)
                 {
                     string k = src.File.Path.Replace('/', '_');
                     if (k.EndsWith(".chob")) k = k.Substring(0, k.Length - 5);
-                    var key = Encoding.UTF8.GetBytes(k + "_" + src.PathId);
+                    var key = Encoding.UTF8.GetBytes(k + "_" + IdText.Of(src.PathId));
                     fixed (byte* p = key) TextureFile(id, p, key.Length);
                 }
                 else if (RuntimePixels.Get(t) == null) { ids[t] = -1; return -1; }

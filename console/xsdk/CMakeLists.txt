@@ -8,13 +8,6 @@ if(NOT XSDK)
     message(FATAL_ERROR "Configure with -DCMAKE_TOOLCHAIN_FILE=<xsdk>/cmake/xsdk.cmake")
 endif()
 
-# Every C and C++ source compiles through hazard.py: an instruction reading a
-# register's high word gets at least four instructions after the write
-# (docs/VERIFICATION.md, third hardware run; probe64.c measures it).
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
-set(CMAKE_C_COMPILER_LAUNCHER "${Python3_EXECUTABLE};${CMAKE_CURRENT_LIST_DIR}/hazard.py")
-set(CMAKE_CXX_COMPILER_LAUNCHER "${Python3_EXECUTABLE};${CMAKE_CURRENT_LIST_DIR}/hazard.py")
-
 set(VULKAN4XENON "" CACHE PATH "vulkan4xenon checkout, with build/libvulkan4xenon.a built")
 set(CH360_SHADERS "" CACHE PATH "the shaders' folder: ch360_shaders.c/.h (build.sh)")
 set(CH360_PLAYER_C "" CACHE PATH "the translated player (work/managed/c, tools/build_managed.py --stage wasm,c)")
@@ -67,9 +60,4 @@ target_link_options(cuphead360 PRIVATE "-Wl,--wrap=malloc,--wrap=free,--wrap=rea
 # and counts them in the log's heartbeat.
 target_link_options(cuphead360 PRIVATE "-Wl,--wrap=srt_clock_wait_until,--wrap=srt_plat_sleep_ns"
     "-Wl,--wrap=srt_plat_open,--wrap=srt_plat_read,--wrap=srt_plat_seek")
-# A change to the padding pass recompiles everything it touched.
-foreach(target ch360_player cuphead360)
-    get_target_property(target_sources ${target} SOURCES)
-    set_property(SOURCE ${target_sources} APPEND PROPERTY OBJECT_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/hazard.py")
-endforeach()
 xsdk_add_xex(cuphead360 TITLE_ID ${CH360_TITLE_ID} NAME "Cuphead360")

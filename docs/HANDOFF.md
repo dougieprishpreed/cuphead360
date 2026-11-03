@@ -98,7 +98,21 @@ Xenia, hardware, memory.
 
 ## Next round (in order)
 
-0. **The fourth run (round 9 build staged).** Read the "cpu probe" table
+0. **The fifth run (round 10 build staged: frame rate, memory headroom,
+   IdText names, per-thread probe).** Read in order: the "cpu probe" lines
+   per thread (main, two fresh threads, the game thread at frames 1 and
+   600, each with its MSR): if the game thread shows wrong results where the
+   others don't, the CPU state differs on that thread; I64CHECK (still
+   expected to FAIL until that is solved; IdText makes texture and clip names
+   right regardless, so the logo, map atlases, TMP labels and music should
+   now load); whether the map loads and plays (vk out-of-memory now frees
+   and retries); frame times (the 600-frame lines and SLOW frames) and GC
+   counts in the CONSOLE lines. Next for frame rate: profile the console
+   path again from those numbers (JIT dotnet-trace of the house and map
+   without the bot: `dotnet-trace collect -p PID --format Speedscope`, then
+   the scratchpad speedscope summarizer; allocations with `--profile
+   gc-verbose`).
+   Round 9's item, kept for reference: the "cpu probe" table
    first (which producer/consumer pairs are wrong at which nop distance:
    that decides whether hazard.py's gap of 4 and its reader list are right,
    too wide or too narrow), then I64CHECK (ok means atlases, TMP labels and

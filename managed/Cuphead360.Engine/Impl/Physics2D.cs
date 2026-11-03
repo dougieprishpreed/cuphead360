@@ -262,20 +262,50 @@ namespace Cuphead360.Engine
             return r;
         }
 
-        /// <summary>Points of a shape with its rounding turned into a polygon (for Minkowski sums).</summary>
-        static List<Vector2> Expanded(Shape s)
+        /// <summary>Points of a shape with its rounding turned into a polygon (for Minkowski sums), into l.</summary>
+        static List<Vector2> Expanded(Shape s, List<Vector2> l)
         {
-            var l = new List<Vector2>();
+            l.Clear();
             if (s.R <= 0) { l.AddRange(s.Pts); return l; }
             foreach (var p in s.Pts) foreach (var d in circle16) l.Add(p + d * s.R);
             return l;
         }
 
+        // Scratch for Minkowski and Hull (physics runs on the one game thread, never nested).
+        static readonly List<Vector2> scratchA = new List<Vector2>(), scratchB = new List<Vector2>(), scratchSum = new List<Vector2>();
+        static Vector2[] scratchHull = new Vector2[64];
+        static readonly Vector2[][] negByCount = new Vector2[64][];
+        static readonly Shape negShape = new Shape();
+        static readonly Comparison<Vector2> byXY = (a, b) => a.x != b.x ? a.x.CompareTo(b.x) : a.y.CompareTo(b.y);
+
+        /// <summary>
+        /// Whether two shapes' boxes are apart by more than tol: then no
+        /// Minkowski test can find them touching (a rounding radius is inside
+        /// its box), so the hulls needn't be built.
+        /// </summary>
+        static bool Apart(Shape a, Shape b, float tol)
+        {
+            var ra = a.Bounds(); var rb = b.Bounds();
+            return ra.xMax + tol < rb.xMin || rb.xMax + tol < ra.xMin || ra.yMax + tol < rb.yMin || rb.yMax + tol < ra.yMin;
+        }
+
+        /// <summary>-b, in a shared shape (valid until the next call).</summary>
+        static Shape Negated(Shape b)
+        {
+            int n = b.Pts.Length;
+            var pts = n < negByCount.Length ? (negByCount[n] ??= new Vector2[n]) : new Vector2[n];
+            for (int i = 0; i < n; i++) pts[i] = -b.Pts[i];
+            negShape.Pts = pts;
+            negShape.R = b.R;
+            return negShape;
+        }
+
         public static Vector2[] Hull(List<Vector2> pts)
         {
-            pts.Sort((a, b) => a.x != b.x ? a.x.CompareTo(b.x) : a.y.CompareTo(b.y));
+            pts.Sort(byXY);
             if (pts.Count < 3) return pts.ToArray();
-            var h = new Vector2[pts.Count * 2];
+            if (scratchHull.Length < pts.Count * 2) scratchHull = new Vector2[pts.Count * 4];
+            var h = scratchHull;
             int k = 0;
             for (int i = 0; i < pts.Count; i++) { while (k >= 2 && Cross(h[k - 1] - h[k - 2], pts[i] - h[k - 2]) <= 0) k--; h[k++] = pts[i]; }
             for (int i = pts.Count - 2, t = k + 1; i >= 0; i--) { while (k >= t && Cross(h[k - 1] - h[k - 2], pts[i] - h[k - 2]) <= 0) k--; h[k++] = pts[i]; }
@@ -287,8 +317,9 @@ namespace Cuphead360.Engine
         /// <summary>Minkowski sum of a collider shape and the (origin-centred) cast shape.</summary>
         public static Vector2[] Minkowski(Shape s, Shape cast)
         {
-            var a = Expanded(s); var b = Expanded(cast);
-            var sum = new List<Vector2>(a.Count * b.Count);
+            var a = Expanded(s, scratchA); var b = Expanded(cast, scratchB);
+            var sum = scratchSum;
+            sum.Clear();
             foreach (var p in a) foreach (var q in b) sum.Add(p + q);
             return Hull(sum);
         }
@@ -388,8 +419,8 @@ namespace Cuphead360.Engine
         /// </summary>
         public static Vector2 Separation(Shape a, Shape b)
         {
-            var negB = new Shape { Pts = Array.ConvertAll(b.Pts, p => -p), R = b.R };
-            var md = Minkowski(a, negB);
+            if (Apart(a, b, 1e-3f)) return Vector2.zero;
+            var md = Minkowski(a, Negated(b));
             if (md.Length < 3) return Vector2.zero;
             float best = float.MaxValue; Vector2 bestN = Vector2.zero;
             for (int i = 0; i < md.Length; i++)
@@ -411,8 +442,8 @@ namespace Cuphead360.Engine
         public static bool Overlap(Shape a, Shape b)
         {
             // Point-in-Minkowski-difference: origin inside (a - b).
-            var negB = new Shape { Pts = Array.ConvertAll(b.Pts, p => -p), R = b.R };
-            var md = Minkowski(a, negB);
+            if (Apart(a, b, 1e-3f)) return false;
+            var md = Minkowski(a, Negated(b));
             if (md.Length == 1) return md[0].sqrMagnitude <= 1e-10f;
             if (md.Length == 2) return SegDist(Vector2.zero, md[0], md[1]) <= 1e-5f;
             for (int i = 0; i < md.Length; i++)

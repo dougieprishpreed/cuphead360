@@ -66,6 +66,9 @@ namespace Cuphead360.Engine
         }
 
         /// <summary>One frame of Unity's player loop with the given real elapsed time.</summary>
+        /// <summary>The wall-clock length of the frame for the mixer when the host caps realDelta (the console), else -1.</summary>
+        public static float AudioDelta = -1;
+
         public static void Frame(float realDelta)
         {
             Clock.FrameCount++;
@@ -114,7 +117,7 @@ namespace Cuphead360.Engine
             RenderFrame?.Invoke();
             ResumeCoroutines(fixedPhase: false, endOfFrame: true);
             ProcessDestroys();
-            Audio.Step(realDelta);   // audio runs in unscaled time
+            Audio.Step(AudioDelta >= 0 ? AudioDelta : realDelta);   // audio runs in unscaled time
             P(-1);
         }
 
@@ -182,8 +185,12 @@ namespace Cuphead360.Engine
             {
                 var b = tracked[i];
                 if (b.Invokes.Count == 0 || b.Destroyed) continue;
-                foreach (var inv in b.Invokes.ToArray())
+                int count = b.Invokes.Count;
+                var invokes = System.Buffers.ArrayPool<InvokeState>.Shared.Rent(count);
+                b.Invokes.CopyTo(invokes);
+                for (int k = 0; k < count; k++)
                 {
+                    var inv = invokes[k];
                     if (inv.Cancelled || Clock.Time < inv.Due) continue;
                     // Invoke runs on disabled behaviours too, but not inactive GameObjects.
                     if (!b.GameObject.ActiveInHierarchy) continue;
@@ -191,6 +198,7 @@ namespace Cuphead360.Engine
                     if (inv.Repeat > 0f) inv.Due += inv.Repeat; else inv.Cancelled = true;
                     Behaviours.Send(b, m);
                 }
+                System.Buffers.ArrayPool<InvokeState>.Shared.Return(invokes, true);
                 b.Invokes.RemoveAll(x => x.Cancelled);
             }
         }
@@ -202,8 +210,12 @@ namespace Cuphead360.Engine
             {
                 var b = tracked[i];
                 if (b.Coroutines.Count == 0) continue;
-                foreach (var c in b.Coroutines.ToArray())
+                int count = b.Coroutines.Count;
+                var routines = System.Buffers.ArrayPool<CoroutineState>.Shared.Rent(count);
+                b.Coroutines.CopyTo(routines);
+                for (int k = 0; k < count; k++)
                 {
+                    var c = routines[k];
                     if (c.Done || c.WaitOn != null) continue;
                     if (fixedPhase != c.FixedWait || endOfFrame != c.EndOfFrameWait) continue;
                     // Nothing resumes in the frame (or fixed step) it yielded in, except
@@ -215,6 +227,7 @@ namespace Cuphead360.Engine
                     if (c.Waiting is AsyncOperation op && !Scenes.IsDone(op)) continue;
                     Coroutines.Step(c);
                 }
+                System.Buffers.ArrayPool<CoroutineState>.Shared.Return(routines, true);
                 b.Coroutines.RemoveAll(x => x.Done);
             }
         }

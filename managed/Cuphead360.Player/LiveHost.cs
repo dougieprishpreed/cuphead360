@@ -477,7 +477,7 @@ void main() {
             if (src == null) return 0;
             string k = src.File.Path.Replace('/', '_');
             if (k.EndsWith(".chob")) k = k.Substring(0, k.Length - 5);
-            k += "_" + src.PathId;
+            k += "_" + IdText.Of(src.PathId);
             if (textures.TryGetValue(k, out var e)) return e.id;
             uint tex = LoadTex(k);
             textures[k] = (tex, 0);

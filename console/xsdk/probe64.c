@@ -14,6 +14,7 @@
 typedef unsigned long long u64;
 typedef u64 (*hz_fn)(u64 a, u64 b, const u64* load, u64* store);
 extern hz_fn ch360_hz_table[];
+u64 ch360_raw_mfmsr(void);
 
 enum { PRODUCERS = 5, CONSUMERS = 5, DISTANCES = 8 };
 static const char* const producers[PRODUCERS] = { "or", "sldi+or", "add", "ld", "mulld" };
@@ -37,12 +38,15 @@ static char classify(int consumer, u64 got) {
 
 typedef void (*log_fn)(const char* line);
 
-/* Writes one line per producer and consumer; returns how many results were wrong. */
-int ch360_probe64(log_fn log, void (*sync)(void)) {
-    static u64 load_cell = 0x0000000180000000ull, store_cell;
+/* Runs the table on the calling thread; with detail, one line per producer and
+ * consumer, otherwise one summary line (where names the thread). Returns how
+ * many results were wrong. */
+int ch360_probe64(log_fn log, void (*sync)(void), const char* where, int detail) {
+    u64 load_cell = 0x0000000180000000ull, store_cell;
     char line[160];
     int wrong = 0, p, c, d;
-    log("cpu probe: high word of a fresh 64-bit result, at 0 1 2 3 4 6 8 12 nops (- right, S low word sign-extended, T stale, Z zero)");
+    u64 msr = ch360_raw_mfmsr();
+    if (detail) log("cpu probe: high word of a fresh 64-bit result, at 0 1 2 3 4 6 8 12 nops (- right, S low word sign-extended, T stale, Z zero)");
     sync();
     for (p = 0; p < PRODUCERS; ++p)
         for (c = 0; c < CONSUMERS; ++c) {
@@ -57,10 +61,13 @@ int ch360_probe64(log_fn log, void (*sync)(void)) {
                 if (marks[d] != '-') ++wrong;
             }
             marks[DISTANCES] = 0;
-            snprintf(line, sizeof(line), "cpu probe %-7s > %-7s %s", producers[p], consumers[c], marks);
-            log(line);
+            if (detail || strchr(marks, 'S') || strchr(marks, 'T') || strchr(marks, 'Z') || strchr(marks, '?')) {
+                snprintf(line, sizeof(line), "cpu probe %s: %-7s > %-7s %s", where, producers[p], consumers[c], marks);
+                log(line);
+            }
         }
-    snprintf(line, sizeof(line), "cpu probe: %d of %d wrong", wrong, PRODUCERS * CONSUMERS * DISTANCES);
+    snprintf(line, sizeof(line), "cpu probe %s: MSR %08x%08x, %d of %d wrong", where, (unsigned)(msr >> 32), (unsigned)msr, wrong,
+             PRODUCERS * CONSUMERS * DISTANCES);
     log(line);
     return wrong;
 }

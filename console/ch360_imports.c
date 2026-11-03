@@ -5,6 +5,7 @@
  * little-endian, which the platform layer reads with ch360_u32/ch360_f32. */
 #include "w2c2_base.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "srt.h"
 #include "srt_plat.h"
@@ -90,18 +91,38 @@ static void run_start(void* p) {
 }
 
 int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsigned memory_mb) {
-    /* The GC collects early and compacts (the console's memory is tight): a
-     * small gen0 budget and conserve-memory mode keep the linear memory, which
-     * never shrinks, close to the live heap. */
-    static const char* const env[4] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCgen0size=0x800000",
-                                        "DOTNET_GCConserveMemory=7" };
+    /* The GC keeps its own small gen0 budget (frequent, cheap gen0 GCs) and
+     * conserve-memory mode, so the linear memory, which never shrinks, stays
+     * close to the live heap. An 8 MB gen0 budget (DOTNET_GCgen0size=800000;
+     * hex, no 0x) made every GC a gen1 and half of them gen2: 16.4 s of pauses
+     * over the native bot run against 3.4 s (docs/VERIFICATION.md, round 10). */
+    static const char* const env[3] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCConserveMemory=7" };
     srt_config cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.root_dir = root_dir;
     cfg.argc = argc;
     cfg.argv = argv;
-    cfg.envc = 4;
+    cfg.envc = 3;
     cfg.envp = env;
+#ifndef __XSDK__
+    {
+        /* PC checks: CH360_GUEST_ENV="A=1 B=2" replaces the GC settings above
+         * (the first two entries stay), for trying budgets without a rebuild. */
+        static char buf[512];
+        static const char* list[16];
+        const char* over = getenv("CH360_GUEST_ENV");
+        if (over != NULL && strlen(over) < sizeof(buf)) {
+            int n = 2;
+            char* tok;
+            strcpy(buf, over);
+            list[0] = env[0];
+            list[1] = env[1];
+            for (tok = strtok(buf, " "); tok != NULL && n < 16; tok = strtok(NULL, " ")) list[n++] = tok;
+            cfg.envc = n;
+            cfg.envp = list;
+        }
+    }
+#endif
     cfg.memory_limit = (srt_u64)memory_mb * 1024 * 1024;
     cfg.stderr_sink = stderr_sink;
     if (srt_init(&cfg) != 0) {

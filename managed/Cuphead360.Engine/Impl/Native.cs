@@ -307,39 +307,62 @@ namespace Cuphead360.Engine
         }
     }
 
-    /// <summary>Live records of the types hot paths scan every frame (physics, rendering, animation).</summary>
+    /// <summary>
+    /// Live records of the types hot paths scan every frame (physics, rendering,
+    /// animation). A destroyed record leaves its list when the list is next read
+    /// (one pass for a whole batch of destroys, order kept), not one search each.
+    /// </summary>
     public static class Typed
     {
-        public static readonly List<NCollider2D> Colliders = new List<NCollider2D>();
-        public static readonly List<NSpriteRenderer> SpriteRenderers = new List<NSpriteRenderer>();
-        public static readonly List<NCanvas> Canvases = new List<NCanvas>();
-        public static readonly List<NCamera> Cameras = new List<NCamera>();
-        public static readonly List<NBehaviour> Behaviours = new List<NBehaviour>();
-        public static readonly List<NGameObject> GameObjects = new List<NGameObject>();
+        static readonly List<NCollider2D> colliders = new List<NCollider2D>();
+        static readonly List<NSpriteRenderer> spriteRenderers = new List<NSpriteRenderer>();
+        static readonly List<NCanvas> canvases = new List<NCanvas>();
+        static readonly List<NCamera> cameras = new List<NCamera>();
+        static readonly List<NBehaviour> behaviours = new List<NBehaviour>();
+        static readonly List<NGameObject> gameObjects = new List<NGameObject>();
+        static int dirty;   // bit per list holding destroyed records
+
+        public static List<NCollider2D> Colliders => Clean(colliders, 1);
+        public static List<NSpriteRenderer> SpriteRenderers => Clean(spriteRenderers, 2);
+        public static List<NCanvas> Canvases => Clean(canvases, 4);
+        public static List<NCamera> Cameras => Clean(cameras, 8);
+        public static List<NBehaviour> Behaviours => Clean(behaviours, 16);
+        public static List<NGameObject> GameObjects => Clean(gameObjects, 32);
+
+        static List<T> Clean<T>(List<T> list, int bit) where T : NObject
+        {
+            if ((dirty & bit) != 0)
+            {
+                dirty &= ~bit;
+                list.RemoveAll(x => x.Destroyed);
+            }
+            return list;
+        }
 
         public static void Add(NObject r)
         {
             switch (r)
             {
-                case NCollider2D c: Colliders.Add(c); break;
-                case NSpriteRenderer s: SpriteRenderers.Add(s); break;
-                case NCanvas cv: Canvases.Add(cv); break;
-                case NCamera cam: Cameras.Add(cam); break;
-                case NBehaviour b: Behaviours.Add(b); break;
-                case NGameObject g: GameObjects.Add(g); break;
+                case NCollider2D c: colliders.Add(c); break;
+                case NSpriteRenderer s: spriteRenderers.Add(s); break;
+                case NCanvas cv: canvases.Add(cv); break;
+                case NCamera cam: cameras.Add(cam); break;
+                case NBehaviour b: behaviours.Add(b); break;
+                case NGameObject g: gameObjects.Add(g); break;
             }
         }
 
+        /// <summary>A record was released (Destroyed is set): its list drops it on the next read.</summary>
         public static void Remove(NObject r)
         {
             switch (r)
             {
-                case NCollider2D c: Colliders.Remove(c); break;
-                case NSpriteRenderer s: SpriteRenderers.Remove(s); break;
-                case NCanvas cv: Canvases.Remove(cv); break;
-                case NCamera cam: Cameras.Remove(cam); break;
-                case NBehaviour b: Behaviours.Remove(b); break;
-                case NGameObject g: GameObjects.Remove(g); break;
+                case NCollider2D: dirty |= 1; break;
+                case NSpriteRenderer: dirty |= 2; break;
+                case NCanvas: dirty |= 4; break;
+                case NCamera: dirty |= 8; break;
+                case NBehaviour: dirty |= 16; break;
+                case NGameObject: dirty |= 32; break;
             }
         }
     }

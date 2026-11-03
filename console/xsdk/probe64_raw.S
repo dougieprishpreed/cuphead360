@@ -79,6 +79,16 @@ hz_\p\()_\c\()_\d:
 	.endr
 	.endr
 
+# The calling thread's machine state register (titles run in supervisor
+# state: xsdk docs/HARDWARE.md read 0x9030 the same way).
+	.section .text.ch360_raw_mfmsr,"ax",@progbits
+	.globl ch360_raw_mfmsr
+	.type ch360_raw_mfmsr,@function
+ch360_raw_mfmsr:
+	mfmsr 3
+	blr
+	.size ch360_raw_mfmsr,.-ch360_raw_mfmsr
+
 	.macro entry p, c, d
 	.long hz_\p\()_\c\()_\d
 	.endm

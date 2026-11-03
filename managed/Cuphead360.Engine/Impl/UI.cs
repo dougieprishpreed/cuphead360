@@ -182,11 +182,12 @@ namespace Cuphead360.Engine
             Rect px = cam != null ? cam.PixelRect : new Rect(0, 0, Icalls.ScreenWidth, Icalls.ScreenHeight);
             float sf = ScaleFactor <= 0 ? 1f : ScaleFactor;
             var size = new Vector2(px.width / sf, px.height / sf);
-            rt.Change(() =>
-            {
-                rt.AnchorMin = Vector2.zero; rt.AnchorMax = Vector2.zero; rt.SizeDelta = size;
-                rt.Pivot = new Vector2(0.5f, 0.5f);   // driven by the canvas
-            });
+            if (rt.AnchorMin != Vector2.zero || rt.AnchorMax != Vector2.zero || rt.SizeDelta != size || rt.Pivot != new Vector2(0.5f, 0.5f))
+                rt.Change(() =>
+                {
+                    rt.AnchorMin = Vector2.zero; rt.AnchorMax = Vector2.zero; rt.SizeDelta = size;
+                    rt.Pivot = new Vector2(0.5f, 0.5f);   // driven by the canvas
+                });
             Vector3 pos; Quaternion rot; float scale;
             if (cam == null)
             {
@@ -255,6 +256,34 @@ namespace Cuphead360.Engine
         {
             if (m == null) return null;
             return meshes.GetValue(m, _ => new MeshData());
+        }
+
+        /// <summary>A copy in dst's arrays where their sizes match (UGUI hands every graphic the same worker mesh).</summary>
+        public MeshData CopyInto(MeshData dst)
+        {
+            if (dst == null || dst == this) return Copy();
+            dst.Vertices = Reuse(dst.Vertices, Vertices);
+            dst.Normals = Normals == null ? null : Reuse(dst.Normals, Normals);
+            dst.Tangents = Tangents == null ? null : Reuse(dst.Tangents, Tangents);
+            dst.Colors = Colors == null ? null : Reuse(dst.Colors, Colors);
+            for (int i = 0; i < 4; i++) dst.Uv[i] = Uv[i] == null ? null : Reuse(dst.Uv[i], Uv[i]);
+            dst.Bounds = Bounds;
+            for (int s = 0; s < SubMeshes.Count; s++)
+            {
+                if (s < dst.SubMeshes.Count) dst.SubMeshes[s] = Reuse(dst.SubMeshes[s], SubMeshes[s]);
+                else dst.SubMeshes.Add((int[])SubMeshes[s].Clone());
+            }
+            if (dst.SubMeshes.Count > SubMeshes.Count) dst.SubMeshes.RemoveRange(SubMeshes.Count, dst.SubMeshes.Count - SubMeshes.Count);
+            dst.Topologies.Clear();
+            dst.Topologies.AddRange(Topologies);
+            return dst;
+        }
+
+        static T[] Reuse<T>(T[] dst, T[] src)
+        {
+            if (dst == null || dst.Length != src.Length) dst = new T[src.Length];
+            Array.Copy(src, dst, src.Length);
+            return dst;
         }
 
         public MeshData Copy()
@@ -331,10 +360,15 @@ namespace Cuphead360.Engine
     public static class UI
     {
         /// <summary>Before rendering: fit root canvases, then let UGUI/TMP rebuild layout and meshes.</summary>
+        static readonly List<NCanvas> canvases = new List<NCanvas>();
+
         public static void WillRender()
         {
-            foreach (var c in Typed.Canvases.ToArray())
+            canvases.Clear();
+            canvases.AddRange(Typed.Canvases);
+            foreach (var c in canvases)
                 if (c.Enabled && c.GameObject != null && c.GameObject.ActiveInHierarchy) c.FitRoot();
+            canvases.Clear();
             try { Canvas.SendWillRenderCanvases(); }
             catch (Exception e) { Exceptions.Report(e, null, "Canvas.willRenderCanvases"); }
         }
@@ -499,7 +533,13 @@ namespace Cuphead360.Engine
         public static void UnityEngine_CanvasRenderer__SetTexture(CanvasRenderer self, Texture texture) { var r = CR(self); if (r != null) r.Texture = texture; }
         public static void UnityEngine_CanvasRenderer__SetAlphaTexture(CanvasRenderer self, Texture texture) { var r = CR(self); if (r != null) r.AlphaTexture = texture; }
         /// <summary>The canvas renderer takes a copy of the mesh, as Unity's does.</summary>
-        public static void UnityEngine_CanvasRenderer__SetMesh(CanvasRenderer self, Mesh mesh) { var r = CR(self); if (r != null) r.Mesh = MeshData.Of(mesh)?.Copy(); }
+        public static void UnityEngine_CanvasRenderer__SetMesh(CanvasRenderer self, Mesh mesh)
+        {
+            var r = CR(self);
+            if (r == null) return;
+            var src = MeshData.Of(mesh);
+            r.Mesh = src == null ? null : src.CopyInto(r.Mesh);
+        }
         public static void UnityEngine_CanvasRenderer__Clear(CanvasRenderer self) { var r = CR(self); if (r != null) { r.Mesh = null; r.Materials = new Material[0]; r.Texture = null; } }
         public static bool UnityEngine_CanvasRenderer__get_cull(CanvasRenderer self) => CR(self)?.Cull ?? false;
         public static void UnityEngine_CanvasRenderer__set_cull(CanvasRenderer self, bool value) { var r = CR(self); if (r != null) r.Cull = value; }
@@ -595,6 +635,16 @@ namespace Cuphead360.Engine
             }
         }
 
+        /// <summary>Element i of a vector array as a Vector4, without boxing.</summary>
+        static Vector4 At(Array values, int i) => values switch
+        {
+            Vector3[] a3 => a3[i],
+            Vector2[] a2 => new Vector4(a2[i].x, a2[i].y, 0, 0),
+            Vector4[] a4 => a4[i],
+            float[] f => new Vector4(f[i], 0, 0, 0),
+            _ => V4(values.GetValue(i)),
+        };
+
         static Vector4 V4(object o)
         {
             switch (o)
@@ -616,37 +666,42 @@ namespace Cuphead360.Engine
             {
                 case Mesh.InternalShaderChannel.Vertex:
                     {
-                        var a = new Vector3[n];
-                        for (int i = 0; i < n; i++) { var v = V4(values.GetValue(i)); a[i] = new Vector3(v.x, v.y, v.z); }
+                        var a = d.Vertices != null && d.Vertices.Length == n ? d.Vertices : new Vector3[n];
+                        if (values is Vector3[] src3) Array.Copy(src3, a, n);
+                        else for (int i = 0; i < n; i++) { var v = At(values, i); a[i] = new Vector3(v.x, v.y, v.z); }
                         d.Vertices = a;
                         break;
                     }
                 case Mesh.InternalShaderChannel.Normal:
                     {
-                        var a = new Vector3[n];
-                        for (int i = 0; i < n; i++) { var v = V4(values.GetValue(i)); a[i] = new Vector3(v.x, v.y, v.z); }
+                        var a = d.Normals != null && d.Normals.Length == n ? d.Normals : new Vector3[n];
+                        if (values is Vector3[] src3) Array.Copy(src3, a, n);
+                        else for (int i = 0; i < n; i++) { var v = At(values, i); a[i] = new Vector3(v.x, v.y, v.z); }
                         d.Normals = n > 0 ? a : null;
                         break;
                     }
                 case Mesh.InternalShaderChannel.Tangent:
                     {
-                        var a = new Vector4[n];
-                        for (int i = 0; i < n; i++) a[i] = V4(values.GetValue(i));
+                        var a = d.Tangents != null && d.Tangents.Length == n ? d.Tangents : new Vector4[n];
+                        for (int i = 0; i < n; i++) a[i] = At(values, i);
                         d.Tangents = n > 0 ? a : null;
                         break;
                     }
                 case Mesh.InternalShaderChannel.Color:
                     {
-                        var a = new Color32[n];
-                        for (int i = 0; i < n; i++) a[i] = values.GetValue(i) switch { Color32 c32 => c32, Color c => (Color32)c, _ => new Color32(255, 255, 255, 255) };
+                        var a = d.Colors != null && d.Colors.Length == n ? d.Colors : new Color32[n];
+                        if (values is Color32[] s32) Array.Copy(s32, a, n);
+                        else if (values is Color[] sc) for (int i = 0; i < n; i++) a[i] = sc[i];
+                        else for (int i = 0; i < n; i++) a[i] = new Color32(255, 255, 255, 255);
                         d.Colors = n > 0 ? a : null;
                         break;
                     }
                 default:
                     {
-                        var a = new Vector4[n];
-                        for (int i = 0; i < n; i++) a[i] = V4(values.GetValue(i));
-                        d.Uv[(int)channel - (int)Mesh.InternalShaderChannel.TexCoord0] = n > 0 ? a : null;
+                        int uv = (int)channel - (int)Mesh.InternalShaderChannel.TexCoord0;
+                        var a = d.Uv[uv] != null && d.Uv[uv].Length == n ? d.Uv[uv] : new Vector4[n];
+                        for (int i = 0; i < n; i++) a[i] = At(values, i);
+                        d.Uv[uv] = n > 0 ? a : null;
                         break;
                     }
             }
@@ -699,8 +754,11 @@ namespace Cuphead360.Engine
             if (submesh < 0) { UnityEngine_Mesh__set_subMeshCount(self, 1); submesh = 0; }
             UnityEngine_Mesh__set_subMeshCount(self, Math.Max(d.SubMeshes.Count, submesh + 1));
             int n = indices == null ? 0 : Math.Min(arraySize, indices.Length);
-            var a = new int[n];
-            for (int i = 0; i < n; i++) a[i] = Convert.ToInt32(indices.GetValue(i)) + baseVertex;
+            var old = submesh < d.SubMeshes.Count ? d.SubMeshes[submesh] : null;
+            var a = old != null && old.Length == n ? old : new int[n];
+            if (indices is int[] ii) for (int i = 0; i < n; i++) a[i] = ii[i] + baseVertex;
+            else if (indices is ushort[] us) for (int i = 0; i < n; i++) a[i] = us[i] + baseVertex;
+            else for (int i = 0; i < n; i++) a[i] = Convert.ToInt32(indices.GetValue(i)) + baseVertex;
             d.SubMeshes[submesh] = a;
             d.Topologies[submesh] = topology;
             if (calculateBounds) d.RecalculateBounds();
