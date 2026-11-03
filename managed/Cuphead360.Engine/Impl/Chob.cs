@@ -31,6 +31,11 @@ namespace Cuphead360.Engine
         internal string DiskPath;
         internal string[] Strings;     // non-null until parsed
         internal int Offset, Length;
+        // A font's m_FontData of 1 MB or more inside the object, found when a
+        // large file is indexed: reads of the object leave it out (it becomes
+        // a ChobBlob), so a font costs its few other bytes until it's drawn.
+        internal long HoleAt;          // file offset of its first byte
+        internal int HoleLen;
         object tree;
         // The parsed-tree cache: over TreeBudget (estimated bytes), the trees
         // used longest ago are let go and parsed again from the file if asked
@@ -52,19 +57,24 @@ namespace Cuphead360.Engine
                 {
                     if (table != null) TreesReparsed++;
                     var buf = Data;
-                    int at = Offset;
+                    int at = Offset, holeAt = -1;
                     if (buf == null)
                     {
-                        buf = new byte[Length];
-                        using (var fs = new FileStream(DiskPath, FileMode.Open, FileAccess.Read, FileShare.Read, 1))
-                        {
-                            fs.Seek(Offset, SeekOrigin.Begin);
-                            int got = 0, n;
-                            while (got < Length && (n = fs.Read(buf, got, Length - got)) > 0) got += n;
-                        }
+                        // From the drive, through the block cache: the object's bytes, less its font data.
+                        int pre = HoleLen > 0 ? (int)(HoleAt - Offset) : Length, post = HoleLen > 0 ? Length - pre - HoleLen : 0;
+                        buf = new byte[pre + post];
+                        File.ReadAt(Offset, buf, 0, pre);
+                        if (post > 0) File.ReadAt(HoleAt + HoleLen, buf, pre, post);
+                        ChobFile.ObjectReads++;
+                        ChobFile.ObjectBytes += buf.Length;
+                        if (ChobFile.TraceReads) Console.WriteLine($"READ {File?.Name} {Offset} {Length} {HoleLen}");
                         at = 0;
+                        if (HoleLen > 0) holeAt = pre;
                     }
-                    var rd = new ChobFile.Reader(buf, at, Strings) { BlobPath = File?.SourcePath, BlobBase = Offset - at };
+                    var rd = new ChobFile.Reader(buf, at, Strings)
+                    {
+                        BlobPath = File?.SourcePath, BlobBase = Offset - at, HoleAt = holeAt, HoleLen = HoleLen, HoleFile = HoleAt
+                    };
                     tree = rd.Value();
                     if (ParseStats != null)
                     {
@@ -171,47 +181,257 @@ namespace Cuphead360.Engine
         public readonly List<ChobObject> Ordered = new List<ChobObject>();
 
         public static long LoadedBytes; public static int LoadedFiles;
+        /// <summary>Objects read from the drive one at a time, and their bytes.</summary>
+        public static long ObjectBytes; public static int ObjectReads;
         /// <summary>Files above this many bytes are read per object rather than kept in memory.</summary>
         public static int DiskThreshold = 2 << 20;
         /// <summary>When set, files that take over 100 ms to read and index are reported (the console host sets it).</summary>
         public static Action<string> Trace;
 
+        // Large files' objects are read through 32 KB blocks, the least
+        // recently used let go over BlockBudget, and a few of the files kept
+        // open: a scene load parses thousands of their objects in no useful
+        // order, each an open and a read of the drive before (6,000 for the
+        // world map, half its 14 s load on the console). The bot's run reads
+        // 15,872 objects: ~2,000 block reads with 8 MB of blocks; reading the
+        // files whole instead needs ~18 MB at once and re-reads them.
+        public const int BlockBytes = 32 << 10;
+        /// <summary>Bytes of blocks kept (the console host sets a smaller budget).</summary>
+        public static long BlockBudget = long.TryParse(Environment.GetEnvironmentVariable("CH360_BLOCK_BUDGET_MB"), out var bb) ? bb << 20 : 16L << 20;
+        public static int BlockReads;
+        internal static readonly bool TraceReads = Environment.GetEnvironmentVariable("CH360_TRACE_READS") == "1";
+
+        sealed class Block { public ChobFile File; public int Index, Count; public byte[] Data; }
+        static readonly Dictionary<(ChobFile, int), LinkedListNode<Block>> blocks = new Dictionary<(ChobFile, int), LinkedListNode<Block>>();
+        static readonly LinkedList<Block> lru = new LinkedList<Block>();   // most recently used first
+        static readonly List<ChobFile> open = new List<ChobFile>();        // most recently used first
+        FileStream stream;
+        long length;
+
+        FileStream Stream()
+        {
+            if (stream != null)
+            {
+                if (open[0] != this) { open.Remove(this); open.Insert(0, this); }
+                return stream;
+            }
+            stream = new FileStream(SourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, 1);
+            length = stream.Length;
+            open.Insert(0, this);
+            if (open.Count > 4)
+            {
+                var f = open[4];
+                open.RemoveAt(4);
+                f.stream.Dispose();
+                f.stream = null;
+            }
+            return stream;
+        }
+
+        /// <summary>count bytes of the file from off into dst at at (through the blocks; long runs straight).</summary>
+        internal void ReadAt(long off, byte[] dst, int at, int count)
+        {
+            if (count <= 0) return;
+            if (count > 4 * BlockBytes || BlockBudget < BlockBytes)
+            {
+                var fs = Stream();
+                fs.Seek(off, SeekOrigin.Begin);
+                ReadFully(fs, dst, at, count);
+                return;
+            }
+            while (count > 0)
+            {
+                var b = BlockAt((int)(off / BlockBytes));
+                int within = (int)(off % BlockBytes), n = Math.Min(count, b.Count - within);
+                if (n <= 0) throw new EndOfStreamException("short CHOB read");
+                Buffer.BlockCopy(b.Data, within, dst, at, n);
+                off += n; at += n; count -= n;
+            }
+        }
+
+        Block BlockAt(int index)
+        {
+            if (blocks.TryGetValue((this, index), out var node))
+            {
+                if (node != lru.First) { lru.Remove(node); lru.AddFirst(node); }
+                return node.Value;
+            }
+            if ((long)(lru.Count + 1) * BlockBytes > BlockBudget && lru.Last != null)
+            {
+                node = lru.Last;   // its array is used again
+                lru.RemoveLast();
+                blocks.Remove((node.Value.File, node.Value.Index));
+            }
+            else node = new LinkedListNode<Block>(new Block { Data = new byte[BlockBytes] });
+            var b = node.Value;
+            b.File = this; b.Index = index;
+            var fs = Stream();
+            long pos = (long)index * BlockBytes;
+            fs.Seek(pos, SeekOrigin.Begin);
+            int want = (int)Math.Min(BlockBytes, length - pos), got = 0, r;
+            while (got < want && (r = fs.Read(b.Data, got, want - got)) > 0) got += r;
+            b.Count = got;
+            BlockReads++;
+            lru.AddFirst(node);
+            blocks[(this, index)] = node;
+            return b;
+        }
+
+        internal static void ReadFully(Stream fs, byte[] buf, int at, int count)
+        {
+            int got = 0, n;
+            while (got < count && (n = fs.Read(buf, at + got, count - got)) > 0) got += n;
+            if (got != count) throw new EndOfStreamException("short CHOB read");
+        }
+
+        /// <summary>
+        /// Indexes a converted file. Small files are read whole; large ones
+        /// (scenes' shared assets, font and atlas bundles) are indexed from the
+        /// drive, seeking over byte blobs (a font bundle's megabytes of font
+        /// data), and their objects read when first parsed.
+        /// </summary>
         public static ChobFile Load(string path, string name)
         {
-            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            var data = System.IO.File.ReadAllBytes(path);
-            long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
-            LoadedBytes += data.Length; LoadedFiles++;
-            var r = new Reader(data);
-            if (r.U32() != 0x424F4843) throw new InvalidDataException(path + ": not a CHOB file");
-            if (r.U32() != 1) throw new InvalidDataException(path + ": unsupported CHOB version");
-            var strings = new string[r.U32()];
-            for (int i = 0; i < strings.Length; i++) strings[i] = r.Str();
-            r.Strings = strings;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp(), t1;
             var f = new ChobFile { Name = name, SourcePath = path };
-            // Large files (font and atlas bundles, big scenes) keep only their
-            // index: an object's bytes are read from disk when it's first parsed.
-            bool keep = data.Length <= DiskThreshold;
-            f.Externals = new string[r.U32()];
-            for (int i = 0; i < f.Externals.Length; i++) f.Externals[i] = strings[r.U32()];
-            uint n = r.U32();
-            for (uint i = 0; i < n; i++)
+            string[] strings;
+            uint n;
+            long size, read;
+            byte[] data = null;
+            int start;
+            using (var sc = new Scan(path))
             {
-                var o = new ChobObject { PathId = r.I64(), ClassId = r.I32(), Type = strings[r.U32()], File = f };
-                o.Strings = strings; o.Offset = r.Pos;
-                r.Skip();
-                o.Length = r.Pos - o.Offset;
-                if (keep) o.Data = data; else o.DiskPath = path;
-                f.Objects[o.PathId] = o;
-                f.Ordered.Add(o);
+                size = sc.Length;
+                if (sc.U32() != 0x424F4843) throw new InvalidDataException(path + ": not a CHOB file");
+                if (sc.U32() != 1) throw new InvalidDataException(path + ": unsupported CHOB version");
+                strings = new string[sc.U32()];
+                for (int i = 0; i < strings.Length; i++) strings[i] = sc.Str();
+                f.Externals = new string[sc.U32()];
+                for (int i = 0; i < f.Externals.Length; i++) f.Externals[i] = strings[sc.U32()];
+                n = sc.U32();
+                start = (int)sc.Pos;
+                if (size <= DiskThreshold)
+                {
+                    data = sc.ReadAll();
+                    t1 = System.Diagnostics.Stopwatch.GetTimestamp();
+                }
+                else
+                {
+                    t1 = t0;
+                    for (uint i = 0; i < n; i++)
+                    {
+                        var o = new ChobObject { PathId = sc.I64(), ClassId = (int)sc.U32(), Type = strings[sc.U32()], File = f };
+                        o.Strings = strings; o.DiskPath = path;
+                        o.Offset = (int)sc.Pos;
+                        sc.SkipValue(strings, o, false);
+                        o.Length = (int)(sc.Pos - o.Offset);
+                        f.Objects[o.PathId] = o;
+                        f.Ordered.Add(o);
+                    }
+                }
+                read = sc.BytesRead;
+            }
+            LoadedBytes += read; LoadedFiles++;
+            if (data != null)
+            {
+                var r = new Reader(data, start, strings);
+                for (uint i = 0; i < n; i++)
+                {
+                    var o = new ChobObject { PathId = r.I64(), ClassId = r.I32(), Type = strings[r.U32()], File = f };
+                    o.Strings = strings; o.Offset = r.Pos;
+                    r.Skip();
+                    o.Length = r.Pos - o.Offset;
+                    o.Data = data;
+                    f.Objects[o.PathId] = o;
+                    f.Ordered.Add(o);
+                }
             }
             if (Trace != null)
             {
                 long t2 = System.Diagnostics.Stopwatch.GetTimestamp(), hz = System.Diagnostics.Stopwatch.Frequency;
                 if ((t2 - t0) * 10 > hz)
-                    Trace($"CHOB {name}: {data.Length >> 10} KB, {n} objects; read {(t1 - t0) * 1000 / hz} ms, indexed {(t2 - t1) * 1000 / hz} ms");
+                    Trace($"CHOB {name}: {size >> 10} KB, {n} objects, {read >> 10} KB read; read {(t1 - t0) * 1000 / hz} ms, indexed {(t2 - t1) * 1000 / hz} ms");
             }
             return f;
+        }
+
+        /// <summary>A converted file read through a 64 KB buffer, seeking over what is skipped.</summary>
+        sealed class Scan : IDisposable
+        {
+            readonly FileStream fs;
+            readonly byte[] b = new byte[64 * 1024];
+            int n, i;
+            long at;   // file offset of b[0]
+            public long BytesRead;
+            public Scan(string path) { fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1); Length = fs.Length; }
+            public readonly long Length;
+            public long Pos => at + i;
+            void Fill()
+            {
+                at += n; i = 0;
+                n = fs.Read(b, 0, b.Length);
+                if (n <= 0) throw new EndOfStreamException("short CHOB file");
+                BytesRead += n;
+            }
+            public byte Byte() { if (i >= n) Fill(); return b[i++]; }
+            public uint U32()
+            {
+                if (n - i >= 4) { uint v = (uint)(b[i] | b[i + 1] << 8 | b[i + 2] << 16 | b[i + 3] << 24); i += 4; return v; }
+                uint x = Byte(); x |= (uint)Byte() << 8; x |= (uint)Byte() << 16; x |= (uint)Byte() << 24;
+                return x;
+            }
+            public long I64() { ulong lo = U32(), hi = U32(); return (long)(lo | (hi << 32)); }
+            public void Skip(long k)
+            {
+                if (k <= n - i) { i += (int)k; return; }
+                long to = Pos + k;
+                fs.Seek(to, SeekOrigin.Begin);
+                at = to; n = 0; i = 0;
+            }
+            public string Str()
+            {
+                int k = (int)U32();
+                if (k <= n - i) { var s = Encoding.UTF8.GetString(b, i, k); i += k; return s; }
+                var t = new byte[k];
+                for (int j = 0; j < k; j++) t[j] = Byte();
+                return Encoding.UTF8.GetString(t);
+            }
+            /// <summary>The whole file (what was read is kept; the rest read now).</summary>
+            public byte[] ReadAll()
+            {
+                var all = new byte[Length];
+                long from = 0;
+                if (at == 0) { Buffer.BlockCopy(b, 0, all, 0, n); from = n; }
+                fs.Seek(from, SeekOrigin.Begin);
+                ReadFully(fs, all, (int)from, (int)(Length - from));
+                BytesRead += Length - from;
+                return all;
+            }
+            /// <summary>Steps over one value, noting where a large m_FontData lies in o.</summary>
+            public void SkipValue(string[] strings, ChobObject o, bool fontKey)
+            {
+                byte tag = Byte();
+                switch (tag)
+                {
+                    case 0: case 1: case 2: return;
+                    case 3: while ((Byte() & 0x80) != 0) { } return;
+                    case 4: Skip(4); return;
+                    case 5: Skip(8); return;
+                    case 6: Skip(U32()); return;
+                    case 7:
+                        {
+                            uint k = U32();
+                            if (fontKey && k >= 1 << 20 && o.HoleLen == 0) { o.HoleAt = Pos; o.HoleLen = (int)k; }
+                            Skip(k);
+                            return;
+                        }
+                    case 8: { uint k = U32(); for (uint j = 0; j < k; j++) SkipValue(strings, o, false); return; }
+                    case 9: { uint k = U32(); for (uint j = 0; j < k; j++) SkipValue(strings, o, strings[U32()] == "m_FontData"); return; }
+                    case 10: Skip(12); return;
+                }
+                throw new InvalidDataException("bad CHOB value tag " + tag + " at " + (Pos - 1));
+            }
+            public void Dispose() => fs.Dispose();
         }
 
         internal sealed class Reader
@@ -222,6 +442,9 @@ namespace Cuphead360.Engine
             public Reader(byte[] data, int pos, string[] strings) { d = data; p = pos; Strings = strings; }
             /// <summary>Where this buffer sits in the file (byte blobs of 1 MB and more become ChobBlobs read from there).</summary>
             public string BlobPath; public long BlobBase;
+            /// <summary>Where the object's font data was left out of the buffer (-1: nothing was), and where it is in the file.</summary>
+            public int HoleAt = -1, HoleLen; public long HoleFile;
+            long FileAt(int pos) => BlobBase + pos + (HoleAt >= 0 && pos >= HoleAt ? HoleLen : 0);
             bool lazyKey;   // the value being read is a font's m_FontData
             public int Pos => p;
 
@@ -266,11 +489,12 @@ namespace Cuphead360.Engine
                     case 7:
                         {
                             int n = (int)U32();
+                            if (p == HoleAt && n == HoleLen) return new ChobBlob { Path = BlobPath, Offset = HoleFile, Count = n, Raw = true };
                             // A font's data stays in the file until the font is drawn (other
                             // byte values, TextAssets and script fields, are read as bytes).
                             if (n >= 1 << 20 && BlobPath != null && lazyKey)
                             {
-                                var blob = new ChobBlob { Path = BlobPath, Offset = BlobBase + p, Count = n, Raw = true };
+                                var blob = new ChobBlob { Path = BlobPath, Offset = FileAt(p), Count = n, Raw = true };
                                 p += n;
                                 return blob;
                             }
@@ -284,7 +508,7 @@ namespace Cuphead360.Engine
                             // value per byte (2 GB of boxes for the game's fonts).
                             if (n >= 1 << 20 && d[p] == 3 && BlobPath != null)
                             {
-                                var blob = new ChobBlob { Path = BlobPath, Offset = BlobBase + p, Count = n };
+                                var blob = new ChobBlob { Path = BlobPath, Offset = FileAt(p), Count = n };
                                 for (int i = 0; i < n; i++) Skip();
                                 return blob;
                             }

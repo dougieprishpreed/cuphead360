@@ -86,7 +86,9 @@ namespace Cuphead360.Player
                 else Array.Clear(PlayerLoop.PhaseMs);
                 if (n % 600 == 0)
                     Console.WriteLine($"CONSOLE frame {n} scene={Cuphead360.Engine.Scenes.Active?.Name} heap {GC.GetTotalMemory(false) >> 20} MB exceptions {Exceptions.Count}; "
-                        + $"GCs {GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)} (gen0/1/2), paused {(long)GC.GetTotalPauseDuration().TotalMilliseconds} ms in all");
+                        + $"GCs {GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)} (gen0/1/2), paused {(long)GC.GetTotalPauseDuration().TotalMilliseconds} ms in all; "
+                        + $"converted files {ChobFile.LoadedFiles} ({ChobFile.LoadedBytes >> 20} MB, objects read {ChobFile.ObjectReads} ({ChobFile.ObjectBytes >> 20} MB) in {ChobFile.BlockReads} block reads)"
+                        + $", trees dropped {ChobObject.TreesDropped}, parsed again {ChobObject.TreesReparsed}");
             }
             return 0;
         }
@@ -104,6 +106,7 @@ namespace Cuphead360.Player
             ChobFile.Trace = Console.WriteLine;
             Audio.CacheFloats = 4L * 1024 * 1024;   // 16 MB
             if (ChobObject.TreeBudget == long.MaxValue) ChobObject.TreeBudget = 24L << 20;   // parsed trees kept (estimated bytes)
+            ChobFile.BlockBudget = 8L << 20;   // large files' blocks kept
             var bad = new List<string>();
             foreach (var s in new[] { "5848540871337674781", "-2592357432173453771", "4294967296", "-4294967296", "2147483648", "-1" })
                 if (long.Parse(s).ToString() != s) bad.Add("format " + s + " -> " + long.Parse(s));
@@ -115,6 +118,18 @@ namespace Cuphead360.Player
             if (two32 + 5 == long.Parse("5")) bad.Add("2^32+5 == 5");
             if (!((ulong)two32 > uint.MaxValue)) bad.Add("(ulong)2^32 > uint.MaxValue");
             if (!(-two32 < zero)) bad.Add("-2^32 < 0");
+            // What 32-bit mode could still get wrong after record_forms.py: signs
+            // and zero tests of 64-bit results, carries, shifts of negatives.
+            long neg2_32 = -two32, mixed = long.Parse("-4294967295");   // 0xFFFFFFFF_00000000, 0xFFFFFFFF_00000001
+            if (Math.Sign(two31) != 1 || Math.Sign(neg2_32) != -1 || Math.Sign(mixed) != -1) bad.Add("Math.Sign");
+            if (two31.CompareTo(zero) != 1 || neg2_32.CompareTo(zero) != -1) bad.Add("CompareTo 0");
+            if (Math.Abs(neg2_32) != two32 || Math.Abs(two31) != two31) bad.Add("Math.Abs");
+            if (neg2_32 / 16 != long.Parse("-268435456") || mixed / 2 != long.Parse("-2147483647")) bad.Add("signed / 2^n");
+            if (neg2_32 >> 4 != long.Parse("-268435456")) bad.Add("signed >> 4");
+            if ((two32 & two32) == 0 || (neg2_32 & long.Parse("-4294967296")) == 0) bad.Add("high-word & != 0");
+            ulong ua = ulong.Parse("4294967296"), ub = ulong.Parse("4294967295"), uc = ulong.Parse("18446744069414584320");
+            if (!(ua > ub) || !(uc > ua) || Math.Max(ua, ub) != ua || Math.Min(uc, ua) != ua) bad.Add("unsigned compare");
+            if (ub + 1 != ua || ua - 1 != ub || unchecked(uc + ua) != 0) bad.Add("carry");
             Console.WriteLine(bad.Count == 0 ? "I64CHECK ok" : "I64CHECK FAIL: " + string.Join("; ", bad));
         }
 

@@ -3,6 +3,38 @@
 Newest first. Each entry says what was run, on which build, and what it
 showed. Windows entries use the JIT oracle (`work/managed/jit`).
 
+## 2026-11-03 fifth hardware run and round 11 (map freeze, sign bug)
+
+The fifth run (`work/console/hw05/`): the title looked right this time (the
+logo atlas loads by its IdText name); the user's save went to the map,
+which froze on the hourglass. The scene built (9.8 s, activated 4.4 s),
+its first frame began loading textures, and the whole console stopped
+between two heartbeats (the log's texture lines had only reached their
+40-line cap). The probe was **0 of 200** on every thread, the game thread
+at frames 1 and 600 included; its MSR read **0x200b030** (main thread
+0x9030): VMX and FP on, SF clear, so the game runs in 32-bit mode too.
+I64CHECK failed as before. Start-up to the title took ~40 s: frames 3-4
+read ~110 MB, the font bundles whole to index them and their Font objects
+whole again, though their data stays lazy.
+
+| Finding | How |
+| --- | --- |
+| The sign bug is the compiler's: `Number.Int64ToDecStr` (w2c2 `f62128`) tests `value >= 0` as `mr. r7,r5; bge`. A record form sets CR0 from its result's low word in 32-bit mode; GCC (insn `*movdi_internal2`, seen with `-dp`) takes it to judge all 64 bits. Every wrong value in hw01-hw05 is the right magnitude with the low word's sign. The earlier probes used `cmpdi` only, so all passed | disassembly of the XEX's ELF; a 15-line C reproduction gives the same `mr.`; NativeAOT's wasm object (`Cuphead360.Player.13.o`) matched to the linked function by its bytes |
+| Of the record forms in one player file, the DImode ones are `*movdi_internal2` (unguarded), `*zero_extendsidi2_dot2` (unguarded), `*anddi3_imm_dot_shifted` and `*anddi3_imm_mask_dot` (GCC limits these to masks <= 0x7fffffff: safe); its carry patterns are all SImode | `-S -dp` of `m6_player.s0000000008.c` |
+| The map's first frame draws 41 textures, 68 MB (5 of them, 17 MB, only by items wholly off their view), while the title's and slot select's 53 MB were still loaded; each upload held a staging buffer of its own size until the frame's end, so the frame needed ~190 MB of new GPU memory | `CH360_TRACE_TEX` in host_native: per-frame texture sets from the save in hw05 to the map |
+| The map load opened `sharedassets3.assets` (6 MB, 6,173 objects) once per object: 6,000 opens, ~7 s of the console's I/O time | heartbeat file stats, CHOB object counts |
+
+| Change | Check |
+| --- | --- |
+| `console/xsdk/record_forms.py`, the compiler launcher for every C/C++ file of the console build: `-S -dp`, then `cmpdi 0,rD,0` after each record form of a DImode insn whose result can reach bit 31 (not `andi.`, `andis.` below 0x8000, `rldicl.` from bit 33: a compare after all of them, ~50 a file, pushed a conditional branch in `m6_player.s0000000038.c` past +-32 KB), then assemble; it reports 64-bit carry patterns | the reproduction assembles to `mr.; cmpdi; bge`; the XEX build: 25 compares in 18 of its 87 C/C++ files (`*movdi_internal2` 17, `*zero_extendsidi2_dot2` 7, `*anddi3_mask_dot` 1), no 64-bit carry patterns; the XEX's `Int64ToDecStr` (now `f62165`) reads `mr. r7,r5; cmpdi r7,0` |
+| Uploads through one 8 MB staging ring, run when it fills; textures read in 256 KB pieces into it (no whole-file buffer); a new texture first frees textures not drawn for 3 frames down to the 96 MB budget and keeps 24 MB free (else it is drawn without, tried again 2 s later); items wholly off their view are neither loaded nor drawn | host compiles; heartbeat now logs free memory, player and texture MB, and the log is synced every 0.5 s |
+| CHOB: large files are indexed from the drive, seeking over byte blobs, and a font object's read leaves out its m_FontData (a ChobBlob); large files' objects are read through 32 KB blocks (8 MB on the console, 16 MB PC, least recently used reused) with four files kept open; the CONSOLE line counts file, object and block reads | JIT bot 15,301 frames: every FRAME/SCENE/BOT line identical to round 10's run; converted bytes read 150 -> 96 MB; heap after GC 136 -> 145 MB (the blocks) |
+| Chose blocks over keeping large files whole: the bot's 15,872 object reads (traced with `CH360_TRACE_READS`) come in no useful order (a 64 KB read window still needs 5,000-14,000 reads); whole files under a 16 MB budget re-read 31 files (323 MB) and raised the native linear memory 215 -> 249 MB; 32 KB blocks in 8 MB: ~2,000 reads, 67 MB | `window_sim.py`, `hot_sim.py`, `block_sim.py` (scratch) over the trace |
+| I64CHECK also checks signs, CompareTo, Abs, signed division and shifts of negatives, high-word AND, unsigned compares and carries | PC: ok |
+| PC checks of the build (translated C, host_native) | from the hw05 save to the map: I64CHECK ok, map built 190 ms + activated 177 ms (round 10: 513 + 268), by the title GCs 44/14/8 and 218 ms paused (round 10: 60/30/26, 493 ms), linear memory 150 MB (134); native bot 16,001 frames: BOT lines as round 10's, 0 exceptions, 15,900 object reads in 2,029 block reads, GCs 3,246/281/26, 3.0 s paused (3,292/303/50, 3.6 s), linear memory 216 MB (215) |
+| Built and staged | `default.xex` 102,543,360 bytes to `E:\Apps\cuphead360` (data unchanged, saves untouched). Not yet run on the console |
+
+
 ## 2026-11-02 fourth hardware run and round 10 (frame rate)
 
 The fourth run (`work/console/hw04/`): the CPU probe found **0 of 200**

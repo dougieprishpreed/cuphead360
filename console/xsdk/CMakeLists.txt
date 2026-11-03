@@ -17,6 +17,12 @@ set(CH360_TITLE_ID "0x43483630" CACHE STRING "The XEX's title ID ('CH60')")
 
 get_filename_component(CONSOLE "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 
+# A title runs in 32-bit mode, where a record form sets CR0 from its result's
+# low word: GCC's record forms of 64-bit values get a 64-bit compare after
+# them (record_forms.py; a change to it needs a clean build).
+set(CMAKE_C_COMPILER_LAUNCHER python3 "${CMAKE_CURRENT_LIST_DIR}/record_forms.py")
+set(CMAKE_CXX_COMPILER_LAUNCHER python3 "${CMAKE_CURRENT_LIST_DIR}/record_forms.py")
+
 # char is signed and no strict aliasing (w2c2's C expects both); no fused
 # multiply-adds, so floats match the PC build's.
 set(COMMON_FLAGS -O2 -fsigned-char -fno-strict-aliasing -ffp-contract=off -ffunction-sections -fdata-sections)

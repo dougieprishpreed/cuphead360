@@ -66,6 +66,8 @@ volatile unsigned g_io_opens = 0, g_io_reads = 0, g_io_seeks = 0;
 volatile unsigned long long g_io_bytes = 0;
 volatile double g_io_ms = 0;
 
+volatile size_t g_texture_bytes = 0;   // the renderer's, for the heartbeat
+
 void flush_log(bool sync = false) {
     std::string lines;
     pthread_mutex_lock(&g_log_lock);
@@ -83,6 +85,7 @@ void flush_log(bool sync = false) {
 
 void logf(const char* fmt, ...);
 double now_ms();
+void memory_mb(unsigned* free_mb, unsigned* total_mb);
 extern "C" void srt_get_stats(void* out);
 
 // The USB drive is slow per write: lines queue and a thread writes them every
@@ -102,11 +105,15 @@ void* log_writer(void*) {
         if (beat) {
             struct { unsigned long long memory, capacity, stdout_bytes, wasi_calls; } st;
             srt_get_stats(&st);
-            logf("alive %u s: frame %u, %s; wasi calls %u; files: %u opens, %u reads, %u MB in %u ms, %u seeks",
-                 s, g_frames_seen, (const char*)g_stage, (unsigned)st.wasi_calls, g_io_opens, g_io_reads,
-                 (unsigned)(g_io_bytes >> 20), (unsigned)g_io_ms, g_io_seeks);
+            unsigned free_mb, total_mb;
+            memory_mb(&free_mb, &total_mb);
+            logf("alive %u s: frame %u, %s; %u MB free, player %u MB, textures %u MB; wasi calls %u; files: %u opens, %u reads, "
+                 "%u MB in %u ms, %u seeks",
+                 s, g_frames_seen, (const char*)g_stage, free_mb, ch360_memory_kb() / 1024, (unsigned)(g_texture_bytes >> 20),
+                 (unsigned)st.wasi_calls, g_io_opens, g_io_reads, (unsigned)(g_io_bytes >> 20), (unsigned)g_io_ms, g_io_seeks);
         }
-        flush_log(beat);
+        // Synced twice a second: a freeze keeps what led up to it.
+        flush_log(beat || tick % 5 == 0);
     }
     return NULL;
 }
@@ -154,29 +161,6 @@ void memory_mb(unsigned* free_mb, unsigned* total_mb) {
     *total_mb = (unsigned)(((unsigned long long)st.total_physical_pages * 4096) >> 20);
 }
 
-// Files: POSIX reads of 256 KB pieces (newlib's stdio refills 1 KB per USB request).
-bool read_file(const std::string& path, std::vector<unsigned char>& out) {
-    int fd = open(path.c_str(), O_RDONLY);
-    if (fd < 0) return false;
-    off_t size = lseek(fd, 0, SEEK_END);
-    lseek(fd, 0, SEEK_SET);
-    if (size <= 0) {
-        close(fd);
-        return false;
-    }
-    out.resize((size_t)size);
-    size_t got = 0;
-    while (got < out.size()) {
-        size_t want = out.size() - got;
-        if (want > 256 * 1024) want = 256 * 1024;
-        ssize_t n = read(fd, &out[got], want);
-        if (n <= 0) break;
-        got += (size_t)n;
-    }
-    close(fd);
-    return got == out.size();
-}
-
 // ------------------------------------------------------------ renderer
 
 // GCC turns small copies into 8-byte stores, which fault in the GPU's
@@ -188,9 +172,18 @@ const int W = 1280, H = 720, FRAMES = 2;
 const VkFormat TARGET_FORMAT = VK_FORMAT_B8G8R8A8_UNORM;
 const VkDeviceSize VERTEX_RING = 8 * 1024 * 1024;
 // Evict least recently used textures above this: the XEX image is ~100 MB and
-// the player's linear memory reaches ~220 MB in a level, of 512 MB; a failed
-// allocation also frees textures not drawn lately and tries again.
+// the player's linear memory reaches ~220 MB in a level, of 512 MB. A new
+// texture first makes room from textures not drawn lately, so the set stays
+// near the budget across a scene change (the map's first frame draws 68 MB
+// while the title's and slot select's 53 MB are still loaded).
 const size_t TEXTURE_BUDGET = 96u << 20;
+// Uploads go through one staging buffer, run (submitted and waited) when it
+// fills: one buffer per texture until the frame ended doubled a scene's first
+// frame in memory, and the fifth run froze there (docs/VERIFICATION.md).
+const size_t STAGING_RING = 8u << 20;
+// Free memory kept for the player's linear memory (it grows during scene
+// loads), the kernel and the driver: textures are not loaded into it.
+const unsigned MEMORY_FLOOR_MB = 24;
 
 struct Vertex {
     float x, y, u, v;
@@ -209,10 +202,11 @@ struct Tex {
     VkFormat format;
     size_t bytes;
     unsigned last_used;
-    std::string key;   // a converted texture (loaded on first use); empty: run-time pixels
+    unsigned retry_at;   // after running out of memory: the frame to try loading again
+    std::string key;     // a converted texture (loaded on first use); empty: run-time pixels
     bool failed;
     Tex() : image(VK_NULL_HANDLE), mem(VK_NULL_HANDLE), view(VK_NULL_HANDLE), set(VK_NULL_HANDLE), w(0), h(0),
-            format(VK_FORMAT_UNDEFINED), bytes(0), last_used(0), failed(false) {}
+            format(VK_FORMAT_UNDEFINED), bytes(0), last_used(0), retry_at(0), failed(false) {}
 };
 
 struct Garbage {
@@ -249,6 +243,10 @@ private:
     bool make_buffer(VkBuffer* buf, VkDeviceMemory* mem, void** map, VkDeviceSize size, VkBufferUsageFlags usage);
     VkShaderModule module(const uint32_t* code, unsigned bytes);
     VkPipeline make_pipeline(VkShaderModule frag);
+    bool make_image(Tex& t, VkFormat format, int w, int h);
+    unsigned char* staging(size_t bytes, VkBuffer* buf, VkDeviceSize* off);
+    void record_copy(Tex& t, VkBuffer buf, VkDeviceSize off);
+    void flush_uploads();
     bool upload(Tex& t, VkFormat format, int w, int h, const unsigned char* data, size_t bytes);
     void destroy(Tex& t, bool now);
     void load(Tex& t);
@@ -287,7 +285,13 @@ private:
     Tex white_;
     size_t texture_bytes_;
     bool upload_open_;
-    std::vector<std::pair<VkBuffer, VkDeviceMemory> > staging_;
+    VkBuffer ring_buf_;
+    VkDeviceMemory ring_mem_;
+    unsigned char* ring_map_;
+    size_t ring_used_;
+    std::vector<std::pair<VkBuffer, VkDeviceMemory> > staging_;   // uploads larger than the ring
+    std::vector<unsigned char> bounce_;                            // file reads, copied on into staging
+    std::vector<unsigned char> on_view_;                           // per item of the frame's list
     bool overflow_logged_;
     unsigned loads_logged_;
 };
@@ -569,6 +573,11 @@ bool Renderer::init() {
     void* vm = NULL;
     if (!make_buffer(&vbuf_, &vmem_, &vm, VERTEX_RING * FRAMES, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) return false;
     vmap_ = (unsigned char*)vm;
+    void* rm = NULL;
+    if (!make_buffer(&ring_buf_, &ring_mem_, &rm, STAGING_RING, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) return false;
+    ring_map_ = (unsigned char*)rm;
+    ring_used_ = 0;
+    bounce_.resize(256 * 1024);
     unsigned char px[4] = { 255, 255, 255, 255 };
     if (!upload(white_, TARGET_FORMAT, 1, 1, px, 4)) return false;
     VkPhysicalDeviceProperties props;
@@ -657,86 +666,145 @@ VkPipeline Renderer::make_pipeline(VkShaderModule frag) {
     return p;
 }
 
-// Uploads go into one command buffer that runs before the frame's (the
-// frame submits it and waits: scene loads, never the steady state).
-bool Renderer::upload(Tex& t, VkFormat format, int w, int h, const unsigned char* data, size_t bytes) {
-    if (t.image && (t.w != w || t.h != h || t.format != format)) destroy(t, false);
-    if (!t.image) {
-        VkImageCreateInfo ci;
-        memset(&ci, 0, sizeof(ci));
-        ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        ci.imageType = VK_IMAGE_TYPE_2D;
-        ci.format = format;
-        ci.extent.width = (uint32_t)w;
-        ci.extent.height = (uint32_t)h;
-        ci.extent.depth = 1;
-        ci.mipLevels = 1;
-        ci.arrayLayers = 1;
-        ci.samples = VK_SAMPLE_COUNT_1_BIT;
-        ci.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (!vk(vkCreateImage(dev_, &ci, NULL, &t.image), "vkCreateImage")) {
-            t.image = VK_NULL_HANDLE;
-            return false;
-        }
-        VkMemoryRequirements req;
-        vkGetImageMemoryRequirements(dev_, t.image, &req);
+// A texture's image, memory, view and descriptor set. Room comes first from
+// textures not drawn lately: down to the budget, then above the memory floor,
+// then once more if the allocation still fails.
+bool Renderer::make_image(Tex& t, VkFormat format, int w, int h) {
+    VkImageCreateInfo ci;
+    memset(&ci, 0, sizeof(ci));
+    ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ci.imageType = VK_IMAGE_TYPE_2D;
+    ci.format = format;
+    ci.extent.width = (uint32_t)w;
+    ci.extent.height = (uint32_t)h;
+    ci.extent.depth = 1;
+    ci.mipLevels = 1;
+    ci.arrayLayers = 1;
+    ci.samples = VK_SAMPLE_COUNT_1_BIT;
+    ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (!vk(vkCreateImage(dev_, &ci, NULL, &t.image), "vkCreateImage")) {
+        t.image = VK_NULL_HANDLE;
+        return false;
+    }
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(dev_, t.image, &req);
+    size_t size = (size_t)req.size;
+    if (texture_bytes_ + size > TEXTURE_BUDGET) release_unused(texture_bytes_ + size - TEXTURE_BUDGET);
+    unsigned free_mb, total_mb;
+    memory_mb(&free_mb, &total_mb);
+    unsigned need_mb = MEMORY_FLOOR_MB + (unsigned)(size >> 20) + 1;
+    if (free_mb < need_mb) {
+        release_unused((size_t)(need_mb - free_mb) << 20);
+        memory_mb(&free_mb, &total_mb);
+    }
+    VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    if (free_mb >= need_mb) {
         VkMemoryAllocateInfo ai;
         memset(&ai, 0, sizeof(ai));
         ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         ai.allocationSize = req.size;
         ai.memoryTypeIndex = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        VkResult r = vkAllocateMemory(dev_, &ai, NULL, &t.mem);
-        if (r != VK_SUCCESS && release_unused((size_t)req.size * 2) > 0) r = vkAllocateMemory(dev_, &ai, NULL, &t.mem);
-        if (!vk(r, "vkAllocateMemory (texture)")) {
-            vkDestroyImage(dev_, t.image, NULL);
-            t.image = VK_NULL_HANDLE;
-            return false;
-        }
-        vkBindImageMemory(dev_, t.image, t.mem, 0);
-        VkImageViewCreateInfo vi;
-        memset(&vi, 0, sizeof(vi));
-        vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        vi.image = t.image;
-        vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        vi.format = format;
-        vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        vi.subresourceRange.levelCount = 1;
-        vi.subresourceRange.layerCount = 1;
-        vkCreateImageView(dev_, &vi, NULL, &t.view);
-        VkDescriptorSetAllocateInfo sai;
-        memset(&sai, 0, sizeof(sai));
-        sai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        sai.descriptorPool = desc_pool_;
-        sai.descriptorSetCount = 1;
-        sai.pSetLayouts = &set_layout_;
-        vk(vkAllocateDescriptorSets(dev_, &sai, &t.set), "vkAllocateDescriptorSets");
-        VkDescriptorImageInfo ii;
-        ii.sampler = sampler_;
-        ii.imageView = t.view;
-        ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        VkWriteDescriptorSet wd;
-        memset(&wd, 0, sizeof(wd));
-        wd.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        wd.dstSet = t.set;
-        wd.descriptorCount = 1;
-        wd.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        wd.pImageInfo = &ii;
-        vkUpdateDescriptorSets(dev_, 1, &wd, 0, NULL);
-        t.w = w;
-        t.h = h;
-        t.format = format;
-        t.bytes = (size_t)req.size;
-        texture_bytes_ += t.bytes;
+        r = vkAllocateMemory(dev_, &ai, NULL, &t.mem);
+        if (r != VK_SUCCESS && release_unused(size * 2) > 0) r = vkAllocateMemory(dev_, &ai, NULL, &t.mem);
     }
+    if (r != VK_SUCCESS) {
+        logf("vk: no memory for a %dx%d texture (%u KB): %u MB free, textures %u MB", w, h, (unsigned)(size >> 10), free_mb,
+             (unsigned)(texture_bytes_ >> 20));
+        vkDestroyImage(dev_, t.image, NULL);
+        t.image = VK_NULL_HANDLE;
+        t.mem = VK_NULL_HANDLE;
+        return false;
+    }
+    vkBindImageMemory(dev_, t.image, t.mem, 0);
+    VkImageViewCreateInfo vi;
+    memset(&vi, 0, sizeof(vi));
+    vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vi.image = t.image;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = format;
+    vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    vi.subresourceRange.levelCount = 1;
+    vi.subresourceRange.layerCount = 1;
+    vkCreateImageView(dev_, &vi, NULL, &t.view);
+    VkDescriptorSetAllocateInfo sai;
+    memset(&sai, 0, sizeof(sai));
+    sai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    sai.descriptorPool = desc_pool_;
+    sai.descriptorSetCount = 1;
+    sai.pSetLayouts = &set_layout_;
+    vk(vkAllocateDescriptorSets(dev_, &sai, &t.set), "vkAllocateDescriptorSets");
+    VkDescriptorImageInfo ii;
+    ii.sampler = sampler_;
+    ii.imageView = t.view;
+    ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet wd;
+    memset(&wd, 0, sizeof(wd));
+    wd.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wd.dstSet = t.set;
+    wd.descriptorCount = 1;
+    wd.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wd.pImageInfo = &ii;
+    vkUpdateDescriptorSets(dev_, 1, &wd, 0, NULL);
+    t.w = w;
+    t.h = h;
+    t.format = format;
+    t.bytes = size;
+    texture_bytes_ += t.bytes;
+    return true;
+}
+
+// Uploads are recorded into one command buffer that runs before the frame's
+// (the frame submits it and waits: scene loads, never the steady state), or
+// sooner when the staging ring is full.
+void Renderer::flush_uploads() {
+    if (!upload_open_) return;
+    Stage marker("vk: uploading textures");
+    vkEndCommandBuffer(upload_cmd_);
+    VkSubmitInfo si;
+    memset(&si, 0, sizeof(si));
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &upload_cmd_;
+    vkQueueSubmit(queue_, 1, &si, upload_fence_);
+    vkWaitForFences(dev_, 1, &upload_fence_, VK_TRUE, ~(uint64_t)0);
+    vkResetFences(dev_, 1, &upload_fence_);
+    upload_open_ = false;
+    for (size_t i = 0; i < staging_.size(); ++i) {
+        vkDestroyBuffer(dev_, staging_[i].first, NULL);
+        vkFreeMemory(dev_, staging_[i].second, NULL);
+    }
+    staging_.clear();
+    ring_used_ = 0;
+}
+
+// Room for bytes of upload data: in the ring (run what it holds first if it
+// is full), or a buffer of its own for data larger than the ring.
+unsigned char* Renderer::staging(size_t bytes, VkBuffer* buf, VkDeviceSize* off) {
+    size_t need = (bytes + 4095) & ~(size_t)4095;
+    if (need <= STAGING_RING) {
+        if (ring_used_ + need > STAGING_RING) flush_uploads();
+        *buf = ring_buf_;
+        *off = ring_used_;
+        ring_used_ += need;
+        return ring_map_ + *off;
+    }
+    flush_uploads();
     VkBuffer sb;
     VkDeviceMemory sm;
     void* map = NULL;
-    if (!make_buffer(&sb, &sm, &map, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) return false;
-    g_memcpy(map, data, bytes);
+    if (!make_buffer(&sb, &sm, &map, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) &&
+        (release_unused(bytes) == 0 || !make_buffer(&sb, &sm, &map, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)))
+        return NULL;
     staging_.push_back(std::make_pair(sb, sm));
+    *buf = sb;
+    *off = 0;
+    return (unsigned char*)map;
+}
+
+void Renderer::record_copy(Tex& t, VkBuffer buf, VkDeviceSize off) {
     if (!upload_open_) {
         VkCommandBufferBeginInfo bi;
         memset(&bi, 0, sizeof(bi));
@@ -762,12 +830,13 @@ bool Renderer::upload(Tex& t, VkFormat format, int w, int h, const unsigned char
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
     VkBufferImageCopy region;
     memset(&region, 0, sizeof(region));
+    region.bufferOffset = off;
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     region.imageSubresource.layerCount = 1;
-    region.imageExtent.width = (uint32_t)w;
-    region.imageExtent.height = (uint32_t)h;
+    region.imageExtent.width = (uint32_t)t.w;
+    region.imageExtent.height = (uint32_t)t.h;
     region.imageExtent.depth = 1;
-    vkCmdCopyBufferToImage(upload_cmd_, sb, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    vkCmdCopyBufferToImage(upload_cmd_, buf, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
     bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     bar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -775,6 +844,17 @@ bool Renderer::upload(Tex& t, VkFormat format, int w, int h, const unsigned char
     vkCmdPipelineBarrier(upload_cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0,
                          NULL, 1, &bar);
     ++uploads;
+}
+
+bool Renderer::upload(Tex& t, VkFormat format, int w, int h, const unsigned char* data, size_t bytes) {
+    if (t.image && (t.w != w || t.h != h || t.format != format)) destroy(t, false);
+    if (!t.image && !make_image(t, format, w, h)) return false;
+    VkBuffer buf;
+    VkDeviceSize off;
+    unsigned char* dst = staging(bytes, &buf, &off);
+    if (!dst) return false;
+    g_memcpy(dst, data, bytes);
+    record_copy(t, buf, off);
     return true;
 }
 
@@ -819,42 +899,63 @@ void Renderer::texture_pixels(int id, int w, int h, const unsigned char* bgra) {
     }
 }
 
-// A converted texture (tools/convert_console.py's .ctx) on first use.
+// A converted texture (tools/convert_console.py's .ctx) on first use, read
+// in pieces through a bounce buffer into staging (the kernel's copies into
+// the GPU's write-combined memory aren't safe: g_memcpy is). Out of memory,
+// it is drawn without and tried again two seconds later.
 void Renderer::load(Tex& t) {
-    if (t.image || t.failed || t.key.empty()) return;
-    std::vector<unsigned char> file;
+    if (t.image || t.failed || t.key.empty() || frame_no_ < t.retry_at) return;
     std::string path = "game:/GameData/ctex/" + t.key + ".ctx";
     double t0 = now_ms();
-    bool ok = false;
-    // Memory is tight: a file that doesn't fit makes room from textures not drawn lately, then tries once more.
-    for (int attempt = 0; attempt < 2 && !ok; ++attempt) {
-        try {
-            ok = read_file(path, file);
-            if (!ok) break;
-        } catch (const std::bad_alloc&) {
-            file = std::vector<unsigned char>();
-            if (attempt == 0 && release_unused(16u << 20) > 0) continue;
-            logf("texture %s: no memory to read it", t.key.c_str());
-            return;
-        }
-    }
-    if (loads_logged_ < 40 && ok && file.size() >= 28) {
-        ++loads_logged_;
-        logf("texture %s: format %u, %ux%u, %u KB in %u ms", t.key.c_str(), ch360_u32(&file[4]), ch360_u32(&file[8]),
-             ch360_u32(&file[12]), (unsigned)(file.size() >> 10), (unsigned)(now_ms() - t0));
-    }
-    if (!ok || file.size() < 28 || ch360_u32(&file[0]) != 0x31585443u) {
+    unsigned char head[28];
+    int fd = open(path.c_str(), O_RDONLY);
+    bool ok = fd >= 0 && read(fd, head, sizeof(head)) == (ssize_t)sizeof(head) && ch360_u32(head) == 0x31585443u;
+    unsigned fmt = ok ? ch360_u32(head + 4) : 0, w = ok ? ch360_u32(head + 8) : 0, h = ok ? ch360_u32(head + 12) : 0,
+             n = ok ? ch360_u32(head + 24) : 0;
+    if (!ok || w == 0 || h == 0 || w > 8192 || h > 8192 || n == 0) {
+        if (fd >= 0) close(fd);
         logf("texture %s: missing or unreadable (run tools/convert_console.py)", path.c_str());
         t.failed = true;
         return;
     }
-    unsigned fmt = ch360_u32(&file[4]), w = ch360_u32(&file[8]), h = ch360_u32(&file[12]), n = ch360_u32(&file[24]);
-    if (28 + (size_t)n > file.size() || w == 0 || h == 0) {
+    VkFormat f = fmt == 1 ? VK_FORMAT_BC1_RGBA_UNORM_BLOCK : fmt == 2 ? VK_FORMAT_BC3_UNORM_BLOCK : TARGET_FORMAT;
+    VkBuffer buf;
+    VkDeviceSize off;
+    unsigned char* dst = NULL;
+    if (make_image(t, f, (int)w, (int)h)) {
+        dst = staging(n, &buf, &off);
+        if (!dst) destroy(t, true);
+    }
+    if (!dst) {
+        close(fd);
+        t.retry_at = frame_no_ + 120;
+        logf("texture %s: no memory, drawn without it for now", t.key.c_str());
+        return;
+    }
+    size_t got = 0;
+    while (got < n) {
+        size_t want = n - got < bounce_.size() ? n - got : bounce_.size();
+        ssize_t r = read(fd, &bounce_[0], want);
+        if (r <= 0) break;
+        g_memcpy(dst + got, &bounce_[0], (size_t)r);
+        got += (size_t)r;
+    }
+    close(fd);
+    if (got != n) {
+        destroy(t, true);
+        logf("texture %s: short file (%u of %u bytes)", path.c_str(), (unsigned)got, n);
         t.failed = true;
         return;
     }
-    VkFormat f = fmt == 1 ? VK_FORMAT_BC1_RGBA_UNORM_BLOCK : fmt == 2 ? VK_FORMAT_BC3_UNORM_BLOCK : TARGET_FORMAT;
-    if (!upload(t, f, (int)w, (int)h, &file[28], n)) t.failed = true;
+    record_copy(t, buf, off);
+    g_texture_bytes = texture_bytes_;
+    if (loads_logged_ < 400) {
+        ++loads_logged_;
+        unsigned free_mb, total_mb;
+        memory_mb(&free_mb, &total_mb);
+        logf("texture %s: format %u, %ux%u, %u KB in %u ms; %u MB free, textures %u MB", t.key.c_str(), fmt, w, h, n >> 10,
+             (unsigned)(now_ms() - t0), free_mb, (unsigned)(texture_bytes_ >> 20));
+    }
 }
 
 // Frees textures not drawn in the last three frames (the GPU is done with
@@ -872,7 +973,6 @@ size_t Renderer::release_unused(size_t want) {
         destroy(t, true);
         ++evictions;
     }
-    if (freed) logf("vk: out of memory, freed %u KB of unused textures", (unsigned)(freed >> 10));
     return freed;
 }
 
@@ -894,16 +994,32 @@ void Renderer::frame(const unsigned char* d, unsigned len) {
     if (len < 8 || ch360_u32(d) != 0x31464843u) return;
     unsigned views = ch360_u32(d + 4);
 
-    // Pass 1: load what the list draws, then run the uploads.
+    // Pass 1: which items meet their view (the scissor would clip the rest
+    // away: the map draws 17 MB of textures wholly off screen), load what
+    // those draw, then run the uploads.
     Stage marker("vk: loading textures");
+    on_view_.clear();
     unsigned p = 8;
     for (unsigned v = 0; v < views && p + 40 <= len; ++v) {
+        float vx = ch360_f32(d + p), vy = ch360_f32(d + p + 4), vw = ch360_f32(d + p + 8), vh = ch360_f32(d + p + 12);
+        float rx0 = vx < 0 ? 0 : vx, ry0 = vy < 0 ? 0 : vy, rx1 = vx + vw > W ? W : vx + vw, ry1 = vy + vh > H ? H : vy + vh;
         unsigned items = ch360_u32(d + p + 36);
         p += 40;
         for (unsigned i = 0; i < items && p + 28 <= len; ++i) {
             int id = (int)ch360_u32(d + p);
             unsigned n = ch360_u32(d + p + 24);
-            Tex* t = id >= 0 ? tex(id) : NULL;
+            const unsigned char* vs = d + p + 28;
+            float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+            for (unsigned k = 0; k < n; ++k, vs += 20) {
+                float x = ch360_f32(vs), y = ch360_f32(vs + 4);
+                if (x < x0) x0 = x;
+                if (x > x1) x1 = x;
+                if (y < y0) y0 = y;
+                if (y > y1) y1 = y;
+            }
+            bool on = n > 0 && x1 >= rx0 && x0 <= rx1 && y1 >= ry0 && y0 <= ry1;
+            on_view_.push_back(on ? 1 : 0);
+            Tex* t = on && id >= 0 ? tex(id) : NULL;
             if (t) {
                 load(*t);
                 t->last_used = frame_no_;
@@ -924,24 +1040,7 @@ void Renderer::frame(const unsigned char* d, unsigned len) {
         vkFreeMemory(dev_, f.dead[i].mem, NULL);
     }
     f.dead.clear();
-    if (upload_open_) {
-        g_stage = "vk: uploading textures";
-        vkEndCommandBuffer(upload_cmd_);
-        VkSubmitInfo si;
-        memset(&si, 0, sizeof(si));
-        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        si.commandBufferCount = 1;
-        si.pCommandBuffers = &upload_cmd_;
-        vkQueueSubmit(queue_, 1, &si, upload_fence_);
-        vkWaitForFences(dev_, 1, &upload_fence_, VK_TRUE, ~(uint64_t)0);
-        vkResetFences(dev_, 1, &upload_fence_);
-        upload_open_ = false;
-        for (size_t i = 0; i < staging_.size(); ++i) {
-            vkDestroyBuffer(dev_, staging_[i].first, NULL);
-            vkFreeMemory(dev_, staging_[i].second, NULL);
-        }
-        staging_.clear();
-    }
+    flush_uploads();
 
     uint32_t image = 0;
     g_stage = "vk: acquiring a swapchain image";
@@ -984,7 +1083,7 @@ void Renderer::frame(const unsigned char* d, unsigned len) {
     // texture batched into one draw.
     VkPipeline bound = VK_NULL_HANDLE;
     VkDescriptorSet bound_set = VK_NULL_HANDLE;
-    size_t batch_start = 0, batch_count = 0;
+    size_t batch_start = 0, batch_count = 0, item = 0;
     p = 8;
     for (unsigned v = 0; v < views && p + 40 <= len; ++v) {
         float vx = ch360_f32(d + p), vy = ch360_f32(d + p + 4), vw = ch360_f32(d + p + 8), vh = ch360_f32(d + p + 12);
@@ -1023,6 +1122,7 @@ void Renderer::frame(const unsigned char* d, unsigned len) {
             unsigned n = ch360_u32(d + p + 24);
             const unsigned char* vs = d + p + 28;
             p += 28 + n * 20;
+            if (item < on_view_.size() && !on_view_[item++]) continue;
             Tex* t = id >= 0 ? tex(id) : &white_;
             if (!t || !t->image) continue;
             int m = mode == 1 ? MODE_SCREEN : mode == 2 ? MODE_MULTIPLY : mode == 3 ? MODE_OVERLAY : mode == 5 ? MODE_SDF : MODE_SPRITE;
@@ -1092,6 +1192,7 @@ void Renderer::frame(const unsigned char* d, unsigned len) {
     frame_ = (frame_ + 1) % FRAMES;
     g_stage = "vk: evicting";
     evict();
+    g_texture_bytes = texture_bytes_;
 }
 
 Renderer* g_renderer = NULL;

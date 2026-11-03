@@ -24,18 +24,17 @@ version, plus a practical converter for the user's own game files.
 
 The full normal gameplay loop (new game through Root Pack and back to the
 map) runs on Windows with sound, headless and in the live window (`play`),
-and as translated C (the console build's code) headless on PC. Two hardware
-runs showed a black screen: the console ran start-up 30x slower than PC
-(still loading the title when switched off), and 64-bit values read through
-memory came out with their low word's sign (the compare instructions were
-proven right). The third run (`work/console/hw03/`) reached the
-tutorial on hardware, slowly, then stopped at the map load on memory; the
-sign bug persists (memory accesses proven fine; suspected high-half
-forwarding hazard), losing atlases, TMP labels and music. Continue with
-HANDOFF.md's "Next round" item 0: the fifth run's log (round 10 build:
-allocation and physics optimizations, texture memory retry, IdText names,
-the CPU probe per thread), then frame rate from its numbers, load speed,
-packs and 720p-sized textures. Rebuild
+and as translated C (the console build's code) headless on PC. Five
+hardware runs so far (`work/console/hw01`-`hw05`): the title and the house
+run on the console, slowly; the map froze while loading its textures
+(fixed in round 11: one staging ring, a texture budget and memory floor);
+long values were formatted with their low word's sign, because the title
+runs in 32-bit mode and xSDK's GCC uses record forms for some 64-bit
+compares (fixed by `console/xsdk/record_forms.py`, the build's compiler
+launcher). Continue with HANDOFF.md's "Next round" item 0: the sixth run's
+log (I64CHECK should now be ok; memory through the map load; load times),
+then frame rate on the map and in a level, load speed, packs and
+720p-sized textures. Rebuild
 with `python tools/build_managed.py --stage jit` after engine changes; check
 with `selftest`, the bot loop (`run --frames 15301 --save
 work/managed/save_bot --bot tests/input/bot_veggies.txt`, deleting the save

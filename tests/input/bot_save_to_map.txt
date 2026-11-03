@@ -1,0 +1,7 @@
+# Title -> slot select -> continue slot 1 (a save on the world map) -> the map, then idle there.
+# Run with a copy of a save folder that has slot 1 on the map (run --save <copy>).
+wait 594
+pressuntil scene_slot_select A 108 3000
+wait 120
+pressuntil scene_map_world_1 A 60 3000
+wait 900

@@ -37,6 +37,12 @@ time (builds, conversions, ILC) so the user's PC stays usable;
   - Round 8 commit after it: 64-bit memory accesses as two 32-bit ones
     (`console/w2c2/w2c2_base.h`), the memory probe, live log drain, file
     I/O stats, slow-frame/CHOB/SCENE timing; staged for the third run.
+  - `63678ba` round 9: parsed-tree budget, byte lists as bytes, the
+    hazard probe; `dc88a62` round 10: frame rate (allocations, GC,
+    physics), texture memory retry, IdText names, the per-thread probe.
+  - Round 11 commit after it: record_forms.py (the sign bug's fix), the
+    staging ring and texture budget/floor, CHOB font holes and block
+    cache; staged for the sixth run.
 - Side branch `interpreter-d1-r4-wip` (`ecbff5b`): the interrupted D1 r4
   interpreter edits, committed as found, not accepted, not continued.
 - Uncommitted: nothing intended. `managed/lib`, `managed/**/Generated`,
@@ -98,16 +104,37 @@ Xenia, hardware, memory.
 
 ## Next round (in order)
 
-0. **The fifth run (round 10 build staged: frame rate, memory headroom,
-   IdText names, per-thread probe).** Read in order: the "cpu probe" lines
+0. **The sixth run (round 11 build staged: the sign bug's fix, the map
+   freeze's fix, faster loads).** Round 11 found the sign bug's cause: the
+   title runs in 32-bit mode (the game thread's MSR 0x200b030, SF clear),
+   where a record form (`mr.`, `and.` ...) sets CR0 from its result's low
+   word, and xSDK's GCC uses record forms for some 64-bit compares
+   (`Number.Int64ToDecStr`: `mr. r7,r5; bge`). `console/xsdk/record_forms.py`
+   (the build's compiler launcher) puts `cmpdi 0,rD,0` after each 64-bit
+   record form; prebuilt libxsdk/libvulkan4xenon/newlib are not covered,
+   and the fix belongs upstream in xSDK's GCC (report it to xenosworks).
+   The map froze on texture uploads (68 MB of textures plus a staging copy
+   each, on top of the 53 MB still loaded): uploads now go through one 8 MB
+   ring, textures stay near the budget and above a 24 MB memory floor,
+   off-view items load nothing. CHOB: font bundles indexed without reading
+   their font data; large files' objects read through an 8 MB cache of
+   32 KB blocks with a few files kept open (the map's 6,000 opens).
+   Read in order: I64CHECK (now expected **ok**; a FAIL entry names what
+   32-bit mode still breaks: signs, division, carries, unsigned compares);
+   the heartbeat's free memory, player and texture MB through the map
+   load; the texture lines (free memory per load) and any "no memory"
+   lines; CHOB lines and the CONSOLE lines' file/object read counts
+   (start-up and map load times against hw05: ~40 s to the title, map
+   built 9.8 s + 4.4 s); frame times and GC counts on the map. Then
+   frame rate on the map and in a level, from those numbers.
+   Fifth run, kept for reference (VERIFICATION "fifth hardware run"):
+   0 of 200 probe results wrong on every thread, the title right (logo,
+   no early "press any button"), the save's map load froze in its first
+   frame's texture loading.
+   Round 10's item, kept for reference: the "cpu probe" lines
    per thread (main, two fresh threads, the game thread at frames 1 and
-   600, each with its MSR): if the game thread shows wrong results where the
-   others don't, the CPU state differs on that thread; I64CHECK (still
-   expected to FAIL until that is solved; IdText makes texture and clip names
-   right regardless, so the logo, map atlases, TMP labels and music should
-   now load); whether the map loads and plays (vk out-of-memory now frees
-   and retries); frame times (the 600-frame lines and SLOW frames) and GC
-   counts in the CONSOLE lines. Next for frame rate: profile the console
+   600, each with its MSR); I64CHECK; whether the map loads and plays;
+   frame times and GC counts. Next for frame rate: profile the console
    path again from those numbers (JIT dotnet-trace of the house and map
    without the bot: `dotnet-trace collect -p PID --format Speedscope`, then
    the scratchpad speedscope summarizer; allocations with `--profile
@@ -163,9 +190,10 @@ Xenia, hardware, memory.
    costing detail.
 3. **Console gaps known now**: stencil masks (UGUI Mask children draw
    unclipped), render textures and the post-effect camera (also missing on
-   Windows), per-object reads of large converted files (many small USB
-   reads at scene loads), the managed heap (~260 MB in a level: its biggest
-   holders are not yet measured).
+   Windows), audio stops during long frames (the player mixes per frame:
+   8,382 underruns by frame 600 in hw05), the managed heap (~260 MB in a
+   level: its biggest holders are not yet measured), the record-form fix
+   not reaching prebuilt libraries.
 4. **User play reports on Windows** (`play`): root causes, then a sweep.
 5. **More of the game** beyond the opening loop.
 
