@@ -3,6 +3,19 @@
 Newest first. Each entry says what was run, on which build, and what it
 showed. Windows entries use the JIT oracle (`work/managed/jit`).
 
+## 2026-11-02 managed player, round 9 (memory, high-word hazard)
+
+| Change | Check |
+| --- | --- |
+| CH360_TRACE_MEM census of parsed trees by type (`TREES` lines) | JIT bot to Root Pack: heap 276 MB, of it parsed trees 163 MB (Sprite 93 MB: 4,889 trees ~16 KB each, mostly m_PhysicsShape point maps and vertex channel maps), file bytes held 22 MB |
+| Byte lists of 16+ values as bytes (converter and parser; was 4096) | objects 811 -> 761 MB; sprite trees 93 -> 79 MB; sprites with under 4 KB of vertex data now get their mesh (ReadMesh read only byte[]) |
+| A parsed-tree budget: least recently used trees dropped and parsed again from the file when asked for (`ChobObject.TreeBudget`; the console sets 32 MB, CH360_TREE_BUDGET_MB on PC) | heap at Root Pack 276 -> 126 MB, end 135 MB after GC (was 288-296); 18,223 trees dropped, 217 parsed again; JIT bot 15,301 frames 0 exceptions; selftest 23/23; saves unchanged |
+| `hazard.py`: nops between a register's write and a high-word reader (compares, doubleword shifts/rotates, cntlzd, mulld/divd, std), gap 4 | self-test; one player file: 2,412 nops in 243,895 instructions (1%) |
+| `probe64.c`: producers or, sldi+or, add, ld, mulld x consumers cmpdi, srdi 32, std, mr, addi at 0-12 nops, stale high word preset | assembles; `hz_so_cmp_0` is f62085's `sldi; or; cmpdi` |
+| JIT bot with a 32 MB tree budget; `host_native` bot (console mode) | 15,301 frames, 0 exceptions, heap 135 MB after GC; 16,001 frames, 0 exceptions, bad lists 0, linear memory 215 MB (was 330) |
+| `build_console.py --stage xsdk` (hazard.py on every object; writes before labels and conditional branches count, calls/returns/jumps reset) | `default.xex` 103,043,072 bytes; of 665 `cmpdi` in our code 653 are 4+ instructions from their register's write, the other 12 follow a jump (not reached by falling through); 389 in prebuilt xsdk/vulkan4xenon/newlib unpadded |
+| `stage_console.py --to E:\Apps\cuphead360` | XEX byte-identical; 583 object files copied, identical |
+
 ## 2026-11-02 third hardware run (read; work paused)
 
 `work/console/hw03/`: after a long black screen the game reached the title,

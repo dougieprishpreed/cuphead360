@@ -98,7 +98,13 @@ Xenia, hardware, memory.
 
 ## Next round (in order)
 
-0. **Resume here (hw03 read, VERIFICATION "third hardware run").** The
+0. **The fourth run (round 9 build staged).** Read the "cpu probe" table
+   first (which producer/consumer pairs are wrong at which nop distance:
+   that decides whether hazard.py's gap of 4 and its reader list are right,
+   too wide or too narrow), then I64CHECK (ok means atlases, TMP labels and
+   music load), then whether the map loads (memory: the tree budget cut the
+   heap ~150 MB on PC) and the frame and GC timings.
+   Earlier state, hw03 (VERIFICATION "third hardware run"): the
    game reaches the tutorial on hardware; the map load stops on memory, and
    the sign bug (a suspected high-half forwarding hazard) loses atlases,
    TMP labels and music. In order:

@@ -24,6 +24,8 @@ namespace Cuphead360.Engine
         static readonly Dictionary<string, ChobFile> files = new Dictionary<string, ChobFile>(StringComparer.OrdinalIgnoreCase);
         static readonly Dictionary<string, string> paths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         static readonly Dictionary<(ChobFile, long), UObject> built = new Dictionary<(ChobFile, long), UObject>();
+        /// <summary>The converted files loaded so far (the memory census walks them).</summary>
+        public static IEnumerable<ChobFile> LoadedFiles => files.Values.Where(f => f != null);
         public static readonly List<string> Problems = new List<string>();
 
         public static string[] BuildScenes = new string[0];

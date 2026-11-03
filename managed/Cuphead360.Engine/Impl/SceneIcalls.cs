@@ -80,6 +80,7 @@ namespace Cuphead360.Engine
             Loads++;
             Log.Line($"SCENE loaded {name} (build {index}): {build.GameObjects.Count} GameObjects, {build.Components.Count} components"
                 + (traceMem ? $"; heap {GC.GetTotalMemory(true) >> 20} MB, files read {ChobFile.LoadedFiles} ({ChobFile.LoadedBytes >> 20} MB), live objects {Objects.LiveCount}" : ""));
+            if (traceMem) Log.Line(ChobObject.Census(AssetDb.LoadedFiles) + $"; trees dropped {ChobObject.TreesDropped}, parsed again {ChobObject.TreesReparsed}");
             long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
             build.Activate();
             if (Timing)

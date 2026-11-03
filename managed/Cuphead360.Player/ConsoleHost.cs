@@ -96,6 +96,7 @@ namespace Cuphead360.Player
             Cuphead360.Engine.SceneLoader.Timing = true;
             ChobFile.Trace = Console.WriteLine;
             Audio.CacheFloats = 8L * 1024 * 1024;
+            if (ChobObject.TreeBudget == long.MaxValue) ChobObject.TreeBudget = 32L << 20;   // parsed trees kept (estimated bytes)
             var bad = new List<string>();
             foreach (var s in new[] { "5848540871337674781", "-2592357432173453771", "4294967296", "-4294967296", "2147483648", "-1" })
                 if (long.Parse(s).ToString() != s) bad.Add("format " + s + " -> " + long.Parse(s));

@@ -41,9 +41,14 @@ The player and runtime compile against `console/w2c2/w2c2_base.h`, a copy
 of Spire360's w2c2 header whose only change makes each 64-bit access to the
 player's memory two 32-bit ones: GCC turns w2c2's 8-byte copies into plain
 doubleword loads and stores, the player keeps many 64-bit values only
-4-byte aligned, and the first two hardware runs read such values wrong
-(docs/VERIFICATION.md, rounds 7-8). `probe64.c` logs, before the player
-starts, how the console's loads and stores behave at every alignment.
+4-byte aligned (the third run showed alignment wasn't the problem; the
+split costs little). Every C and C++ source also compiles through
+`console/xsdk/hazard.py` (CMake's compiler launcher): an instruction that
+reads a register's high word gets at least four instructions after the
+register's last write, nops inserted (~1% more instructions). The third run
+pointed at such a read seeing a wrong high word right after the write;
+`probe64.c` measures it before the player starts (`hazard.py --self-test`
+checks the pass).
 
 `console/xsdk/build.sh` takes `XSDK`, `VULKAN4XENON`, `GLSLANG`,
 `XSDK_TOOLCHAIN` and `CH360_RUNTIME` (Spire360's checkout) to build

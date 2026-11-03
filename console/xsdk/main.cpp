@@ -1248,7 +1248,7 @@ int main() {
     unsigned f, t;
     memory_mb(&f, &t);
     logf("memory at start: %u MB free of %u MB", f, t);
-    if (ch360_probe64(probe_line, probe_sync) != 0) logf("mem probe: the player's 64-bit accesses are wrong here");
+    ch360_probe64(probe_line, probe_sync);
     flush_log(true);
     // The player's linear memory is reserved first (committed as it grows):
     // xsdk's heap takes the free address space at its first growth.

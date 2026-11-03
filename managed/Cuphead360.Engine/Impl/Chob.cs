@@ -32,12 +32,25 @@ namespace Cuphead360.Engine
         internal string[] Strings;     // non-null until parsed
         internal int Offset, Length;
         object tree;
+        // The parsed-tree cache: over TreeBudget (estimated bytes), the trees
+        // used longest ago are let go and parsed again from the file if asked
+        // for (trees set at run time are kept).
+        string[] table;               // the file's strings, kept to parse again
+        long lastUse, cost;
+        static long clock, treeBytes;
+        static readonly List<ChobObject> cached = new List<ChobObject>();
+        /// <summary>Estimated bytes of parsed trees kept before the oldest are dropped (the console host sets it).</summary>
+        public static long TreeBudget = long.TryParse(Environment.GetEnvironmentVariable("CH360_TREE_BUDGET_MB"), out var mb) ? mb << 20 : long.MaxValue;
+        public static int TreesDropped, TreesReparsed;
+
         public object Tree
         {
             get
             {
+                lastUse = ++clock;
                 if (Strings != null)
                 {
+                    if (table != null) TreesReparsed++;
                     var buf = Data;
                     int at = Offset;
                     if (buf == null)
@@ -58,14 +71,91 @@ namespace Cuphead360.Engine
                         ParseStats.TryGetValue(Type, out var st);
                         ParseStats[Type] = (st.n + 1, st.bytes + Length);
                     }
+                    if (File?.SourcePath != null && TreeBudget != long.MaxValue)
+                    {
+                        table = Strings;
+                        cost = 64 + Length * 6L;   // boxed trees run ~6x their encoded size
+                        treeBytes += cost;
+                        cached.Add(this);
+                        if (treeBytes > TreeBudget) Trim();
+                    }
                     Data = null; Strings = null; DiskPath = null;
                 }
                 return tree;
             }
-            set { tree = value; Data = null; Strings = null; DiskPath = null; }
+            set { tree = value; Data = null; Strings = null; DiskPath = null; table = null; }
+        }
+
+        /// <summary>Lets go of the least recently used parsed trees down to 3/4 of the budget.</summary>
+        static void Trim()
+        {
+            cached.Sort((a, b) => a.lastUse.CompareTo(b.lastUse));
+            int i = 0;
+            for (; i < cached.Count && treeBytes > TreeBudget * 3 / 4; i++)
+            {
+                var o = cached[i];
+                if (o.table == null || o.tree == null) { treeBytes -= o.cost; continue; }
+                o.tree = null;
+                o.Strings = o.table;
+                o.DiskPath = o.File.SourcePath;
+                o.Data = null;
+                treeBytes -= o.cost;
+                TreesDropped++;
+            }
+            cached.RemoveRange(0, i);
         }
         public Dictionary<string, object> Map => Tree as Dictionary<string, object>;
         public object this[string key] => Map != null && Map.TryGetValue(key, out var v) ? v : null;
+
+        /// <summary>The parsed tree if there is one (nothing is parsed by asking).</summary>
+        internal object Parsed => Strings == null ? tree : null;
+
+        /// <summary>
+        /// CH360_TRACE_MEM: what the parsed trees and still-held file bytes
+        /// cost, by type (bytes estimated from the .NET object layout: a map
+        /// entry ~40, a list slot 8 + a boxed number 24).
+        /// </summary>
+        public static string Census(IEnumerable<ChobFile> files)
+        {
+            var by = new Dictionary<string, (int n, long bytes)>();
+            long held = 0;
+            foreach (var f in files)
+            {
+                byte[] data = null;
+                foreach (var o in f.Ordered)
+                {
+                    if (o.Data != null) data = o.Data;
+                    var t = o.Parsed;
+                    if (t == null) continue;
+                    by.TryGetValue(o.Type, out var st);
+                    by[o.Type] = (st.n + 1, st.bytes + Size(t));
+                }
+                if (data != null) held += data.Length;
+            }
+            var sb = new StringBuilder($"TREES file bytes held {held >> 20} MB;");
+            long total = 0;
+            foreach (var kv in by) total += kv.Value.bytes;
+            sb.Append($" trees {total >> 20} MB:");
+            var list = new List<KeyValuePair<string, (int n, long bytes)>>(by);
+            list.Sort((a, b) => b.Value.bytes.CompareTo(a.Value.bytes));
+            for (int i = 0; i < list.Count && i < 12; i++) sb.Append($" {list[i].Key} {list[i].Value.n}/{list[i].Value.bytes >> 20} MB");
+            return sb.ToString();
+        }
+
+        static long Size(object v)
+        {
+            switch (v)
+            {
+                case Dictionary<string, object> m:
+                    { long s = 80 + m.Count * 40L; foreach (var x in m.Values) s += Size(x); return s; }
+                case List<object> l:
+                    { long s = 40 + l.Capacity * 8L; foreach (var x in l) s += Size(x); return s; }
+                case byte[] b: return 24 + b.Length;
+                case string str: return 0;   // shared with the file's string table mostly
+                case null: return 0;
+                default: return 24;          // a boxed number or bool, a PPtr
+            }
+        }
     }
 
     /// <summary>One converted Unity serialized file (tools/convert_objects.py, CHOB v1).</summary>
@@ -198,7 +288,7 @@ namespace Cuphead360.Engine
                                 for (int i = 0; i < n; i++) Skip();
                                 return blob;
                             }
-                            if (n >= 4096 && d[p] == 3)
+                            if (n >= 16 && d[p] == 3)
                             {
                                 int save = p;
                                 var bytes = new byte[n];
