@@ -52,9 +52,16 @@ coroutine step, invisible UI drawn; PC map frame 4.0 -> 1.7 ms), with a TOP
 line naming the costliest scripts. The eleventh run: the map ~36.5 ms a
 frame, the Root Pack 22-25 ms, loads ~10x faster, but textures past 2 GB in
 the pack drew black (xsdk's 32-bit file offsets); round 15b splits the
-packs under 2 GB. Continue with HANDOFF.md's "Next round" item 0: the
-twelfth run's packs, texture, FRAMES, TOP and HOST lines and the user's
-look, then the first level load's 17.5 s frame, the roadmap to 30 fps (what TOP names, the native
+packs under 2 GB. The twelfth run: textures right, fights near full speed
+with hitches (texture reloads under the memory floor, gen0 GCs), the first
+run-and-gun level ~187 ms a frame; round 16 puts each animation on pages of
+its own, cuts the physics queries' allocations (GCs 3.6x fewer there on
+PC), grids the glue's sprite lookup and frees 12 MB. The Spire360 session
+shares the CTR360-XSDK distro, its xsdk/vulkan4xenon checkouts and the USB
+drive (stage only E:\Apps\cuphead360). Continue with HANDOFF.md's "Next
+round" item 0: the thirteenth run's Forest Follies and fight lines and the
+user's feel of the hitches, then GC pauses, the loading screens, the first
+level load's 17.5 s frame, the roadmap to 30 fps (what TOP names, the native
 mixer, the UI walk and rebuilds, GC, frame pacing), preloading during async
 scene loads, and the other custom sprite shaders. The user's later goal:
 replace the bundled game code with our own so the XEX can be shared.

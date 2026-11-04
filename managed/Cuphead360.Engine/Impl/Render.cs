@@ -361,7 +361,11 @@ namespace Cuphead360.Engine
             if (!Binding(s, out var tex, out var tr, out var u, out int settings) || tex == null) return new Vector2[i.Vertices.Length];
             float w = Icalls.TextureWidth(tex), h = Icalls.TextureHeight(tex);
             if (w <= 0 || h <= 0) return new Vector2[i.Vertices.Length];
-            if (i.UvCache != null && ReferenceEquals(i.UvTex, tex) && i.UvRect.Equals(tr) && i.UvMap.Equals(u) && i.UvSettings == settings && i.UvW == w && i.UvH == h
+            // Field by field (float.Equals, as Rect's and Vector4's Equals do): their Equals(object)
+            // boxed the argument, an allocation per sprite drawn each frame.
+            if (i.UvCache != null && ReferenceEquals(i.UvTex, tex) && i.UvSettings == settings && i.UvW == w && i.UvH == h
+                && i.UvRect.x.Equals(tr.x) && i.UvRect.y.Equals(tr.y) && i.UvRect.width.Equals(tr.width) && i.UvRect.height.Equals(tr.height)
+                && i.UvMap.x.Equals(u.x) && i.UvMap.y.Equals(u.y) && i.UvMap.z.Equals(u.z) && i.UvMap.w.Equals(u.w)
                 && ReferenceEquals(i.UvVertices, i.Vertices))
                 return i.UvCache;
             var uv = new Vector2[i.Vertices.Length];

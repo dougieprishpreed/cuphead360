@@ -18,9 +18,8 @@ texels and out to whole 4x4 blocks (a bilinear sample at its edge reads
 half a texel beyond it), is copied as DXT blocks: the same bytes the full
 page holds, nothing re-encoded. A sprite's animation is its name without
 the frame number (veggie_onion_idle_0004 -> veggie_onion_idle); each
-atlas's animations, in name order, fill pages of --page px (a bigger
-animation takes pages of its own, a sprite wider than a page a page as
-wide as it). Writes <data>/ctexc/<atlas>_c<N>.ctx (convert_console.py's
+animation takes pages of its own (small ones share, in name order), each
+packed at the width that wastes least. Writes <data>/ctexc/<atlas>_c<N>.ctx (convert_console.py's
 CTX1 format) and <data>/ctexc/ctexmap.bin, which console/ch360_imports.c
 (remap_load) reads from the texture pack:
 
@@ -46,7 +45,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chob  # noqa: E402
 
 MARGIN = 2
-BIN_FILL = 0.85   # of a page a bin of animations fills before the next one starts
+SMALL = 128 * 1024                # texels: an animation this small shares a page
+POOL_CAP = int(1024 * 1024 * 0.85)  # texels of small animations a shared page takes
+BIG_CAP = int(4096 * 4096 * 0.85)   # texels of one animation a page takes before the next
 
 
 def fnv64(key):
@@ -215,30 +216,39 @@ def main():
             groups.setdefault((kind, base_name(nm)), []).append((pk, x0, y0, x1 - x0, y1 - y0, match, W, H))
         if not groups:
             continue
-        # Bins: animations in name order (one character's together) up to BIN_FILL of a page, a
-        # bigger animation split over bins of its own; each bin then packed tallest first.
+        # Bins: an animation's frames on pages of their own (split at BIG_CAP texels), so a scene
+        # loads only what it plays: bins of several animations in name order made the Root Pack
+        # fight touch 162 MB of sprite pages for 31 MB of frames, and the console evicted and
+        # reloaded Cuphead's pages as he moved (a hitch each). Animations under SMALL share pages in
+        # name order up to POOL_CAP, so a static scene's many small sprites aren't a texture each.
+        # Each bin is then packed tallest first.
         kpages = {1: [], 2: []}
         placed = []   # (kind, page index, page, source key, sx, sy, dx, dy, match, W, H)
-        cap = int(a.page * a.page * BIN_FILL)
         for kind in (1, 2):
-            bins, cur, cur_area = [], [], 0
+            bins, pool, pool_area = [], [], 0
             for (k, base) in sorted(g for g in groups if g[0] == kind):
                 uniq = {}
                 for b in groups[(k, base)]:
                     uniq.setdefault(b[:5], []).append(b)
                 boxes = sorted(uniq, key=lambda b: (b[0], b[1], b[2]))
                 area = sum(b[3] * b[4] for b in boxes)
-                if cur and cur_area + area > cap:
-                    bins.append(cur)
-                    cur, cur_area = [], 0
+                if area < SMALL:
+                    if pool and pool_area + area > POOL_CAP:
+                        bins.append(pool)
+                        pool, pool_area = [], 0
+                    pool += [(b, uniq[b]) for b in boxes]
+                    pool_area += area
+                    continue
+                cur, cur_area = [], 0
                 for b in boxes:
-                    if cur and cur_area + b[3] * b[4] > cap:
+                    if cur and cur_area + b[3] * b[4] > BIG_CAP:
                         bins.append(cur)
                         cur, cur_area = [], 0
                     cur.append((b, uniq[b]))
                     cur_area += b[3] * b[4]
-            if cur:
                 bins.append(cur)
+            if pool:
+                bins.append(pool)
             plist = kpages[kind]
             queue = list(bins)
             while queue:

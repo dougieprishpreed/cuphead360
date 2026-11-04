@@ -170,13 +170,17 @@ void* (*volatile g_memcpy)(void*, const void*, size_t) = memcpy;
 
 const int W = 1280, H = 720, FRAMES = 2;
 const VkFormat TARGET_FORMAT = VK_FORMAT_B8G8R8A8_UNORM;
-const VkDeviceSize VERTEX_RING = 8 * 1024 * 1024;
+// Vertices a frame (two frames in flight): 87,000 at 24 bytes; frames draw up to
+// ~16,000 since hidden UI is skipped (8 MB a frame held 12 MB more than needed).
+const VkDeviceSize VERTEX_RING = 2 * 1024 * 1024;
 // Evict least recently used textures above this: the XEX image is ~100 MB and
 // the player's linear memory reaches ~220 MB in a level, of 512 MB. A new
 // texture first makes room from textures not drawn lately, so the set stays
 // near the budget across a scene change (the map's first frame draws 68 MB
-// while the title's and slot select's 53 MB are still loaded).
-const size_t TEXTURE_BUDGET = 96u << 20;
+// while the title's and slot select's 53 MB are still loaded). With sprites at
+// full size the map draws ~91 MB; memory (MEMORY_FLOOR_MB) was what held the
+// set lower in the twelfth run, so the budget is only a little above that.
+const size_t TEXTURE_BUDGET = 112u << 20;
 // Uploads go through one staging buffer, run (submitted and waited) when it
 // fills: one buffer per texture until the frame ended doubled a scene's first
 // frame in memory, and the fifth run froze there (docs/VERIFICATION.md).
@@ -1098,8 +1102,8 @@ size_t Renderer::release_unused(size_t want) {
 // Textures not drawn for a while go when the set passes the budget.
 void Renderer::evict() {
     if (texture_bytes_ <= TEXTURE_BUDGET) return;
-    for (unsigned age = 600; age >= 30 && texture_bytes_ > TEXTURE_BUDGET * 3 / 4; age /= 2)
-        for (size_t i = 0; i < textures_.size() && texture_bytes_ > TEXTURE_BUDGET * 3 / 4; ++i) {
+    for (unsigned age = 600; age >= 30 && texture_bytes_ > TEXTURE_BUDGET * 7 / 8; age /= 2)
+        for (size_t i = 0; i < textures_.size() && texture_bytes_ > TEXTURE_BUDGET * 7 / 8; ++i) {
             Tex& t = textures_[i];
             if (t.image && !t.key.empty() && frame_no_ - t.last_used > age) {
                 destroy(t, false);

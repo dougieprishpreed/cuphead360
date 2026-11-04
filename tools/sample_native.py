@@ -27,6 +27,7 @@ ap.add_argument('--delay', type=float, default=5)
 ap.add_argument('--seconds', type=float, default=20)
 ap.add_argument('--hz', type=float, default=400)
 ap.add_argument('--focus', action='append', default=[])
+ap.add_argument('--callers', action='append', default=[], help='functions to list the callers of (the frame above each)')
 ap.add_argument('--out')
 ap.add_argument('--top', type=int, default=50)
 ap.add_argument('--imports', type=int, default=85)
@@ -208,6 +209,19 @@ for fname in a.focus:
         else: below[st[i - 1]] += 1
     out.append('\nFOCUS %s: %.2f%% of samples (self %.2f%%)' % (fname, 100.0 * tot / N, 100.0 * selfin / N))
     for n, c in below.most_common(40): out.append('%6.2f%%  %s' % (100.0 * c / N, n))
+for fname in a.callers:
+    above = Counter(); tot = 0
+    for st in stacks:
+        idx = [i for i, n in enumerate(st) if fname in n]
+        if not idx: continue
+        tot += 1
+        i = idx[-1]   # the outermost match
+        # the first caller that isn't the function itself or a compiler-generated thunk of it
+        j = i + 1
+        while j < len(st) and fname in st[j]: j += 1
+        above[st[j] if j < len(st) else '(top)'] += 1
+    out.append('\nCALLERS %s: %.2f%% of samples' % (fname, 100.0 * tot / N))
+    for n, c in above.most_common(25): out.append('%6.2f%%  %s' % (100.0 * c / N, n))
 text = '\n'.join(out)
 print(text)
 if a.out:

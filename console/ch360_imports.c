@@ -166,7 +166,12 @@ static void draw_item_box(ch360_item* it) {
  * more textures at them) and the halved page. */
 typedef struct remap_page {
     unsigned hi, lo, first, count, last;
+    /* REMAP_GRID x REMAP_GRID cells over the page's uv: the boxes each cell
+     * meets, built on the page's first item. A scan of all its boxes per item
+     * was 34 ms a frame on the console in the first run-and-gun level. */
+    unsigned* grid;
 } remap_page;
+#define REMAP_GRID 8
 typedef struct remap_box {
     float u0, v0, u1, v1, su, ou, sv, ov;
     unsigned target;
@@ -245,6 +250,7 @@ static void remap_load(void) {
         rm_pages[i].first = le32(p + 8);
         rm_pages[i].count = le32(p + 12);
         rm_pages[i].last = 0;
+        rm_pages[i].grid = NULL;
     }
     for (i = 0; i < rm_box_count; i++) {
         const U8* p = d + 24 + rm_page_count * 16 + i * 36;
@@ -279,17 +285,52 @@ static int remap_page_of(const char* key, size_t len) {
     return a < rm_page_count && rm_pages[a].hi == hi && rm_pages[a].lo == lo ? (int)a : -1;
 }
 
+static int remap_cell(float u) {
+    int c = (int)(u * (float)REMAP_GRID);
+    return c < 0 ? 0 : c >= REMAP_GRID ? REMAP_GRID - 1 : c;
+}
+
+/* The page's grid: REMAP_GRID^2 + 1 starts (into the array itself), then the
+ * page's box numbers by cell. NULL if there is no memory (a full scan then). */
+static unsigned* remap_grid(const remap_page* p) {
+    unsigned cursor[REMAP_GRID * REMAP_GRID + 1], cells = REMAP_GRID * REMAP_GRID, total = 0, k, c;
+    unsigned* g;
+    memset(cursor, 0, sizeof(cursor));
+    for (k = 0; k < p->count; k++) {
+        const remap_box* b = &rm_boxes[p->first + k];
+        int x, y, x0 = remap_cell(b->u0), x1 = remap_cell(b->u1), y0 = remap_cell(b->v0), y1 = remap_cell(b->v1);
+        for (y = y0; y <= y1; y++)
+            for (x = x0; x <= x1; x++) cursor[y * REMAP_GRID + x]++;
+    }
+    for (c = 0; c < cells; c++) total += cursor[c];
+    g = (unsigned*)malloc((cells + 1 + total) * sizeof(unsigned));
+    if (g == NULL) return NULL;
+    g[0] = cells + 1;
+    for (c = 0; c < cells; c++) {
+        g[c + 1] = g[c] + cursor[c];
+        cursor[c] = g[c];
+    }
+    for (k = 0; k < p->count; k++) {
+        const remap_box* b = &rm_boxes[p->first + k];
+        int x, y, x0 = remap_cell(b->u0), x1 = remap_cell(b->u1), y0 = remap_cell(b->v0), y1 = remap_cell(b->v1);
+        for (y = y0; y <= y1; y++)
+            for (x = x0; x <= x1; x++) g[cursor[y * REMAP_GRID + x]++] = k;
+    }
+    return g;
+}
+
 /* Moves an item drawn from an atlas page onto its sprite's full-size page. */
 static void remap_item(ch360_item* it) {
     remap_page* p;
     ch360_vertex* v;
     float u0, v0, u1, v1;
-    unsigned k, n;
+    unsigned k, n, from, to;
     int page;
     if (it->texture < 0 || (unsigned)it->texture >= plat_cap || it->mode == 6) return;
     page = page_of_plat[it->texture] - 1;
     if (page < 0) return;
     p = &rm_pages[page];
+    if (p->count == 0) return;
     v = draw_verts + it->first;
     u0 = u1 = v->u;
     v0 = v1 = v->v;
@@ -299,9 +340,23 @@ static void remap_item(ch360_item* it) {
         if (v[k].v < v0) v0 = v[k].v;
         if (v[k].v > v1) v1 = v[k].v;
     }
-    for (n = 0; n < p->count; n++) {
-        unsigned bi = p->first + (p->last + n) % p->count;
-        const remap_box* b = &rm_boxes[bi];
+    if (p->grid == NULL) p->grid = remap_grid(p);
+    /* the box last matched, then those of the cell holding the uv box's corner
+     * (a box that holds the uv box holds that corner), or all without a grid */
+    if (p->grid != NULL) {
+        unsigned c = (unsigned)(remap_cell(v0) * REMAP_GRID + remap_cell(u0));
+        from = p->grid[c];
+        to = p->grid[c + 1];
+    } else {
+        from = 0;
+        to = p->count;
+    }
+    for (n = 0; n <= to - from; n++) {
+        unsigned bi;
+        const remap_box* b;
+        if (n == 0) bi = p->first + p->last;
+        else bi = p->first + (p->grid != NULL ? p->grid[from + n - 1] : from + n - 1);
+        b = &rm_boxes[bi];
         if (u0 >= b->u0 && u1 <= b->u1 && v0 >= b->v0 && v1 <= b->v1) {
             int id = b->target < rm_target_count ? rm_plat[b->target] : -1;
             if (id < 0 && b->target < rm_target_count) {

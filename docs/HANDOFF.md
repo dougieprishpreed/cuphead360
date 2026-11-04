@@ -48,7 +48,9 @@ time (builds, conversions, ILC) so the user's PC stays usable;
     names, cached staging, the native draw path, masks, 3D audio, the EX
     trace), `60bf849` round 14 (exit time 0, the host frame, light rays,
     streamed clips), `c5321d8` round 15 (full-size sprites, packs, the
-    map's CPU); round 15b's commit after them (packs under 2 GB).
+    map's CPU), `35090b4` round 15b (packs under 2 GB); round 16's commit
+    after them (per-animation sprite pages, physics allocations, the
+    glue's grid, memory).
 - Side branch `interpreter-d1-r4-wip` (`ecbff5b`): the interrupted D1 r4
   interpreter edits, committed as found, not accepted, not continued.
 - Uncommitted: nothing intended. `managed/lib`, `managed/**/Generated`,
@@ -110,7 +112,42 @@ Xenia, hardware, memory.
 
 ## Next round (in order)
 
-0. **The twelfth run (round 15b staged: the packs split under 2 GB).** The
+0. **The thirteenth run (round 16 staged: per-animation sprite pages, the
+   run-and-gun level, hitches).** The twelfth run (VERIFICATION "twelfth
+   hardware run"): fights near full speed with hitches every second or so
+   (texture reloads of Cuphead's and the bosses' pages under the memory
+   floor, and gen0 GCs ~20-25 ms), the map ~38 ms, Forest Follies 187 ms a
+   frame (raycasts building collider lists, new shapes every step, a GC
+   nearly every frame, the glue's sprite lookup 34 ms). Round 16:
+   - **Sprite pages per animation** (`cluster_console.py`; small ones
+     share): the Root Pack's 300-frame set 57 -> 44 MB, the Ooze's 67 -> 43
+     (JIT captures); the map stays ~91 MB.
+   - **Physics queries:** casts and overlaps filter by layer before the
+     walks up the hierarchy, over the collider table itself; boxes,
+     circles and capsules keep their shapes as they move; `Shapes()` no
+     longer allocates a closure at every call (C# put its local function's
+     captured matrix on the heap). Forest Follies on PC: gen0 GCs over
+     4,200 frames 6,258 -> 1,722, the frame 8.8 -> 6.3 ms, draw lists
+     identical.
+   - `RenderUvs`' cache check no longer boxes (Rect/Vector4 Equals).
+   - **The glue's lookup:** an 8x8 grid of each page's rectangles.
+   - **Memory:** the vertex ring 8 -> 2 MB a frame (+12 MB); the texture
+     budget 96 -> 112 MB, evicting to 7/8 of it.
+   - The EX trace off.
+
+   Read: Forest Follies' FRAMES/TOP/HOST (glue, fixed, GCs in the
+   CONSOLE lines); the fights' worst frames and the texture lines'
+   reloads (the same key loaded again); memory free/textures; the user's
+   feel of the hitches.
+
+   Next: GC pauses (each gen0 ~20-25 ms with a 120-140 MB heap: fewer
+   allocations a frame, e.g. text layout each frame, mesh rebuilds; or GC
+   settings), the loading screens (scenes built over several frames), the
+   first level load's 17.5 s (31 MB of shared objects indexed), the
+   player's linear memory (101 -> 216 MB over a session), then the list
+   below.
+
+   Round 15b's item, kept: the twelfth run (round 15b staged: the packs split under 2 GB). The
    eleventh run (VERIFICATION "eleventh hardware run"): the map at ~36.5 ms
    a frame (round 14 ~88), the Root Pack at 22-25 ms (43-50), texture loads
    ~10x faster; but every texture past 2 GB in the 3.99 GB pack failed

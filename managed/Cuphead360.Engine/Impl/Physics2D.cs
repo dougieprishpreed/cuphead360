@@ -95,34 +95,64 @@ namespace Cuphead360.Engine
             var m = GameObject.Transform.LocalToWorld;
             if (cached && cachedVersion == Version && m == cachedM) return World;
             cached = true; cachedVersion = Version; cachedM = m;
-            World.Clear();
+            Recompute(m);
+            return World;
+        }
+
+        // Apart from Shapes: its local function P is made a delegate for polygons, so the
+        // compiler puts the matrix it captures in a heap object at the method's start: every
+        // call allocated one, cached or not (the largest allocation site in a run-and-gun level).
+        void Recompute(Matrix4x4 m)
+        {
             Vector2 P(Vector2 local) { var w = m.MultiplyPoint3x4(new Vector3(local.x + Offset.x, local.y + Offset.y, 0)); return new Vector2(w.x, w.y); }
             var ls = GameObject.Transform.LossyScale;
             float rs = Math.Max(Math.Abs(ls.x), Math.Abs(ls.y));
+            // A box, circle or capsule keeps its shape and arrays as it moves (the same values as new
+            // ones): moving colliders' new shapes were most of a run-and-gun level's allocations, and
+            // its garbage collections nearly one a frame on the console. Nothing keeps World's shapes.
+            Shape Reuse(int pts)
+            {
+                if (World.Count == 1 && World[0].Pts.Length == pts) return World[0];
+                World.Clear();
+                var sh = new Shape { Pts = new Vector2[pts] };
+                World.Add(sh);
+                return sh;
+            }
             switch (Kind)
             {
                 case ColliderKind.Box:
                     {
                         float hx = Size.x / 2, hy = Size.y / 2;
-                        World.Add(Shape.Poly(new[] { P(new Vector2(-hx, -hy)), P(new Vector2(hx, -hy)), P(new Vector2(hx, hy)), P(new Vector2(-hx, hy)) }, EdgeRadius * rs));
+                        var sh = Reuse(4);
+                        sh.Pts[0] = P(new Vector2(-hx, -hy)); sh.Pts[1] = P(new Vector2(hx, -hy)); sh.Pts[2] = P(new Vector2(hx, hy)); sh.Pts[3] = P(new Vector2(-hx, hy));
+                        Geometry.CcwInPlace(sh.Pts);
+                        sh.R = EdgeRadius * rs;
                         break;
                     }
                 case ColliderKind.Circle:
-                    World.Add(Shape.Circle(P(Vector2.zero), Radius * rs));
-                    break;
+                    {
+                        var sh = Reuse(1);
+                        sh.Pts[0] = P(Vector2.zero);
+                        sh.R = Radius * rs;
+                        break;
+                    }
                 case ColliderKind.Capsule:
                     {
                         bool vertical = Direction == CapsuleDirection2D.Vertical;
                         float r = (vertical ? Size.x : Size.y) / 2, half = Math.Max(0, (vertical ? Size.y : Size.x) / 2 - r);
                         var a = vertical ? new Vector2(0, -half) : new Vector2(-half, 0);
                         var b = vertical ? new Vector2(0, half) : new Vector2(half, 0);
-                        World.Add(Shape.Poly(new[] { P(a), P(b) }, r * rs));
+                        var sh = Reuse(2);
+                        sh.Pts[0] = P(a); sh.Pts[1] = P(b);
+                        sh.R = r * rs;
                         break;
                     }
                 case ColliderKind.Edge:
+                    World.Clear();
                     for (int i = 0; i + 1 < Points.Length; i++) World.Add(Shape.Poly(new[] { P(Points[i]), P(Points[i + 1]) }, EdgeRadius * rs));
                     break;
                 case ColliderKind.Polygon:
+                    World.Clear();
                     foreach (var path in Paths)
                     {
                         var world = Array.ConvertAll(path, P);
@@ -133,7 +163,6 @@ namespace Cuphead360.Engine
             float x0 = float.MaxValue, y0 = float.MaxValue, x1 = float.MinValue, y1 = float.MinValue;
             foreach (var s in World) { var r = s.Bounds(); x0 = Math.Min(x0, r.xMin); y0 = Math.Min(y0, r.yMin); x1 = Math.Max(x1, r.xMax); y1 = Math.Max(y1, r.yMax); }
             AABB = World.Count == 0 ? new Rect(P(Vector2.zero), Vector2.zero) : Rect.MinMaxRect(x0, y0, x1, y1);
-            return World;
         }
     }
 
@@ -201,6 +230,15 @@ namespace Cuphead360.Engine
     public static class Geometry
     {
         static float Cross(Vector2 a, Vector2 b) => a.x * b.y - a.y * b.x;
+
+        /// <summary>Ccw's order, the points reversed in place when clockwise.</summary>
+        public static void CcwInPlace(Vector2[] p)
+        {
+            if (p.Length < 3) return;
+            float area = 0;
+            for (int i = 0; i < p.Length; i++) area += Cross(p[i], p[(i + 1) % p.Length]);
+            if (area < 0) Array.Reverse(p);
+        }
 
         public static Vector2[] Ccw(Vector2[] p)
         {
@@ -527,9 +565,14 @@ namespace Cuphead360.Engine
             var castBounds = castShape.Bounds();
             var sweep = Rect.MinMaxRect(origin.x + castBounds.xMin + Math.Min(0, dir.x * distance), origin.y + castBounds.yMin + Math.Min(0, dir.y * distance),
                 origin.x + castBounds.xMax + Math.Max(0, dir.x * distance), origin.y + castBounds.yMax + Math.Max(0, dir.y * distance));
-            foreach (var c in Colliders())
+            // The cheap filters before Live's walks up the hierarchy (Colliders() ran Live for every
+            // collider at every cast: the run-and-gun level's enemies cast several times a step).
+            var all = Typed.Colliders;
+            for (int ci = 0; ci < all.Count; ci++)
             {
-                if (c == exclude || (excludeBody != null && c.Rigidbody == excludeBody) || !Accepts(c, filter)) continue;
+                var c = all[ci];
+                if (c == exclude || c.Destroyed || !c.Enabled || c.GameObject == null || !Accepts(c, filter) || !c.Live) continue;
+                if (excludeBody != null && c.Rigidbody == excludeBody) continue;
                 c.Shapes();
                 if (!c.AABB.Overlaps(sweep)) continue;
                 float best = float.MaxValue; Vector2 bestN = Vector2.zero; bool found = false;
@@ -592,9 +635,11 @@ namespace Cuphead360.Engine
         {
             var r = new List<NCollider2D>();
             var b = world.Bounds();
-            foreach (var c in Colliders())
+            var all = Typed.Colliders;
+            for (int ci = 0; ci < all.Count; ci++)
             {
-                if (!Accepts(c, filter)) continue;
+                var c = all[ci];
+                if (c.Destroyed || !c.Enabled || c.GameObject == null || !Accepts(c, filter) || !c.Live) continue;
                 c.Shapes();
                 if (!c.AABB.Overlaps(b) && !(b.width == 0 && c.AABB.Contains(b.position))) continue;
                 foreach (var s in c.World) if (Geometry.Overlap(s, world)) { r.Add(c); break; }

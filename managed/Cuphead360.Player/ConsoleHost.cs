@@ -105,7 +105,8 @@ namespace Cuphead360.Player
             System.Globalization.CultureInfo.InvariantCulture, out var st) && st > 0 ? st : 1f / 60f;
         // The eighth run's EX shots showed no pose on the console: the player's first three EX
         // animations (a Play of "Ex.<direction>_<Ground|Air>") open an animator trace of the player
-        // and log the player's sprite as drawn, 30 frames each.
+        // and log the player's sprite as drawn, 30 frames each. Off since the tenth run showed the
+        // EX right (its lines were written in the fights' frames): call it again to trace.
         static void TraceEx()
         {
             NAnimator.WindowName = "PlayerOne";
@@ -126,7 +127,6 @@ namespace Cuphead360.Player
             // converting each sample here went through memory twice on the console's CPU.
             Audio.Output = (mix, frames) => { fixed (float* p = mix) AudioOut(p, frames); };
             Console.WriteLine("CONSOLE host loop");
-            TraceEx();
             int n = 0;
             long last = System.Diagnostics.Stopwatch.GetTimestamp(), hz = System.Diagnostics.Stopwatch.Frequency;
             PlayerLoop.Profile = true;

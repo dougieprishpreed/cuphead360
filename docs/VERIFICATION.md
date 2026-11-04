@@ -3,6 +3,28 @@
 Newest first. Each entry says what was run, on which build, and what it
 showed. Windows entries use the JIT oracle (`work/managed/jit`).
 
+## 2026-11-04 twelfth hardware run and round 16 (hitches: texture thrash, GC, the run-and-gun level)
+
+The twelfth run (`work/console/hw12/`), round 15b build:
+- **The user saw:** major progress; the map playable though still slow; the Root Pack and the Ooze "basically full speed" but with frequent hitches; hitches throughout play and at every loading screen; the first run-and-gun level (Forest Follies) at a very low frame rate (the console turned off there); the Root Pack's textures acceptable now.
+- **The log:** `packs: ... sprite pages for 880 atlas pages (84349 sprites, 4699 pages)`. Steady frames: the title 16.8 ms, the map 38 ms, the Root Pack 20-27 ms, the Ooze 24-31 ms; Forest Follies 187.5 ms (fixed 46, submit 46.5, pump 33.5, update 16, audio 12, physics 11; HOST glue 34.1 ms for 315 items). The worst frame of each 600 in the fights 130-950 ms. Memory: 24-27 MB free from the first fight on (the floor), the player's memory 101 -> 216 MB, textures 54-94 MB; 744 uploads and 709 evictions by frame 9,000; four textures in Forest Follies found no memory. GC: in the fights a gen0 collection about once a second (~20-25 ms each); in Forest Follies 572 in 600 frames (10.5 s paused).
+
+| Finding | How |
+| --- | --- |
+| The fights' hitches are mostly texture reloads: the Root Pack fight loaded a texture every ~33 frames (54 loads in 1,800), Cuphead's sprite pages three or four times each, at 30-200 ms a load. The fight touched 92 textures, 208 MB: the bins of several animations a page brought 80 MB of Cuphead's pages (27) and 82 of the three bosses' (28), more than memory holds with the player at 200 MB, so pages not drawn in the last frames were let go and loaded again | the log's texture lines by key; the uploads/evicted counters |
+| Per animation, the frames those fights drew are 30.6 M texels (Root Pack: Cuphead 15.0, the bosses 11.1) and 32.8 M (Ooze) | the JIT captures' sprite names, each animation's frames from the SpriteAtlas rects |
+| Forest Follies: the ground enemies' raycasts (`PlatformingLevelGroundMovementEnemy.HandleRaycasts`: BoxCast and Raycast each step) built the list of every live collider per cast (`Physics.Colliders`, the `Live` walks up the hierarchy for all) and moving colliders allocated new shapes each step (the largest allocation site: ~one GC a frame); the glue's sprite lookup scanned all of a page's rectangles per item (34 ms a frame) | `sample_native.py` with `--callers` over host_native in the level (a new bot, `bot_save_forest.txt`); TOP: ForestPlatformingLevelBlobRunner 19 ms, FlowerGrunt 9 |
+| The vertex ring held 8 MB a frame (two in flight) for frames of up to ~16,000 vertices (0.4 MB) | the HOST lines |
+
+| Change | Check |
+| --- | --- |
+| `cluster_console.py`: each animation's frames on pages of their own (split at 4096^2 x 0.85 texels); animations under 128 K texels share pages in name order (up to 1024^2 x 0.85). 880 pages -> 6,906 sprite pages, 13.9 GB; the pack 8,244 entries, 3.72 GB in two files | `working_set.py` over the JIT captures, the most drawn in any 300 frames: the Root Pack 57 -> 44 MB, the Ooze 67 -> 43, the map 96 -> 100 (all of world 1's islands, its water and world 2's edge are drawn: ~91 MB in steady play). `test_pack_all`: 8,244 entries, 17.52 GB decoded, all good |
+| Physics: casts and overlap queries walk the collider table with the cheap filters (layer, trigger) before `Live`; boxes, circles and capsules update their shape in place when they move; `Shapes()`'s recompute in a method of its own (its local function, made a delegate for polygons, put the captured matrix in a heap object at every call, cached or not) | host_native Forest Follies bot from the hw12 save, every 30th frame's draw list against round 15b's: 140 frames, 37,782 items, 19.9 M vertices identical; BOT lines identical; gen0 GCs over 4,200 frames 6,258 -> 1,722 (pauses 3.4 -> 2.0 s), the level's frame (PC) 8.8 -> 6.3 ms, ForestPlatformingLevelBlobRunner 1.09 -> 0.58 ms |
+| `Sprites.RenderUvs`: its cache compares the rect and map field by field (Rect's and Vector4's Equals(object) boxed per call) | JIT potato bot: 320 captured frames' visible items identical to round 14's; BOT lines identical |
+| The glue: each sprite-table page gets an 8x8 grid of its rectangles on first use (the last rectangle matched, then the cell holding the uv box's corner) | `remap_check` from the packs: 4,171 items exact, 0 left on atlas pages; the potato bot's BOT lines as the JIT run's; audio identical |
+| Host: the vertex ring 8 -> 2 MB a frame (+12 MB free); the texture budget 96 -> 112 MB, eviction to 7/8 of it; the EX trace off | builds |
+| The XEX | built against xsdk `5f6dc72` and vulkan4xenon `df25dc5` (shared with the Spire360 session in the CTR360-XSDK distro: a change there shows here); record_forms fixed sites in 20 files |
+
 ## 2026-11-04 eleventh hardware run and round 15b (packs under 2 GB)
 
 The eleventh run (`work/console/hw11/`), round 15 build:
