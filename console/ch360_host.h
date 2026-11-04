@@ -112,6 +112,30 @@ void ch360_ogg_root(const char* root_dir);
 extern int ch360_staged_names;
 /* "XX/YYYYYYYY" and a NUL (12 bytes) for the len bytes of key. */
 void ch360_staged_name(const char* key, size_t len, char* out);
+/* FNV-1a 64 of key as two words. */
+void ch360_fnv64(const char* key, size_t len, unsigned* hi, unsigned* lo);
+
+/* GameData packs (ch360_pack.c, tools/stage_console.py): <root>/GameData/
+ * <name>0.PAK, 1, ... opened once, entries found by key and read at any
+ * offset (LZ4 entries decoded). Guest thread only. */
+typedef struct ch360_pack_entry {
+    int file;
+    unsigned offset, stored, size;
+} ch360_pack_entry;
+/* The pack (>= 0), or -1 when there is no <name>0.PAK. */
+int ch360_pack_open(const char* root, const char* name);
+/* 1 and *out for the entry with this key, 0 if there is none. */
+int ch360_pack_find(int pack, const char* key, size_t len, ch360_pack_entry* out);
+/* Bytes [from, from + n) of the entry into dst: 0, or -1 on a bad read. */
+int ch360_pack_read(const ch360_pack_entry* e, unsigned from, void* dst, unsigned n);
+int ch360_lz4_decode(const unsigned char* src, unsigned srclen, unsigned char* dst, unsigned dstlen);
+/* The textures' pack, opened by ch360_prepare when the root has CTEX0.PAK
+ * (-1 otherwise: the PC reads GameData/ctex's loose files). */
+extern int ch360_ctex_pack;
+/* Items drawn from an atlas page that no sprite rectangle held (kept on the halved page). */
+unsigned ch360_remap_misses(void);
+/* The sprite table's atlas pages (and its sprites' boxes, sprite pages). */
+unsigned ch360_remap_counts(unsigned* boxes, unsigned* targets);
 /* The player's linear memory, in KB (committed as it grows). */
 unsigned ch360_memory_kb(void);
 /* Moves the player's buffered stdout into the log now. One thread drains:

@@ -94,9 +94,9 @@ int ch360_plat_frame_begin(void) {
     if (frame_no > 0 && frame_no % 600 == 0) {
         double secs = (double)(clock() - started) / CLOCKS_PER_SEC;
         printf("[host] frame %ld: %.1f fps; last frame %lu views, %lu items, %lu vertices; textures %lu files, %lu runtime; "
-               "audio %.1f s; memory %u MB; bad lists %lu\n",
+               "audio %.1f s; memory %u MB; bad lists %lu; items off the sprite pages %u\n",
                frame_no, frame_no / (secs > 0 ? secs : 1), views_seen, draw_items, draw_vertices, textures_files,
-               textures_pixels, audio_frames / 48000.0, ch360_memory_kb() / 1024, bad_lists);
+               textures_pixels, audio_frames / 48000.0, ch360_memory_kb() / 1024, bad_lists, ch360_remap_misses());
         fflush(stdout);
     }
     frame_no++;
@@ -112,6 +112,7 @@ int ch360_plat_pad(int index, ch360_pad* out) {
  * u32 views, items, vertices, then the ch360_view, ch360_item and ch360_vertex records as they are
  * (tools comparing two ways of writing it, such as ConsoleHost's CH360_DRAW=managed). */
 static FILE* dump_file;
+static FILE* dump_keys;   /* <file>.keys: "id key" for each texture as the platform got it */
 static long dump_every;
 
 void ch360_plat_draw(const ch360_frame* f) {
@@ -147,6 +148,10 @@ void ch360_plat_draw(const ch360_frame* f) {
 
 void ch360_plat_texture_file(int id, const char* key) {
     textures_files++;
+    if (dump_keys) {
+        fprintf(dump_keys, "%d %s\n", id, key);
+        fflush(dump_keys);
+    }
     if (id >= 0 && id < TRACE_IDS) {
         free(tex_key[id]);
         tex_key[id] = (char*)malloc(strlen(key) + 1);
@@ -244,6 +249,11 @@ int main(int argc, char** argv) {
             *colon = 0;
             dump_every = atol(colon + 1);
             dump_file = fopen(path, "wb");
+            {
+                static char kp[1100];
+                sprintf(kp, "%s.keys", path);
+                dump_keys = fopen(kp, "w");
+            }
         }
     }
     frame_ms = getenv("CH360_FRAME_MS") ? atol(getenv("CH360_FRAME_MS")) : 0;

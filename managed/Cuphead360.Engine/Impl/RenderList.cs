@@ -150,7 +150,6 @@ namespace Cuphead360.Engine
         }
 
         public static Camera Current;
-        static readonly Dictionary<NCanvasRenderer, int> depths = new Dictionary<NCanvasRenderer, int>();
         static readonly bool traceUi = Environment.GetEnvironmentVariable("CH360_TRACE_UI") == "1";
 
         /// <summary>
@@ -189,7 +188,7 @@ namespace Cuphead360.Engine
             }
         }
 
-        public static int DepthOf(NCanvasRenderer r) => r != null && depths.TryGetValue(r, out int d) ? d : -1;
+        public static int DepthOf(NCanvasRenderer r) => r != null ? r.Depth : -1;
 
         public static List<View> Build()
         {
@@ -306,16 +305,23 @@ namespace Cuphead360.Engine
             float d = cam != null ? xf.Viewport(root.GameObject.Transform.Position).z : 0f;
             // A canvas on or behind the camera's near plane (or past the far one) is clipped away.
             if (cam != null && (d < cam.Near || d > cam.Far)) return list;
-            void Walk(NTransform t)
+            void Walk(NTransform t, float above)
             {
                 var go = t.GameObject;
                 if (!go.ActiveSelf) return;
+                float alpha = NCanvasRenderer.AlphaBelow(go, above);
                 List<Item> pops = null;
-                foreach (var c in go.Components)
-                    if (c is NCanvasRenderer cr && !cr.Destroyed)
+                // Indexed loops: the translated List enumerators were 5% of a world map frame.
+                var comps = go.Components;
+                for (int ci = 0; ci < comps.Count; ci++)
+                    if (comps[ci] is NCanvasRenderer cr && !cr.Destroyed)
                     {
-                        depths[cr] = depth++;
+                        cr.Depth = depth++;
                         if (cr.Cull || cr.Mesh == null || cr.Mesh.Vertices.Length == 0) continue;
+                        // Wholly transparent and writing no stencil: nothing to draw. The world
+                        // map's hidden menus (CanvasGroups at 0) were 316 of its 323 UI items,
+                        // 6,700 vertices transformed a frame.
+                        if ((alpha == 0f || cr.Color.a == 0f) && !WritesStencil(cr)) continue;
                         var mesh = cr.Mesh;
                         var mtx = t.LocalToWorld;
                         // The first item made here owns the arrays; the renderer's other submeshes and pops share them.
@@ -359,11 +365,21 @@ namespace Cuphead360.Engine
                                 (pops ??= new List<Item>()).Add(it);
                             }
                     }
-                foreach (var ch in t.Children) Walk(ch);
+                var kids = t.Children;
+                for (int k = 0; k < kids.Count; k++) Walk(kids[k], alpha);
                 if (pops != null) list.AddRange(pops);
             }
-            Walk(root.GameObject.Transform);
+            var rt = root.GameObject.Transform;
+            Walk(rt, rt.Parent != null ? NCanvasRenderer.AlphaFrom(rt.Parent) : 1f);
             return list;
+        }
+
+        /// <summary>A renderer that writes the stencil (a UGUI mask, or its pop): drawn even when transparent.</summary>
+        static bool WritesStencil(NCanvasRenderer cr)
+        {
+            foreach (var m in cr.Materials) if (StencilOf(m) is int[] s && s[2] != 0) return true;
+            foreach (var pm in cr.PopMaterials) if (StencilOf(pm) is int[] s && s[2] != 0) return true;
+            return false;
         }
 
         static readonly int MainTex = ShaderProps.Id("_MainTex");

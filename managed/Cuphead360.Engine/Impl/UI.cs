@@ -316,6 +316,8 @@ namespace Cuphead360.Engine
         public Texture Texture, AlphaTexture;
         public Color Color = Color.white;
         public bool Cull, IsMask, HasPopInstruction;
+        /// <summary>Its place in its canvas's last walk (absoluteDepth), -1 before one.</summary>
+        public int Depth = -1;
         public Rect? Clip;
 
         public override void CopyFrom(NComponent src, Dictionary<NObject, NObject> map)
@@ -325,24 +327,45 @@ namespace Cuphead360.Engine
         }
 
         /// <summary>Alpha after the CanvasGroups above it (Unity's inherited alpha).</summary>
-        public float InheritedAlpha
+        public float InheritedAlpha => AlphaFrom(GameObject.Transform);
+
+        /// <summary>The CanvasGroups' alpha for renderers on t (InheritedAlpha from t up).</summary>
+        public static float AlphaFrom(NTransform t)
         {
-            get
+            float a = 1f;
+            for (; t != null; t = t.Parent)
             {
-                float a = 1f;
-                for (var t = GameObject.Transform; t != null; t = t.Parent)
-                {
-                    foreach (var c in t.GameObject.Components)
-                        if (c is NCanvasGroup g && g.Enabled)
-                        {
-                            a *= g.Alpha;
-                            if (g.IgnoreParentGroups) return a;
-                        }
-                    foreach (var c in t.GameObject.Components)
-                        if (c is NCanvas cv && cv.OverrideSorting) return a;
-                }
-                return a;
+                foreach (var c in t.GameObject.Components)
+                    if (c is NCanvasGroup g && g.Enabled)
+                    {
+                        a *= g.Alpha;
+                        if (g.IgnoreParentGroups) return a;
+                    }
+                foreach (var c in t.GameObject.Components)
+                    if (c is NCanvas cv && cv.OverrideSorting) return a;
             }
+            return a;
+        }
+
+        /// <summary>
+        /// AlphaFrom worked out top-down: go's own groups, then (unless one
+        /// ignores its parents or go overrides its canvas's sorting) the alpha
+        /// above. The products are in another order than AlphaFrom's, so
+        /// only good for telling zero from not.
+        /// </summary>
+        public static float AlphaBelow(NGameObject go, float above)
+        {
+            float a = 1f;
+            var comps = go.Components;
+            for (int i = 0; i < comps.Count; i++)
+                if (comps[i] is NCanvasGroup g && g.Enabled)
+                {
+                    a *= g.Alpha;
+                    if (g.IgnoreParentGroups) return a;
+                }
+            for (int i = 0; i < comps.Count; i++)
+                if (comps[i] is NCanvas cv && cv.OverrideSorting) return a;
+            return a * above;
         }
 
         public NCanvas Canvas

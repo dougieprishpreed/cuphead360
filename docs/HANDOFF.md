@@ -46,8 +46,9 @@ time (builds, conversions, ILC) so the user's PC stays usable;
   - `168c04a` round 11b (the map crash), `98a52e0` round 12 (native
     Vorbis, a lighter render list, fitted DXT), `7d26d84` round 13 (staged
     names, cached staging, the native draw path, masks, 3D audio, the EX
-    trace); round 14's commit after them (exit time 0, the host frame,
-    light rays, streamed clips).
+    trace), `60bf849` round 14 (exit time 0, the host frame, light rays,
+    streamed clips); round 15's commit after them (full-size sprites,
+    packs, the map's CPU).
 - Side branch `interpreter-d1-r4-wip` (`ecbff5b`): the interrupted D1 r4
   interpreter edits, committed as found, not accepted, not continued.
 - Uncommitted: nothing intended. `managed/lib`, `managed/**/Generated`,
@@ -109,8 +110,66 @@ Xenia, hardware, memory.
 
 ## Next round (in order)
 
-0. **The tenth run (round 14 build staged: the map's host costs, the
-   Ooze, light rays).** The ninth run (VERIFICATION "ninth hardware run"):
+0. **The eleventh run (round 15 build staged: full-size sprites, packs,
+   the map's CPU).** The tenth run (VERIFICATION "tenth hardware run"): the
+   Ooze's rays and phases right; the potato still blurry; the map ~88 ms a
+   frame (update ~26, list ~21, audio ~10, submit ~8, fixed ~7.6); fights
+   35-52 ms; texture loads ~110 ms minimum; `audio=` spikes of 520-580 ms.
+   Round 15:
+   - **Full-size sprites:** `tools/cluster_console.py` copies each atlas
+     sprite's rectangle from the full-size pages (`ctex4k`) as DXT blocks
+     onto pages of its own animation (`ctexc`); the glue moves each item
+     drawn from a 4096 px atlas page onto its sprite's page
+     (`ctexmap`, `remap_item`). The halved pages stay as the fallback.
+   - **Packs:** `CTEX*.PAK` (LZ4) and `AUDIO*.PAK`, opened once
+     (`ch360_pack.c`): no ~110 ms open per texture or clip; recently closed
+     clips' bytes are kept for their next play.
+   - **The map's CPU (host_native sampled, `csample.py`):** the slow-call
+     logging no longer asks for type names (16% of a map frame); invisible
+     UI renderers are skipped before any vertex work (316 of 323 UI items);
+     the UI walk's loops indexed and its depths a field; rigidbodies worked
+     out once per physics pass; reference comparers for the host's texture,
+     shader and clip tables. PC map frame 4.0 -> 1.7 ms.
+   - **TOP line:** every 300 frames the costliest script types (messages
+     and coroutines), ms a frame.
+   - **Tools:** `tools/sample_native.py` (a stack sampler of host_native,
+     names from the exe's /MAP and the ILC build's linkmap: where the
+     translated code's time goes, the console's ratios aside) and
+     `tools/remap_check.py` (host_native's draw dumps against the full-size
+     pages).
+
+   Read:
+   - `packs:` at start-up (sprite pages found);
+   - texture lines: `in N ms (read and decode M)`, the floor gone?;
+   - `FRAMES` on the map against 88 ms (update 26, list 21, submit 8) and
+     in a fight against 43; `TOP` for what is left in update and fixed;
+   - `HOST`: items left on halved atlas pages (should stay 0 or near);
+     memory (`free`, `textures`) with full-size pages;
+   - `audio=` spikes on the map and in fights;
+   - the user's look at the potato and everything else at full size.
+
+   **The way to 30 fps (the user's goal: 30 locked, then 60 by
+   interpolation):** measure each phase on the console, then in order:
+   - what `TOP` names (Rewired's InputManager leads the map on PC);
+   - the native mixer (audio 6-15 ms: voices, gains and resampling in the
+     host on its audio thread, decoding there too);
+   - the UI walk over hidden menus (still visited, not drawn), the UI's
+     mesh rebuilds each frame (Graphic.Rebuild), the animators;
+   - GC: 973 gen0 collections in 12,000 frames, 28 s paused in the tenth
+     run (allocations per frame: UI rebuilds, physics' contact sets);
+   - frame pacing: lock 30 (a 1/30 step, present every second vblank),
+     then interpolate for 60.
+
+   **Textures:** the per-scene working set at full size, measured on the
+   console now; preload a scene's pages during its load (async scene
+   building, which also animates the loading screens' hourglass and ends
+   the logo hitch).
+
+   **Custom shaders:** 20+ besides LightRay, as small DXBC pixel programs
+   to translate.
+
+   Round 14's item, kept: the tenth run (round 14 build staged: the map's host costs, the
+   Ooze, light rays). The ninth run (VERIFICATION "ninth hardware run"):
    fights nearly smooth, the map ~112 ms a steady frame (submit 33, update
    21, list 19, audio 16, fixed 8, physics 4.3), the Ooze hung after phase
    1 and its rays drew black. Round 14:

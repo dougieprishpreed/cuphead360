@@ -148,12 +148,196 @@ static void draw_item_box(ch360_item* it) {
     it->y1 = y1;
 }
 
+/* ---- textures: the platform's ids, and sprites at full size ----
+ * The glue numbers the textures it hands the platform: the player's texture
+ * ids as they come, then each full-size sprite page the first time an item
+ * is moved onto it.
+ *
+ * The game's atlas pages are 4096 px, and at 720p their sprites are drawn at
+ * 1 to 1.45 screen pixels a texel, so pages halved to fit the console's
+ * memory (16 MB each at full size in DXT5) blurred them: the Root Pack's at
+ * 2.7 pixels a texel. A scene draws a fraction of its pages (18 MB of the
+ * 208 MB of pages the potato's fight touched), so tools/cluster_console.py
+ * copies each sprite's rectangle at full size onto pages of its own
+ * animation, and its table (ctexmap, in the texture pack) says where each
+ * went. An item drawn from an atlas page moves onto the sprite's page: the
+ * rectangle that holds its uv box, its uvs through that rectangle's scale and
+ * offset. Light rays (mode 6) keep the page's own uvs (their shader reads two
+ * more textures at them) and the halved page. */
+typedef struct remap_page {
+    unsigned hi, lo, first, count, last;
+} remap_page;
+typedef struct remap_box {
+    float u0, v0, u1, v1, su, ou, sv, ov;
+    unsigned target;
+} remap_box;
+
+int ch360_ctex_pack = -1;
+static remap_page* rm_pages;
+static remap_box* rm_boxes;
+static unsigned* rm_names;
+static char* rm_strings;
+static int* rm_plat;
+static unsigned rm_page_count, rm_box_count, rm_target_count, rm_misses;
+static int* plat_of_player;   /* the player's texture id -> the platform's */
+static int* page_of_plat;     /* the platform's id -> remap page + 1, 0 none */
+static unsigned player_cap, plat_cap;
+static int next_plat;
+
+static int grow_ints(int** p, unsigned* cap, unsigned need, int fill) {
+    unsigned c = *cap, i;
+    int* b;
+    if (need <= c) return 1;
+    if (c == 0) c = 256;
+    while (c < need) c *= 2;
+    b = (int*)realloc(*p, c * sizeof(int));
+    if (b == NULL) return 0;
+    for (i = *cap; i < c; i++) b[i] = fill;
+    *p = b;
+    *cap = c;
+    return 1;
+}
+
+static int new_plat(void) {
+    if (!grow_ints(&page_of_plat, &plat_cap, (unsigned)next_plat + 1, 0)) return -1;
+    page_of_plat[next_plat] = 0;
+    return next_plat++;
+}
+
+static int plat_id(int player_id) {
+    if (player_id < 0 || !grow_ints(&plat_of_player, &player_cap, (unsigned)player_id + 1, -1)) return -1;
+    if (plat_of_player[player_id] < 0) plat_of_player[player_id] = new_plat();
+    return plat_of_player[player_id];
+}
+
+/* The remap table: 'CHRM' u32 version (1) pages boxes targets string-bytes;
+ * pages (u32 hash_hi hash_lo first count, by hash), boxes (f32 u0 v0 u1 v1
+ * su ou sv ov, u32 target), targets (u32 offset of the page's key), keys. */
+static void remap_load(void) {
+    ch360_pack_entry e;
+    unsigned char* d;
+    unsigned i, need, sb;
+    if (ch360_ctex_pack < 0 || !ch360_pack_find(ch360_ctex_pack, "ctexmap", 7, &e) || e.size < 24) return;
+    d = (unsigned char*)malloc(e.size);
+    if (d == NULL || ch360_pack_read(&e, 0, d, e.size) != 0 || le32(d) != 0x4d524843u || le32(d + 4) != 1) {
+        free(d);
+        return;
+    }
+    rm_page_count = le32(d + 8);
+    rm_box_count = le32(d + 12);
+    rm_target_count = le32(d + 16);
+    sb = le32(d + 20);
+    need = 24 + rm_page_count * 16 + rm_box_count * 36 + rm_target_count * 4 + sb;
+    rm_pages = (remap_page*)malloc((rm_page_count + 1) * sizeof(remap_page));
+    rm_boxes = (remap_box*)malloc((rm_box_count + 1) * sizeof(remap_box));
+    rm_names = (unsigned*)malloc((rm_target_count + 1) * sizeof(unsigned));
+    rm_plat = (int*)malloc((rm_target_count + 1) * sizeof(int));
+    rm_strings = (char*)malloc(sb + 1);
+    if (need > e.size || !rm_pages || !rm_boxes || !rm_names || !rm_plat || !rm_strings) {
+        rm_page_count = rm_box_count = rm_target_count = 0;
+        free(d);
+        return;
+    }
+    for (i = 0; i < rm_page_count; i++) {
+        const U8* p = d + 24 + i * 16;
+        rm_pages[i].hi = le32(p);
+        rm_pages[i].lo = le32(p + 4);
+        rm_pages[i].first = le32(p + 8);
+        rm_pages[i].count = le32(p + 12);
+        rm_pages[i].last = 0;
+    }
+    for (i = 0; i < rm_box_count; i++) {
+        const U8* p = d + 24 + rm_page_count * 16 + i * 36;
+        rm_boxes[i].u0 = lef(p);
+        rm_boxes[i].v0 = lef(p + 4);
+        rm_boxes[i].u1 = lef(p + 8);
+        rm_boxes[i].v1 = lef(p + 12);
+        rm_boxes[i].su = lef(p + 16);
+        rm_boxes[i].ou = lef(p + 20);
+        rm_boxes[i].sv = lef(p + 24);
+        rm_boxes[i].ov = lef(p + 28);
+        rm_boxes[i].target = le32(p + 32);
+    }
+    for (i = 0; i < rm_target_count; i++) {
+        rm_names[i] = le32(d + 24 + rm_page_count * 16 + rm_box_count * 36 + i * 4);
+        rm_plat[i] = -1;
+    }
+    memcpy(rm_strings, d + need - sb, sb);
+    rm_strings[sb] = 0;
+    free(d);
+}
+
+static int remap_page_of(const char* key, size_t len) {
+    unsigned hi, lo, a = 0, b = rm_page_count;
+    if (rm_page_count == 0) return -1;
+    ch360_fnv64(key, len, &hi, &lo);
+    while (a < b) {
+        unsigned m = a + (b - a) / 2;
+        if (rm_pages[m].hi < hi || (rm_pages[m].hi == hi && rm_pages[m].lo < lo)) a = m + 1;
+        else b = m;
+    }
+    return a < rm_page_count && rm_pages[a].hi == hi && rm_pages[a].lo == lo ? (int)a : -1;
+}
+
+/* Moves an item drawn from an atlas page onto its sprite's full-size page. */
+static void remap_item(ch360_item* it) {
+    remap_page* p;
+    ch360_vertex* v;
+    float u0, v0, u1, v1;
+    unsigned k, n;
+    int page;
+    if (it->texture < 0 || (unsigned)it->texture >= plat_cap || it->mode == 6) return;
+    page = page_of_plat[it->texture] - 1;
+    if (page < 0) return;
+    p = &rm_pages[page];
+    v = draw_verts + it->first;
+    u0 = u1 = v->u;
+    v0 = v1 = v->v;
+    for (k = 1; k < it->count; k++) {
+        if (v[k].u < u0) u0 = v[k].u;
+        if (v[k].u > u1) u1 = v[k].u;
+        if (v[k].v < v0) v0 = v[k].v;
+        if (v[k].v > v1) v1 = v[k].v;
+    }
+    for (n = 0; n < p->count; n++) {
+        unsigned bi = p->first + (p->last + n) % p->count;
+        const remap_box* b = &rm_boxes[bi];
+        if (u0 >= b->u0 && u1 <= b->u1 && v0 >= b->v0 && v1 <= b->v1) {
+            int id = b->target < rm_target_count ? rm_plat[b->target] : -1;
+            if (id < 0 && b->target < rm_target_count) {
+                id = rm_plat[b->target] = new_plat();
+                if (id >= 0) ch360_plat_texture_file(id, rm_strings + rm_names[b->target]);
+            }
+            if (id < 0) return;
+            for (k = 0; k < it->count; k++) {
+                v[k].u = v[k].u * b->su + b->ou;
+                v[k].v = v[k].v * b->sv + b->ov;
+            }
+            it->texture = id;
+            p->last = bi - p->first;
+            return;
+        }
+    }
+    rm_misses++;
+}
+
+unsigned ch360_remap_misses(void) {
+    return rm_misses;
+}
+
+unsigned ch360_remap_counts(unsigned* boxes, unsigned* targets) {
+    *boxes = rm_box_count;
+    *targets = rm_target_count;
+    return rm_page_count;
+}
+
 static void draw_item_done(ch360_item* it) {
     it->count = draw_vert_count - it->first;
     if (it->count == 0) {
         draw_item_count--; /* clipped away */
         return;
     }
+    remap_item(it);
     draw_item_box(it);
     draw_views[draw_view_count - 1].items++;
 }
@@ -238,11 +422,11 @@ void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
         !draw_grow((void**)&draw_items, &draw_item_cap, draw_item_count + 1, sizeof(ch360_item)))
         return;
     it = &draw_items[draw_item_count++];
-    it->texture = (int)le32(a);
+    it->texture = plat_id((int)le32(a));
     it->mode = (unsigned)mode;
     it->first = draw_vert_count;
-    it->textures[0] = (int)le32(a + 104);
-    it->textures[1] = (int)le32(a + 108);
+    it->textures[0] = plat_id((int)le32(a + 104));
+    it->textures[1] = plat_id((int)le32(a + 108));
     it->params[0] = lef(a + 112);
     it->params[1] = lef(a + 116);
     it->params[2] = lef(a + 120);
@@ -372,7 +556,7 @@ void i5_ch3606_submit(wasmModuleInstance* inst, U32 data, U32 len) {
                 !draw_grow((void**)&draw_items, &draw_item_cap, draw_item_count + 1, sizeof(ch360_item)))
                 return;
             it = &draw_items[draw_item_count++];
-            it->texture = (int)le32(d + p);
+            it->texture = plat_id((int)le32(d + p));
             it->mode = mode;
             it->first = draw_vert_count;
             it->textures[0] = it->textures[1] = -1;
@@ -400,13 +584,23 @@ void i5_ch36012_textureX5Ffile(wasmModuleInstance* inst, U32 id, U32 key, U32 le
     if (len >= sizeof(name) || !srt_mem_ok(key, len)) return;
     memcpy(name, srt_mem_ptr(key), len);
     name[len] = 0;
-    ch360_plat_texture_file((int)id, name);
+    {
+        int p = plat_id((int)id), page = remap_page_of(name, len);
+        if (p < 0) return;
+        page_of_plat[p] = page + 1;
+        ch360_plat_texture_file(p, name);
+    }
 }
 
 void i5_ch36014_textureX5Fpixels(wasmModuleInstance* inst, U32 id, U32 w, U32 h, U32 bgra) {
     (void)inst;
     if (w == 0 || h == 0 || w > 8192 || h > 8192 || !srt_mem_ok(bgra, w * h * 4)) return;
-    ch360_plat_texture_pixels((int)id, (int)w, (int)h, srt_mem_ptr(bgra));
+    {
+        int p = plat_id((int)id);
+        if (p < 0) return;
+        page_of_plat[p] = 0;
+        ch360_plat_texture_pixels(p, (int)w, (int)h, srt_mem_ptr(bgra));
+    }
 }
 
 void i5_ch3605_audio(wasmModuleInstance* inst, U32 samples, U32 frames) {
@@ -423,21 +617,9 @@ int ch360_staged_names = 0;
 
 void ch360_staged_name(const char* key, size_t len, char* out) {
     static const char hex[] = "0123456789ABCDEF";
-    unsigned hi = 0xcbf29ce4u, lo = 0x84222325u; /* FNV-1a 64 as two words (C89) */
-    size_t i;
+    unsigned hi, lo;
     int k;
-    for (i = 0; i < len; i++) {
-        unsigned a, b, c, d, t;
-        lo ^= (unsigned char)key[i];
-        /* times 0x100000001b3: lo * 0x1b3 with carry, plus lo << 40 */
-        a = (lo & 0xffffu) * 0x1b3u;
-        b = (lo >> 16) * 0x1b3u + (a >> 16);
-        c = hi * 0x1b3u + (b >> 16);
-        d = c + (lo << 8);
-        t = (a & 0xffffu) | (b << 16);
-        lo = t;
-        hi = d;
-    }
+    ch360_fnv64(key, len, &hi, &lo);
     out[0] = hex[(hi >> 28) & 15];
     out[1] = hex[(hi >> 24) & 15];
     out[2] = '/';
@@ -488,6 +670,9 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
     }
     m6_playerInstantiate(&instance, NULL);
     srt_set_memory(m6_playerExport6_memory(&instance));
+    /* after the module's memory (xsdk's heap takes the free address space at its first growth) */
+    ch360_ctex_pack = ch360_pack_open(root_dir, "CTEX");
+    remap_load();
     return 0;
 }
 

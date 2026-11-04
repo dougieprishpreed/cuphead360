@@ -662,16 +662,18 @@ namespace Cuphead360.Engine
             }
             // Dynamic bodies are pushed out of the solid colliders they moved into.
             Resolve();
-            // Contacts.
+            // Contacts. Each collider's rigidbody once (the pairs asked for it each: a walk up the
+            // hierarchy per pair, every step); nothing here changes the hierarchy.
             var cols = Colliders();
             foreach (var c in cols) c.Shapes();
+            var bodyOf = BodiesOf(cols);
             var now = new Dictionary<(NCollider2D, NCollider2D), Contact>();
             for (int i = 0; i < cols.Count; i++)
             {
-                var a = cols[i]; var ra = a.Rigidbody;
+                var a = cols[i]; var ra = bodyOf[i];
                 for (int j = i + 1; j < cols.Count; j++)
                 {
-                    var b = cols[j]; var rb = b.Rigidbody;
+                    var b = cols[j]; var rb = bodyOf[j];
                     if (ra == null && rb == null) continue;                  // two static colliders
                     if (ra != null && ra == rb) continue;                    // same body
                     bool trigger = a.IsTrigger || b.IsTrigger;
@@ -705,6 +707,16 @@ namespace Cuphead360.Engine
                 if (!now.ContainsKey(kv.Key) && Alive(kv.Value.A) && Alive(kv.Value.B)) Send(kv.Value, 2);
         }
 
+        static NRigidbody2D[] bodiesBuf = new NRigidbody2D[64];
+
+        /// <summary>The rigidbody of each collider (NCollider2D.Rigidbody), in a buffer kept from call to call.</summary>
+        static NRigidbody2D[] BodiesOf(List<NCollider2D> cols)
+        {
+            if (bodiesBuf.Length < cols.Count) bodiesBuf = new NRigidbody2D[Math.Max(cols.Count, bodiesBuf.Length * 2)];
+            for (int i = 0; i < cols.Count; i++) bodiesBuf[i] = cols[i].Rigidbody;
+            return bodiesBuf;
+        }
+
         static bool Alive(NCollider2D c) => !c.Destroyed && c.GameObject != null && !c.GameObject.Destroyed;
 
         /// <summary>
@@ -716,11 +728,13 @@ namespace Cuphead360.Engine
         static void Resolve()
         {
             List<NCollider2D> all = null;
+            NRigidbody2D[] bodyOf = null;
             foreach (var b in bodies)
             {
                 if (b.BodyType != RigidbodyType2D.Dynamic || !b.Simulated || !b.Enabled || b.GameObject == null || !b.GameObject.ActiveInHierarchy) continue;
-                all ??= Colliders();
-                var mine = all.FindAll(c => !c.IsTrigger && c.Rigidbody == b);
+                if (all == null) { all = Colliders(); bodyOf = BodiesOf(all); }
+                var mine = new List<NCollider2D>();
+                for (int k = 0; k < all.Count; k++) if (!all[k].IsTrigger && bodyOf[k] == b) mine.Add(all[k]);
                 if (mine.Count == 0) continue;
                 var t = b.GameObject.Transform;
                 for (int iter = 0; iter < 4; iter++)
@@ -729,9 +743,10 @@ namespace Cuphead360.Engine
                     foreach (var c in mine)
                     {
                         c.Shapes();
-                        foreach (var o in all)
+                        for (int k = 0; k < all.Count; k++)
                         {
-                            if (o.IsTrigger || o.Rigidbody == b || o.UsedByEffector) continue;
+                            var o = all[k];
+                            if (o.IsTrigger || bodyOf[k] == b || o.UsedByEffector) continue;
                             if (!LayersCollide(c.GameObject.Layer, o.GameObject.Layer) || Ignored(c, o)) continue;
                             o.Shapes();
                             if (!c.AABB.Overlaps(o.AABB)) continue;

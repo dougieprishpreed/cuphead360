@@ -18,6 +18,8 @@ namespace Cuphead360.Engine
         public readonly List<CoroutineState> Coroutines = new List<CoroutineState>();
         public readonly List<InvokeState> Invokes = new List<InvokeState>();
         public long Order;
+        /// <summary>Its messages' time since the last PlayerLoop.TopReport (with Profile on).</summary>
+        public long ProfTicks;
         /// <summary>Messages without arguments, bound to this behaviour (reflection's Invoke is slow and allocates).</summary>
         public Dictionary<MethodInfo, Action> Calls;
     }
@@ -129,7 +131,7 @@ namespace Cuphead360.Engine
             }
             catch (TargetInvocationException e) { Exceptions.Report(e.InnerException, b, m.Name); }
             catch (Exception e) { Exceptions.Report(e, b, m.Name); }
-            finally { if (t0 != 0) PlayerLoop.SlowCall(t0, b.Managed?.GetType().Name, m.Name); }
+            finally { if (t0 != 0) b.ProfTicks += PlayerLoop.SlowCall(t0, b.Managed, m); }
             return null;
         }
 

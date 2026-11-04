@@ -163,7 +163,7 @@ namespace Cuphead360.Engine
         }
 
         static readonly List<Voice> voices = new List<Voice>();
-        static readonly Dictionary<AudioClip, Clip> clips = new Dictionary<AudioClip, Clip>();
+        static readonly Dictionary<AudioClip, Clip> clips = new Dictionary<AudioClip, Clip>(ReferenceEqualityComparer.Instance as IEqualityComparer<AudioClip>);
         static long cachedSamples, useCounter, mixedFrames;
         /// <summary>Clips longer than this (seconds) stream rather than decode whole.</summary>
         public static float StreamOver = 1.5f;

@@ -90,7 +90,8 @@ namespace Cuphead360.Player
         static readonly InputFrame input = new InputFrame();
         static byte[] buf = new byte[1 << 20];
         static int len;
-        static readonly Dictionary<Texture, int> ids = new Dictionary<Texture, int>();
+        // By reference: the default comparer runs UnityEngine.Object's Equals (CompareBaseObjects) per lookup.
+        static readonly Dictionary<Texture, int> ids = new Dictionary<Texture, int>(ReferenceEqualityComparer.Instance as IEqualityComparer<Texture>);
         static readonly Dictionary<int, int> versions = new Dictionary<int, int>();
         /// <summary>
         /// The last frame's real duration in seconds (Unity's deltaTime), 1/60 to
@@ -162,6 +163,8 @@ namespace Cuphead360.Player
                     sb.Append("; audio decode ").Append((Audio.DecodeTicks * 1000.0 / hz / 300).ToString("0.0")).Append(" ms/frame, ").Append(Audio.VoiceCount).Append(" voices");
                     Audio.DecodeTicks = 0;
                     Console.WriteLine(sb.ToString());
+                    // The scripts behind update and fixed: the costliest types (messages and coroutines).
+                    Console.WriteLine($"TOP {n - 299}-{n} ms/frame:{PlayerLoop.TopReport(300, 12)}");
                     Array.Clear(phaseSum);
                     frameSum = 0;
                 }
@@ -274,10 +277,16 @@ namespace Cuphead360.Player
                 vh[5] = bg.r; vh[6] = bg.g; vh[7] = bg.b; vh[8] = 1f;
                 DrawView(vh);
                 masks.Clear();
+                lastMaterial = null;
                 foreach (var it in v.Items) HostItem(it, a);
             }
             DrawEnd();
         }
+
+        // The last item's material, its state and mode (items in a row mostly share one).
+        static Material lastMaterial;
+        static MaterialState lastState;
+        static uint lastMode;
 
         // draw_item's arguments, 32-bit slots (console/ch360_imports.c reads the same):
         //  0 texture  1 mode  2-5 blend colour (the tint)  6 flags (1 vertex colours as they are, 2 the affine map, 4 clip)
@@ -297,8 +306,14 @@ namespace Cuphead360.Player
             if (it.Texture != null && (tex = TextureId(it.Texture)) < 0) return;   // not drawable (render textures)
             if (Clock.FrameCount <= NAnimator.WindowUntil && it.Name.StartsWith("Cuphead ["))
                 Console.WriteLine($"EXTRACE frame {Clock.FrameCount} draws {it.Name} texture {tex}, layer {it.Layer} order {it.Order}, {it.Triangles.Length} corners, tint a {it.Tint.a:0.##}");
-            var ms = MaterialState.Of(it.Material);
-            uint mode = ModeOf(ms?.Shader);
+            if (it.Material == null || !ReferenceEquals(it.Material, lastMaterial))
+            {
+                lastMaterial = it.Material;
+                lastState = MaterialState.Of(it.Material);
+                lastMode = ModeOf(lastState?.Shader);
+            }
+            var ms = lastState;
+            uint mode = lastMode;
             var tint = it.Tint;
             bool blend = mode >= 1 && mode <= 3;
             var f = (float*)a;
@@ -440,7 +455,7 @@ namespace Cuphead360.Player
         }
 
         // A shader's blend mode, worked out from its name once.
-        static readonly Dictionary<Shader, uint> modes = new Dictionary<Shader, uint>();
+        static readonly Dictionary<Shader, uint> modes = new Dictionary<Shader, uint>(ReferenceEqualityComparer.Instance as IEqualityComparer<Shader>);
         static uint ModeOf(Shader sh)
         {
             if (sh == null) return 0;

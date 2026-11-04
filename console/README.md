@@ -32,13 +32,16 @@ WASI module, translated to C by w2c2 and compiled for the console's CPU.
   layout and the host's byte order, uvs and 8-bit colours copied as words
   and only sprite positions arithmetic, since on the console's CPU every
   move between integer and float registers stalls through memory; items
-  with screen boxes, clipped to UGUI masks), and the start of the module under
+  with screen boxes, clipped to UGUI masks; an item drawn from a 4096 px atlas
+  page moved onto its sprite's full-size page, `tools/cluster_console.py`'s
+  table saying where each sprite went), and the start of the module under
   Spire360's wasm runtime (srt, WASI preview1) on a guest thread with a
   16 MB stack; its stdout and stderr go to the log.
 - **The host** (`xsdk/main.cpp`): Vulkan through vulkan4xenon (one pass a
   frame into the swapchain, a pipeline per sprite shader recipe, batched
-  draws), textures loaded on first use from `GameData/ctex` (staged names)
-  straight into one 8 MB staging ring in the CPU's cached memory
+  draws), textures loaded on first use from the texture pack
+  (`GameData/CTEX*.PAK`, `ch360_pack.c`: LZ4, one file opened at start-up)
+  decoded straight into one 8 MB staging ring in the CPU's cached memory
   (vulkan4xenon copies DXT data into images on the CPU, and reading the
   GPU's write-combined memory back cost ~220 ms per 4 MB), least recently
   used ones let go to stay within 96 MB
@@ -99,8 +102,18 @@ python -I tools/convert_objects.py --game game --out work/GameData
 python -I tools/convert_objects.py --game game --out work/GameData --files none --bundles
 python -I tools/convert_textures.py --game game --out work/GameData --bundles
 python -I tools/convert_console.py --data work/GameData          # BC7 -> DXT1/DXT5/BGRA8, pages halved to 2048 (Lanczos-3)
+python -I tools/convert_console.py --data work/GameData --max-size 4096 --out work/GameData/ctex4k --halved-only --workers 2
+python -I tools/cluster_console.py --data work/GameData           # full-size sprite pages + table -> GameData/ctexc
 python -I tools/convert_audio.py --game game --out work/GameData --bundles
 ```
+
+The game's atlas pages are 4096 px and their sprites are drawn at 1 to 1.45
+screen pixels a texel at 720p, so the halved pages blur them; a full page
+is 16 MB in DXT5 and a scene touches many. `cluster_console.py` copies each
+sprite's rectangle (and two texels round it) from the full-size pages as
+DXT blocks onto pages of its own animation, so a scene loads the sprites it
+draws at full size. The halved pages stay for what the table doesn't cover
+(the light rays' shader reads other textures at the page's own uvs).
 
 Converted objects from before round 8 still load, but convert them again:
 byte data (fonts' m_FontData) is now stored as bytes, which loads the title
@@ -112,14 +125,16 @@ fonts several times faster.
 python tools/stage_console.py --to E:\Games\Cuphead360
 ```
 
-That folder holds `default.xex`, `GameData\` (objects, ctex, audio, fonts),
-`save\` and `licenses\`. Textures and clips are staged under short names,
-`ctex\XX\YYYYYYYY.CTX` and `audio\XX\YYYYYYYY.OGG` (FNV-1a 64 of the key:
-the top byte, the low word; `ch360_staged_name` works out the same): FAT32
-has no folder index, and every open scanned folders of 1,337 and 3,991
-long names (~0.1 s a texture, ~0.3 s a clip, twice for a clip). Staging
-removes the old layout's loose files. Start `default.xex` from the
-dashboard. The game
+That folder holds `default.xex`, `GameData\` (objects, fonts and the packs
+`CTEX0.PAK`... and `AUDIO0.PAK`...), `save\` and `licenses\`. On the
+console's USB drive every file opened cost ~110 ms whatever its size (the
+FAT32 driver walks the path's folders), the floor under each texture load
+and most of a fight's file time, so textures and clips are in packs opened
+once (`ch360_pack.c`; entries found by FNV-1a 64 of their key). Textures are
+LZ4 (a DXT page shrinks about 4x, and reads that much faster); clips stay
+Vorbis. Packs are built in `work/console/packs` and again only when what
+they hold changes; staging removes the old layouts' `ctex\` and `audio\`.
+Start `default.xex` from the dashboard. The game
 writes `cuphead360.txt` next to it: the memory probe, start-up memory,
 I64CHECK, each slow converted-file load (CHOB lines) and scene load (SCENE
 built/activated times), any frame over half a second with its player-loop

@@ -42,12 +42,20 @@ nearly smooth, the map ~112 ms a frame, the Ooze hung after phase 1 and
 drew black rays; round 14 fixed exit time 0 in the animator (the hang and
 truncated animations everywhere), rewrote the host's frame path in the
 GPU's vertex layout (fewer load-hit-store stalls), translated the light
-ray shader and streams clips over 1.5 s. Continue with HANDOFF.md's "Next
-round" item 0: the tenth run's HOST and FRAMES lines, then its roadmap to
-30 fps (native mixer, more engine paths native, frame pacing) and the
-full-fidelity texture plan (measure per-scene sprite use, repack by use,
-cut the player's memory, preload during async scene loads), and the other
-custom sprite shaders. Rebuild
+ray shader and streams clips over 1.5 s. The tenth run: rays and phases
+right, the map ~88 ms a frame, the potato still blurry (its sprites drawn
+at 2.7 screen pixels a stored texel). Round 15 draws every atlas sprite at
+full size from per-animation pages (`tools/cluster_console.py`, the glue's
+remap), puts textures and clips in packs opened once (`ch360_pack.c`; each
+USB open cost ~110 ms), and cut the map's CPU (type names asked for every
+coroutine step, invisible UI drawn; PC map frame 4.0 -> 1.7 ms), with a TOP
+line naming the costliest scripts. Continue with HANDOFF.md's "Next round"
+item 0: the eleventh run's packs, texture, FRAMES, TOP and HOST lines and
+the user's look, then the roadmap to 30 fps (what TOP names, the native
+mixer, the UI walk and rebuilds, GC, frame pacing), preloading during async
+scene loads, and the other custom sprite shaders. The user's later goal:
+replace the bundled game code with our own so the XEX can be shared.
+Rebuild
 with `python tools/build_managed.py --stage jit` after engine changes; check
 with `selftest`, the bot loop (`run --frames 15301 --save
 work/managed/save_bot --bot tests/input/bot_veggies.txt`, deleting the save

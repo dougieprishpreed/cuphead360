@@ -2,6 +2,10 @@
 """Console textures: re-encode the exported textures for the Xbox 360 GPU.
 
     convert_console.py --data <GameData dir> [--only-missing] [--max-size N] [--keys a,b]
+                       [--out DIR] [--halved-only] [--workers N]
+
+The full-size atlas pages tools/cluster_console.py cuts sprites from:
+    convert_console.py --data work/GameData --max-size 4096 --out work/GameData/ctex4k --halved-only --workers 2
 
 Reads <data>/textures/*.tex (tools/convert_textures.py) and writes
 <data>/ctex/<key>.ctx, the format the console host loads. Xenos has no BC7,
@@ -14,7 +18,10 @@ three colours meet (the title's poker chips).
 Pages larger than --max-size (default 2048) are halved until they fit: the
 game's atlases are 4096 px for 1080p and up, the console draws 720p. UVs
 are normalized, so nothing else changes. Halving is Lanczos-3 on
-premultiplied colour (see halve).
+premultiplied colour (see halve). Each distinct 4x4 block is encoded once
+(a sprite page is mostly transparent or flat-filled blocks), the same bytes
+in half the time. --workers runs that many processes at below-normal
+priority.
 
 File format (little-endian):
 
@@ -256,7 +263,17 @@ def alpha_block(px):
 
 
 def encode(img, kind):
+    """DXT1 (kind 1) or DXT5 bytes. Each distinct 4x4 block is encoded once:
+    the encoders work block by block, and a sprite page is mostly
+    transparent or flat-filled blocks (59% of a Root Pack page), so the
+    bytes are the same as encoding every block."""
     bl = blocks(pad4(img))
+    key = np.ascontiguousarray(bl).reshape(len(bl), 64).view(np.dtype((np.void, 64))).ravel()
+    _, first, inverse = np.unique(key, return_index=True, return_inverse=True)
+    return encode_blocks(bl[first], kind)[inverse.ravel()].tobytes()
+
+
+def encode_blocks(bl, kind):
     if kind == 1:
         # Blocks with transparent texels take three-colour mode; the others the fitted four-colour encoding.
         punch = bl[..., 3] < 128
@@ -264,8 +281,8 @@ def encode(img, kind):
         has = punch.any(axis=1)
         if has.any():
             out[has] = color_block(bl[has], punch[has])
-        return out.tobytes()
-    return np.concatenate([alpha_block(bl), color_block_best(bl)], axis=1).tobytes()
+        return out
+    return np.concatenate([alpha_block(bl), color_block_best(bl)], axis=1)
 
 
 def convert(src, dst, max_size):
@@ -300,37 +317,71 @@ def convert(src, dst, max_size):
     return kind, len(payload)
 
 
+def halved(ctx):
+    """A converted texture stored smaller than its source."""
+    try:
+        with open(ctx, "rb") as f:
+            magic, kind, w, h, ow, oh, n = struct.unpack("<4s6I", f.read(28))
+    except (OSError, struct.error):
+        return False
+    return magic == b"CTX1" and (w, h) != (ow, oh)
+
+
+def below_normal():
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.SetPriorityClass(k32.GetCurrentProcess(), 0x4000)   # BELOW_NORMAL_PRIORITY_CLASS
+
+
+def convert_job(job):
+    src, dst, max_size = job
+    try:
+        return src, convert(src, dst, max_size), None
+    except Exception as e:  # noqa: BLE001 - recorded, never silent
+        return src, None, str(e)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", required=True)
     ap.add_argument("--only-missing", action="store_true")
     ap.add_argument("--max-size", type=int, default=2048)
     ap.add_argument("--keys", help="comma-separated texture keys (default: all)")
+    ap.add_argument("--out", help="output folder (default <data>/ctex)")
+    ap.add_argument("--halved-only", action="store_true",
+                    help="only the textures <data>/ctex holds halved (the full-size atlas pages tools/cluster_console.py cuts up)")
+    ap.add_argument("--workers", type=int, default=1, help="processes, at below-normal priority")
     a = ap.parse_args()
     src_dir = os.path.join(a.data, "textures")
-    out_dir = os.path.join(a.data, "ctex")
+    out_dir = a.out or os.path.join(a.data, "ctex")
     os.makedirs(out_dir, exist_ok=True)
     names = sorted(f for f in os.listdir(src_dir) if f.endswith(".tex"))
     if a.keys:
         want = set(k + ".tex" for k in a.keys.split(","))
         names = [n for n in names if n in want]
+    if a.halved_only:
+        names = [n for n in names if halved(os.path.join(a.data, "ctex", n[:-4] + ".ctx"))]
+    todo = [n for n in names if not (a.only_missing and os.path.exists(os.path.join(out_dir, n[:-4] + ".ctx")))]
+    jobs = [(os.path.join(src_dir, n), os.path.join(out_dir, n[:-4] + ".ctx"), a.max_size) for n in todo]
     counts, sizes, errors = {}, 0, []
     t0 = time.time()
-    for i, n in enumerate(names):
-        dst = os.path.join(out_dir, n[:-4] + ".ctx")
-        if a.only_missing and os.path.exists(dst):
-            continue
-        try:
-            r = convert(os.path.join(src_dir, n), dst, a.max_size)
-            if r is None:
-                counts["empty"] = counts.get("empty", 0) + 1
-                continue
+    if a.workers > 1:
+        import multiprocessing
+        pool = multiprocessing.Pool(a.workers, initializer=below_normal)
+        results = pool.imap(convert_job, jobs, chunksize=1)
+    else:
+        results = map(convert_job, jobs)
+    for i, (n, r, err) in enumerate(results):
+        if err:
+            errors.append("%s: %s" % (os.path.basename(n), err))
+        elif r is None:
+            counts["empty"] = counts.get("empty", 0) + 1
+        else:
             counts[r[0]] = counts.get(r[0], 0) + 1
             sizes += r[1]
-        except Exception as e:  # noqa: BLE001 - recorded, never silent
-            errors.append("%s: %s" % (n, e))
         if (i + 1) % 100 == 0:
-            print("  %d/%d textures, %.0f s" % (i + 1, len(names), time.time() - t0), flush=True)
+            print("  %d/%d textures, %.0f s" % (i + 1, len(jobs), time.time() - t0), flush=True)
     names_k = {1: "DXT1", 2: "DXT5", 3: "BGRA8", "empty": "empty (runtime)"}
     print("convert_console: %s; %.1f MB in %.0f s; %d errors" % (
         ", ".join("%s %d" % (names_k[k], v) for k, v in sorted(counts.items(), key=lambda kv: str(kv[0]))),

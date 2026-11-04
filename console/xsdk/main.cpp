@@ -250,6 +250,7 @@ private:
     bool upload(Tex& t, VkFormat format, int w, int h, const unsigned char* data, size_t bytes);
     void destroy(Tex& t, bool now);
     void load(Tex& t);
+    void load_packed(Tex& t);
     void evict();
     size_t release_unused(size_t want);
     Tex* tex(int id);
@@ -950,13 +951,19 @@ void Renderer::texture_pixels(int id, int w, int h, const unsigned char* bgra) {
     }
 }
 
-// A converted texture (tools/convert_console.py's .ctx, staged as
-// ctex/XX/YYYYYYYY.CTX) on first use, read straight into staging when that
-// is cached memory, else in pieces through a bounce buffer (the kernel's
-// copies into the GPU's write-combined memory aren't safe: g_memcpy is).
-// Out of memory, it is drawn without and tried again two seconds later.
+// A converted texture (tools/convert_console.py's .ctx, or a full-size
+// sprite page of tools/cluster_console.py) on first use, from the texture
+// pack (CTEX*.PAK, LZ4) decoded straight into staging when that is cached
+// memory, else in pieces through a bounce buffer (the kernel's copies into
+// the GPU's write-combined memory aren't safe: g_memcpy is). Without a pack,
+// the loose ctex/XX/YYYYYYYY.CTX files. Out of memory, it is drawn without
+// and tried again two seconds later.
 void Renderer::load(Tex& t) {
     if (t.image || t.failed || t.key.empty() || frame_no_ < t.retry_at) return;
+    if (ch360_ctex_pack >= 0) {
+        load_packed(t);
+        return;
+    }
     char staged[12];
     ch360_staged_name(t.key.c_str(), t.key.size(), staged);
     std::string path = std::string("game:/GameData/ctex/") + staged + ".CTX";
@@ -1010,6 +1017,63 @@ void Renderer::load(Tex& t) {
         memory_mb(&free_mb, &total_mb);
         logf("texture %s: format %u, %ux%u, %u KB in %u ms; %u MB free, textures %u MB", t.key.c_str(), fmt, w, h, n >> 10,
              (unsigned)(now_ms() - t0), free_mb, (unsigned)(texture_bytes_ >> 20));
+    }
+}
+
+void Renderer::load_packed(Tex& t) {
+    double t0 = now_ms();
+    ch360_pack_entry e;
+    unsigned char head[28];
+    bool ok = ch360_pack_find(ch360_ctex_pack, t.key.c_str(), t.key.size(), &e) && e.size >= 28 &&
+              ch360_pack_read(&e, 0, head, sizeof(head)) == 0 && ch360_u32(head) == 0x31585443u;
+    unsigned fmt = ok ? ch360_u32(head + 4) : 0, w = ok ? ch360_u32(head + 8) : 0, h = ok ? ch360_u32(head + 12) : 0,
+             n = ok ? ch360_u32(head + 24) : 0;
+    if (!ok || w == 0 || h == 0 || w > 8192 || h > 8192 || n == 0 || n != e.size - 28) {
+        logf("texture %s: missing from the pack or unreadable (run tools/stage_console.py)", t.key.c_str());
+        t.failed = true;
+        return;
+    }
+    VkFormat f = fmt == 1 ? VK_FORMAT_BC1_RGBA_UNORM_BLOCK : fmt == 2 ? VK_FORMAT_BC3_UNORM_BLOCK : TARGET_FORMAT;
+    VkBuffer buf;
+    VkDeviceSize off;
+    unsigned char* dst = NULL;
+    if (make_image(t, f, (int)w, (int)h)) {
+        dst = staging(n, &buf, &off);
+        if (!dst) destroy(t, true);
+    }
+    if (!dst) {
+        t.retry_at = frame_no_ + 120;
+        logf("texture %s: no memory, drawn without it for now", t.key.c_str());
+        return;
+    }
+    double t1 = now_ms();
+    bool read = true;
+    if (staging_cached_) {
+        read = ch360_pack_read(&e, 28, dst, n) == 0;
+    } else {
+        for (unsigned got = 0; read && got < n;) {
+            unsigned want = n - got < bounce_.size() ? n - got : (unsigned)bounce_.size();
+            read = ch360_pack_read(&e, 28 + got, &bounce_[0], want) == 0;
+            if (read) g_memcpy(dst + got, &bounce_[0], want);
+            got += want;
+        }
+    }
+    if (!read) {
+        destroy(t, true);
+        logf("texture %s: bad read from the pack", t.key.c_str());
+        t.failed = true;
+        return;
+    }
+    double t2 = now_ms();
+    record_copy(t, buf, off);
+    g_texture_bytes = texture_bytes_;
+    if (loads_logged_ < 400) {
+        ++loads_logged_;
+        unsigned free_mb, total_mb;
+        memory_mb(&free_mb, &total_mb);
+        logf("texture %s: format %u, %ux%u, %u KB (%u KB stored) in %u ms (read and decode %u); %u MB free, textures %u MB",
+             t.key.c_str(), fmt, w, h, n >> 10, e.stored >> 10, (unsigned)(now_ms() - t0), (unsigned)(t2 - t1), free_mb,
+             (unsigned)(texture_bytes_ >> 20));
     }
 }
 
@@ -1285,10 +1349,10 @@ void Renderer::frame(const ch360_frame* f) {
     host_items_ += f->item_count;
     if (frame_no_ % 300 == 0) {
         logf("HOST frames %u-%u: glue %.1f, boxes+loads %.1f, fence %.1f, uploads %.1f, acquire %.1f, record %.1f, submit %.1f, "
-             "present %.1f ms/frame; %u draws, %u vertices, %u items a frame",
+             "present %.1f ms/frame; %u draws, %u vertices, %u items a frame; %u items left on halved atlas pages so far",
              frame_no_ - 299, frame_no_, host_ms_[0] / 300, host_ms_[1] / 300, host_ms_[2] / 300, host_ms_[3] / 300,
              host_ms_[4] / 300, host_ms_[5] / 300, host_ms_[6] / 300, host_ms_[7] / 300, host_draws_ / 300,
-             (unsigned)(host_vertices_ / 300), host_items_ / 300);
+             (unsigned)(host_vertices_ / 300), host_items_ / 300, ch360_remap_misses());
         memset(host_ms_, 0, sizeof(host_ms_));
         host_draws_ = host_items_ = 0;
         host_vertices_ = 0;
@@ -1557,6 +1621,11 @@ int main() {
     }
     memory_mb(&f, &t);
     logf("player module ready: %u MB free", f);
+    {
+        unsigned boxes, targets, pages = ch360_remap_counts(&boxes, &targets);
+        logf("packs: textures %s; sprite pages for %u atlas pages (%u sprites, %u pages)",
+             ch360_ctex_pack >= 0 ? "CTEX*.PAK" : "none (loose files)", pages, boxes, targets);
+    }
     pthread_t th;
     if (pthread_create(&th, NULL, log_writer, NULL) == 0) g_log_thread = true;
     static Renderer renderer;

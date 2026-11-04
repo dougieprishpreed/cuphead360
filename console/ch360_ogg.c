@@ -27,11 +27,96 @@ enum { OGG_MAX = 32 };
 typedef struct ch360_ogg {
     stb_vorbis* v;
     unsigned char* data;
+    int size;
     int channels;
+    int file;            /* its pack entry (file -1: a loose file) */
+    unsigned offset;
 } ch360_ogg;
 
 static ch360_ogg oggs[OGG_MAX];
 static const char* ogg_root = ".";
+
+/* Clips from the audio pack (ch360_pack.c) when there is one. The bytes of
+ * clips closed lately are kept (CACHE_BYTES) for their next play: a clip
+ * longer than the engine's StreamOver streams, opened again each time it
+ * sounds (the tenth run's fights opened ~30 files a minute). */
+enum { CACHE_SLOTS = 64, CACHE_BYTES = 6 * 1024 * 1024 };
+typedef struct ogg_cached {
+    unsigned char* data;
+    int size, file;
+    unsigned offset, age;
+} ogg_cached;
+static ogg_cached cache[CACHE_SLOTS];
+static unsigned cache_bytes, cache_clock;
+static int audio_pack = -2;
+
+static unsigned char* cache_take(int file, unsigned offset) {
+    int i;
+    for (i = 0; i < CACHE_SLOTS; i++)
+        if (cache[i].data != NULL && cache[i].file == file && cache[i].offset == offset) {
+            unsigned char* d = cache[i].data;
+            cache_bytes -= (unsigned)cache[i].size;
+            cache[i].data = NULL;
+            return d;
+        }
+    return NULL;
+}
+
+static void cache_put(unsigned char* data, int size, int file, unsigned offset) {
+    int i, slot = -1;
+    if (file < 0 || size > CACHE_BYTES / 2) {
+        free(data);
+        return;
+    }
+    while (cache_bytes + (unsigned)size > CACHE_BYTES || slot < 0) {
+        int oldest = -1;
+        for (i = 0; i < CACHE_SLOTS; i++) {
+            if (cache[i].data == NULL) {
+                if (slot < 0) slot = i;
+                continue;
+            }
+            if (oldest < 0 || cache[i].age < cache[oldest].age) oldest = i;
+        }
+        if (slot >= 0 && cache_bytes + (unsigned)size <= CACHE_BYTES) break;
+        if (oldest < 0) break;
+        free(cache[oldest].data);
+        cache_bytes -= (unsigned)cache[oldest].size;
+        cache[oldest].data = NULL;
+        if (slot < 0) slot = oldest;
+    }
+    if (slot < 0) {
+        free(data);
+        return;
+    }
+    cache[slot].data = data;
+    cache[slot].size = size;
+    cache[slot].file = file;
+    cache[slot].offset = offset;
+    cache[slot].age = ++cache_clock;
+    cache_bytes += (unsigned)size;
+}
+
+/* The clip's bytes from the pack: its key is the file name without ".ogg". */
+static unsigned char* read_packed(const U8* path, U32 len, int* size, int* file, unsigned* offset) {
+    ch360_pack_entry e;
+    U32 slash = len, end = len;
+    unsigned char* data;
+    while (slash > 0 && path[slash - 1] != '/') slash--;
+    if (end - slash > 4 && memcmp(path + end - 4, ".ogg", 4) == 0) end -= 4;
+    if (!ch360_pack_find(audio_pack, (const char*)path + slash, end - slash, &e) || e.size == 0 || e.size > 64u * 1024 * 1024)
+        return NULL;
+    *file = e.file;
+    *offset = e.offset;
+    *size = (int)e.size;
+    data = cache_take(e.file, e.offset);
+    if (data != NULL) return data;
+    data = (unsigned char*)malloc(e.size);
+    if (data != NULL && ch360_pack_read(&e, 0, data, e.size) != 0) {
+        free(data);
+        data = NULL;
+    }
+    return data;
+}
 
 void ch360_ogg_root(const char* root_dir) {
     ogg_root = root_dir;
@@ -83,6 +168,14 @@ U32 i5_ch3608_oggX5Fopen(wasmModuleInstance* inst, U32 path, U32 len, U32 info) 
     for (h = 0; h < OGG_MAX && oggs[h].v != NULL; h++) {
     }
     if (h == OGG_MAX) return (U32)-1;
+    if (audio_pack == -2) audio_pack = ch360_pack_open(ogg_root, "AUDIO");
+    oggs[h].file = -1;
+    oggs[h].offset = 0;
+    if (audio_pack >= 0) {
+        data = read_packed(srt_mem_ptr(path), len, &size, &oggs[h].file, &oggs[h].offset);
+        if (data == NULL) return (U32)-1;
+        goto opened;
+    }
     /* The guest's "/" is the runtime's root folder. */
     memcpy(full, ogg_root, root);
     if (root > 0 && full[root - 1] == '/' && srt_mem_ptr(path)[0] == '/') root--;
@@ -99,6 +192,7 @@ U32 i5_ch3608_oggX5Fopen(wasmModuleInstance* inst, U32 path, U32 len, U32 info) 
     }
     data = read_whole(full, &size);
     if (data == NULL) return (U32)-1;
+opened:
     v = stb_vorbis_open_memory(data, size, &err, NULL);
     if (v == NULL) {
         free(data);
@@ -107,6 +201,7 @@ U32 i5_ch3608_oggX5Fopen(wasmModuleInstance* inst, U32 path, U32 len, U32 info) 
     vi = stb_vorbis_get_info(v);
     oggs[h].v = v;
     oggs[h].data = data;
+    oggs[h].size = size;
     oggs[h].channels = vi.channels;
     put_u32(srt_mem_ptr(info), (U32)vi.channels);
     put_u32(srt_mem_ptr(info) + 4, (U32)vi.sample_rate);
@@ -152,7 +247,7 @@ void i5_ch3609_oggX5Fclose(wasmModuleInstance* inst, U32 h) {
     (void)inst;
     if (h >= OGG_MAX || oggs[h].v == NULL) return;
     stb_vorbis_close(oggs[h].v);
-    free(oggs[h].data);
+    cache_put(oggs[h].data, oggs[h].size, oggs[h].file, oggs[h].offset);
     oggs[h].v = NULL;
     oggs[h].data = NULL;
 }

@@ -34,6 +34,7 @@ namespace Cuphead360.Engine
         public bool Done, FixedWait, EndOfFrameWait;
         public int YieldFrame, YieldFixedStep;   // when it last yielded
         public bool YieldInFixed;
+        public long ProfTicks;        // its steps' time since the last PlayerLoop.TopReport
         public readonly List<CoroutineState> Waiters = new List<CoroutineState>();
     }
 
@@ -134,11 +135,55 @@ namespace Cuphead360.Engine
             if (phase >= 0) PhaseMs[phase] += (now - phaseStart) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
             phase = next; phaseStart = now;
         }
-        /// <summary>With Profile on, a script call over 50 ms is logged with its type and method.</summary>
-        public static void SlowCall(long start, string type, string method)
+        /// <summary>
+        /// With Profile on: a script call's time (Stopwatch ticks, which TopReport
+        /// adds up by type), logged with its type and method when it took 50 ms
+        /// or more. The names are worked out only then: NativeAOT decodes a
+        /// type's name from its metadata at each ask, and asking for every
+        /// coroutine step and message was 16% of a world map frame (host_native,
+        /// sampled).
+        /// </summary>
+        public static long SlowCall(long start, object target, System.Reflection.MethodInfo method, string methodName = null)
         {
-            long ms = (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000 / System.Diagnostics.Stopwatch.Frequency;
-            if (ms >= 50) Log.Line($"SLOW call {type}.{method}: {ms} ms (frame {Clock.FrameCount})");
+            long ticks = System.Diagnostics.Stopwatch.GetTimestamp() - start;
+            if (ticks * 1000 / System.Diagnostics.Stopwatch.Frequency >= 50)
+                Log.Line($"SLOW call {(target is Type ty ? ty.FullName : target?.GetType().Name)}.{methodName ?? method?.Name}: {ticks * 1000 / System.Diagnostics.Stopwatch.Frequency} ms (frame {Clock.FrameCount})");
+            return ticks;
+        }
+
+        internal static readonly Dictionary<Type, long> FinishedTicks = new Dictionary<Type, long>();   // coroutines done since the report
+
+        /// <summary>
+        /// The script types that took most time since the last report (every
+        /// message to a behaviour of the type, and its coroutines' steps), ms a
+        /// frame over frames. Clears what it reports.
+        /// </summary>
+        public static string TopReport(int frames, int top)
+        {
+            var byType = new Dictionary<Type, long>(FinishedTicks);
+            FinishedTicks.Clear();
+            void Add(Type t, long ticks) { if (ticks > 0) { byType.TryGetValue(t, out long v); byType[t] = v + ticks; } }
+            foreach (var b in tracked)
+            {
+                if (b.Managed != null) Add(b.Managed.GetType(), b.ProfTicks);
+                b.ProfTicks = 0;
+                foreach (var c in b.Coroutines)
+                {
+                    if (c.Routine != null) Add(c.Routine.GetType(), c.ProfTicks);
+                    c.ProfTicks = 0;
+                }
+            }
+            var list = new List<KeyValuePair<Type, long>>(byType);
+            list.Sort((x, y) => y.Value.CompareTo(x.Value));
+            double scale = 1000.0 / System.Diagnostics.Stopwatch.Frequency / Math.Max(1, frames);
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < list.Count && i < top; i++)
+            {
+                var t = list[i].Key;
+                string name = t.DeclaringType != null ? t.DeclaringType.Name + "." + t.Name : t.Name;
+                sb.Append(i == 0 ? " " : ", ").Append(name).Append(' ').Append((list[i].Value * scale).ToString("0.00"));
+            }
+            return sb.ToString();
         }
 
         public static string ProfileReport(int frames)
@@ -284,7 +329,7 @@ namespace Cuphead360.Engine
             long t0 = PlayerLoop.Profile ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             try { more = c.Routine.MoveNext(); }
             catch (Exception e) { Exceptions.Report(e, c.Owner, "coroutine " + c.Routine.GetType().Name); more = false; }
-            if (t0 != 0) PlayerLoop.SlowCall(t0, c.Routine.GetType().FullName, "MoveNext");
+            if (t0 != 0) c.ProfTicks += PlayerLoop.SlowCall(t0, c.Routine.GetType(), null, "MoveNext");
             if (!more) { Finish(c); return; }
             object y = c.Routine.Current;
             c.Waiting = y; c.FixedWait = false; c.EndOfFrameWait = false; c.WaitOn = null;
@@ -316,6 +361,12 @@ namespace Cuphead360.Engine
         static void Finish(CoroutineState c)
         {
             c.Done = true;
+            if (c.ProfTicks > 0 && c.Routine != null)
+            {
+                PlayerLoop.FinishedTicks.TryGetValue(c.Routine.GetType(), out long v);
+                PlayerLoop.FinishedTicks[c.Routine.GetType()] = v + c.ProfTicks;
+                c.ProfTicks = 0;
+            }
             if (c.Handle != null) handles.Remove(c.Handle);
             foreach (var w in c.Waiters)
             {
