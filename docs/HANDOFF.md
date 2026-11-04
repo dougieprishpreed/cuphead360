@@ -47,8 +47,8 @@ time (builds, conversions, ILC) so the user's PC stays usable;
     Vorbis, a lighter render list, fitted DXT), `7d26d84` round 13 (staged
     names, cached staging, the native draw path, masks, 3D audio, the EX
     trace), `60bf849` round 14 (exit time 0, the host frame, light rays,
-    streamed clips); round 15's commit after them (full-size sprites,
-    packs, the map's CPU).
+    streamed clips), `c5321d8` round 15 (full-size sprites, packs, the
+    map's CPU); round 15b's commit after them (packs under 2 GB).
 - Side branch `interpreter-d1-r4-wip` (`ecbff5b`): the interrupted D1 r4
   interpreter edits, committed as found, not accepted, not continued.
 - Uncommitted: nothing intended. `managed/lib`, `managed/**/Generated`,
@@ -110,8 +110,24 @@ Xenia, hardware, memory.
 
 ## Next round (in order)
 
-0. **The eleventh run (round 15 build staged: full-size sprites, packs,
-   the map's CPU).** The tenth run (VERIFICATION "tenth hardware run"): the
+0. **The twelfth run (round 15b staged: the packs split under 2 GB).** The
+   eleventh run (VERIFICATION "eleventh hardware run"): the map at ~36.5 ms
+   a frame (round 14 ~88), the Root Pack at 22-25 ms (43-50), texture loads
+   ~10x faster; but every texture past 2 GB in the 3.99 GB pack failed
+   (xsdk's 32-bit `off_t`), the sprite table with them, so the ground,
+   backgrounds, hourglass and slot-select UI drew black or missing and the
+   potato stayed on the halved page. Round 15b splits the packs (2.10 +
+   1.89 GB) and makes the reader refuse reads past 2 GB everywhere. Read:
+   `packs:` (sprite pages for 880 atlas pages), no "missing from the pack",
+   the user's look at the potato, the map's ground and the title, then
+   FRAMES/TOP/HOST and memory (`free`, `textures`) with full-size pages on
+   the map (~85 MB measured on PC against the 96 MB budget).
+   Next after it: the first level load's 17.5 s frame (31 MB of shared
+   objects indexed, `VeggiesLevel.Start` 5.6 s), Rewired's InputManager
+   (0.6-1.7 ms a frame), then the list below.
+
+   Round 15's item, kept: the eleventh run (round 15 build staged:
+   full-size sprites, packs, the map's CPU). The tenth run (VERIFICATION "tenth hardware run"): the
    Ooze's rays and phases right; the potato still blurry; the map ~88 ms a
    frame (update ~26, list ~21, audio ~10, submit ~8, fixed ~7.6); fights
    35-52 ms; texture loads ~110 ms minimum; `audio=` spikes of 520-580 ms.

@@ -3,6 +3,20 @@
 Newest first. Each entry says what was run, on which build, and what it
 showed. Windows entries use the JIT oracle (`work/managed/jit`).
 
+## 2026-11-04 eleventh hardware run and round 15b (packs under 2 GB)
+
+The eleventh run (`work/console/hw11/`), round 15 build:
+- **The user saw:** the title flickering; UI missing on the slot select; the map's frame rate good but its ground black; the loading screen black; the Root Pack's background black and the potato still blurry.
+- **The log:** `packs: textures CTEX*.PAK; sprite pages for 0 atlas pages`; 42 textures "missing from the pack or unreadable". Frames: the title and slot select 16.6 ms (60 fps, waiting on the vblank); a steady map frame 36.3-36.8 ms (round 14: ~88; update 5.3, list 4.3, submit 4.5, audio 4.4-4.8, fixed 5.5, physics 4.0, ui 2.6), fewer items drawn than with its ground (132 a frame against 203); the Root Pack fight 21.8-25.4 ms (round 14: 43-50). Texture loads: 4 MB pages 28-106 ms (read and decode 22-96; round 14: ~300), small ones 1-4 ms (~110). The first level load (map to the Root Pack) held one frame 17.5 s: `sharedassets8/9` (31 MB of objects) indexed in 5.7 s and `VeggiesLevel.Start` 5.6 s, as the tenth run's first level (the Ooze: built 9.5 s, activated 2.8 s). TOP: Rewired's InputManager 0.6-1.7 ms a frame everywhere, the most of any script.
+
+| Finding | How |
+| --- | --- |
+| Every texture past 2 GB in the 3.99 GB `CTEX0.PAK` failed and every one before it loaded: xsdk's `lseek` takes newlib's 32-bit `off_t` (its file position is 64-bit inside, but nothing reaches past 2 GB). The sprite table sat at 2.14 GB, so nothing moved onto the full-size pages (the blurry potato); the map's ground, the loading screen's hourglass, the Root Pack's background and slot select's UI were past it (black or missing). The title's flicker is likely its frames on the missing page | the 42 failed textures' pack offsets (2.10-3.65 GB) against the 35 loaded (0.02-1.95 GB); xsdk `src/file.c` |
+
+| Change | Check |
+| --- | --- |
+| `stage_console.py`: pack files hold under 2,000 MiB (the textures now `CTEX0.PAK` 2.10 GB and `CTEX1.PAK` 1.89 GB); the manifest records the layout, so a change of it packs again. `ch360_pack.c` reads nothing past 2 GB on any platform, so the PC check fails as the console would | `test_pack_all.exe` (the C reader with its guard): all 6,037 texture entries found and read, 17.08 GB decoded, each a CTX1 header with its payload size. host_native from the split packs (the hw11 save, the potato bot): 0 exceptions, bad lists 0, 0 items left on atlas pages, `remap_check` 2,511 items exact |
+
 ## 2026-11-04 tenth hardware run and round 15 (full-size sprites, packs, the map's CPU)
 
 The tenth run (`work/console/hw10/`), round 14 build:

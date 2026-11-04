@@ -126,7 +126,8 @@ python tools/stage_console.py --to E:\Games\Cuphead360
 ```
 
 That folder holds `default.xex`, `GameData\` (objects, fonts and the packs
-`CTEX0.PAK`... and `AUDIO0.PAK`...), `save\` and `licenses\`. On the
+`CTEX0.PAK`... and `AUDIO0.PAK`..., each under 2 GB: xsdk's file offsets
+are 32-bit), `save\` and `licenses\`. On the
 console's USB drive every file opened cost ~110 ms whatever its size (the
 FAT32 driver walks the path's folders), the floor under each texture load
 and most of a fight's file time, so textures and clips are in packs opened

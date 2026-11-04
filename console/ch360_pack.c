@@ -5,7 +5,7 @@
  * of the ~45 s of file time in a fight of the tenth run (clips opened as
  * they first sounded, streamed ones at every play).
  *
- * A pack is <name>0.PAK, <name>1.PAK, ... (each under FAT32's 4 GB):
+ * A pack is <name>0.PAK, <name>1.PAK, ... (each under 2 GB, see read_at):
  *   'CHPK' u32 version (1) u32 count u32 0
  *   count entries, sorted by key hash: u32 hash_hi hash_lo offset stored size 0
  *   the entries' bytes (offsets from the file's start)
@@ -52,9 +52,14 @@ static unsigned rd32(const unsigned char* p) {
     return (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
 }
 
+/* Reads n bytes at offset. Nothing past 2 GB, on every platform: xsdk's lseek
+ * takes a 32-bit signed off_t, so the console can't read there (the eleventh
+ * run's textures past 2 GB drew black), and the PC check should fail alike;
+ * stage_console.py keeps each pack file under it. */
 static int read_at(srt_file* f, unsigned offset, void* dst, unsigned n) {
     srt_u64 at;
     size_t done = 0, got;
+    if (offset > 0x7fffffffu || n > 0x7fffffffu - offset) return -1;
     if (srt_plat_seek(f, (srt_i64)offset, SRT_SEEK_SET, &at) != 0) return -1;
     while (done < n) {
         if (srt_plat_read(f, (unsigned char*)dst + done, n - done, &got) != 0 || got == 0) return -1;

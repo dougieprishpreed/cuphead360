@@ -49,9 +49,12 @@ full size from per-animation pages (`tools/cluster_console.py`, the glue's
 remap), puts textures and clips in packs opened once (`ch360_pack.c`; each
 USB open cost ~110 ms), and cut the map's CPU (type names asked for every
 coroutine step, invisible UI drawn; PC map frame 4.0 -> 1.7 ms), with a TOP
-line naming the costliest scripts. Continue with HANDOFF.md's "Next round"
-item 0: the eleventh run's packs, texture, FRAMES, TOP and HOST lines and
-the user's look, then the roadmap to 30 fps (what TOP names, the native
+line naming the costliest scripts. The eleventh run: the map ~36.5 ms a
+frame, the Root Pack 22-25 ms, loads ~10x faster, but textures past 2 GB in
+the pack drew black (xsdk's 32-bit file offsets); round 15b splits the
+packs under 2 GB. Continue with HANDOFF.md's "Next round" item 0: the
+twelfth run's packs, texture, FRAMES, TOP and HOST lines and the user's
+look, then the first level load's 17.5 s frame, the roadmap to 30 fps (what TOP names, the native
 mixer, the UI walk and rebuilds, GC, frame pacing), preloading during async
 scene loads, and the other custom sprite shaders. The user's later goal:
 replace the bundled game code with our own so the XEX can be shared.

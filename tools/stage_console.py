@@ -11,7 +11,8 @@ the layout console/xsdk/main.cpp reads from game:\\.
 The packs (console/ch360_pack.c reads them) hold the converted textures
 (<data>/ctex, convert_console.py), the full-size sprite pages and their
 table (<data>/ctexc, cluster_console.py) and the clips (<data>/audio,
-convert_audio.py), each file under FAT32's 4 GB. On the console's USB drive
+convert_audio.py), each file under 2 GB (xsdk's file offsets are 32-bit
+signed: a read past 2 GB fails on the console). On the console's USB drive
 every file opened cost ~110 ms whatever its size: the floor under each
 texture load and most of a fight's file time. Textures are LZ4 (DXT pages
 shrink about 4x, so they also read about 4x faster); clips are Vorbis
@@ -38,7 +39,10 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACKS = os.path.join(ROOT, "work", "console", "packs")
 PACK_CHUNK = 256 * 1024     # console/ch360_pack.c, PACK_CHUNK
-PACK_LIMIT = 3900 << 20     # bytes a pack file holds at most (FAT32: under 4 GB)
+# Bytes a pack file holds at most. xsdk's lseek takes a 32-bit off_t, so a
+# console read past 2 GB fails (the eleventh run: every texture past it drew
+# black, and the sprite table there never loaded).
+PACK_LIMIT = 2000 << 20
 LZ4_LEVEL = 9               # 4.65x on a DXT5 page at 53 MB/s (level 12: 4.68x at 5 MB/s)
 
 
@@ -81,7 +85,8 @@ def write_packs(name, entries, workers):
     hashes = [fnv64(k) for k, _, _ in entries]
     if len(set(hashes)) != len(hashes):
         sys.exit("two %s entries share a key hash" % name)
-    manifest = "".join("%s %d %d %d\n" % (k, os.path.getsize(p), int(os.path.getmtime(p)), c) for k, p, c in entries)
+    manifest = "layout %d %d %d\n" % (PACK_LIMIT, PACK_CHUNK, LZ4_LEVEL)
+    manifest += "".join("%s %d %d %d\n" % (k, os.path.getsize(p), int(os.path.getmtime(p)), c) for k, p, c in entries)
     mpath = os.path.join(PACKS, name + ".manifest")
     old = open(mpath, encoding="utf-8").read() if os.path.exists(mpath) else None
     have = sorted(f for f in os.listdir(PACKS) if f.startswith(name) and f.endswith(".PAK"))
@@ -116,6 +121,8 @@ def write_packs(name, entries, workers):
             cur = open(os.path.join(PACKS, fn + ".tmp"), "wb")
             cur.write(b"\0" * index_bytes)
             rows, at = [], index_bytes
+        if at + len(data) > PACK_LIMIT:
+            sys.exit("%s: %d bytes don't fit a pack file" % (key, len(data)))
         cur.seek(at)
         cur.write(data)
         rows.append((hashes[i], at, len(data), size))
