@@ -2,16 +2,18 @@
 
 ## Prerequisites
 
-- Windows, .NET 10 SDK, Python 3 with UnityPy 1.25 (`pip install UnityPy`).
+- Windows, .NET 10 SDK, Python 3 with UnityPy 1.25, numpy, Pillow,
+  texture2ddecoder and lz4 (`pip install UnityPy numpy Pillow texture2ddecoder lz4`).
 - The player's GOG Cuphead installation (default `game\`).
 - Console C (stages `wasm`, `c`): wasi-sdk 29 at
   `C:\wasi-sdk-29.0-x86_64-windows` (or `WASI_SDK_PATH`), the
   dotnet-experimental NuGet feed (`managed/wasm-nuget.config`), and a built
   w2c2 (Spire360's `out/logic/w2c2-build` next to this repository, or
   `--w2c2`).
-- Console host (not written yet): the XDK (VS2010 + Xbox 360 SDK) until the
-  Xenia check, then xSDK + vulkan4xenon in the WSL distro `CTR360-XSDK`
-  (shared with other projects; don't change its checkouts).
+- Console host: xSDK + vulkan4xenon in a WSL distro (`CTR360-XSDK` here,
+  shared with other projects; don't change its checkouts). The console
+  build, the full-size sprite pages, the packs and staging are in
+  [console/README.md](../console/README.md).
 
 ## Managed player
 
