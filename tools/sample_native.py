@@ -24,6 +24,7 @@ ap.add_argument('--exe-map', required=True)
 ap.add_argument('--log', required=True)
 ap.add_argument('--after', required=True)
 ap.add_argument('--delay', type=float, default=5)
+ap.add_argument('--after-count', type=int, default=1, help='wait for this many matches of --after')
 ap.add_argument('--seconds', type=float, default=20)
 ap.add_argument('--hz', type=float, default=400)
 ap.add_argument('--focus', action='append', default=[])
@@ -112,11 +113,11 @@ proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, creationflags
 pat = re.compile(a.after)
 t0 = time.time()
 while True:
-    time.sleep(0.5)
+    time.sleep(0.05)
     if proc.poll() is not None:
         sys.exit('program ended before the trigger')
     with open(a.log, 'rb') as f:
-        if pat.search(f.read().decode('utf-8', 'replace')): break
+        if len(pat.findall(f.read().decode('utf-8', 'replace'))) >= a.after_count: break
 print('trigger after %.0f s' % (time.time() - t0), flush=True)
 time.sleep(a.delay)
 

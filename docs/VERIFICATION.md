@@ -3,6 +3,21 @@
 Newest first. Each entry says what was run, on which build, and what it
 showed. Windows entries use the JIT oracle (`work/managed/jit`).
 
+## 2026-11-04 round 17 (loads: object indexes, scenes built over frames, the memory line)
+
+No new hardware run: built from the twelfth run's open items (loading screens frozen, the first level load's 17.5 s frame, GC pauses, the player's memory 101 -> 216 MB).
+
+| Finding | How |
+| --- | --- |
+| A converted file's objects were found by walking every value (`ChobFile.Load`: SkipValue over a large file read from the drive, Reader.Skip over a small one): the first level load walked `sharedassets8/9` (31 MB) for 5.7 s on the console, and the twelfth run's loads ~7 s of indexing in all; on PC the Forest Follies load read 75 MB to index its files | the hw11/hw12 CHOB lines; host_native SCENE lines |
+| A load ran in one frame (SceneLoader.Pump: unload, build every object, activate), so the loading screen drew nothing until the level's first frame | `SceneIcalls.cs` |
+
+| Change | Check |
+| --- | --- |
+| `convert_objects.py` appends each file's object index (path id, class, type, value offset and length, a font's large m_FontData hole) and a 'CHIX' trailer; `ChobFile.Load` takes the objects from it (the old walk stays for files without one). Objects converted again: 583 files, 761 -> 770 MB | every file's bytes up to the old end identical to round 16's, every trailer consistent; 93 files walked independently (each entry's place, length and header as the walk finds them; 13 font holes); JIT potato bot: 320 captured frames' visible items as round 14's, BOT lines identical; host_native Forest Follies: BOT lines as round 16's, the level read 75 -> 1 MB to load, built 485 -> 293 ms (PC) |
+| Scenes built a slice a frame (`SceneLoader.SliceMs`, 20 ms on the console; CH360_LOAD_SLICE_MS on PC): the file, the GameObjects and components (Building: inactive to everything), the hierarchy, the fields, then in one frame the old scene unloaded and the new one activated, as Unity's asynchronous loads; sync loads and bot runs still build in one frame | JIT new-game loop with 2 ms slices: the same scenes (title, slot select, intro, house, map, the Root Pack three times), 0 exceptions, knockouts at 9133/11378/15961 (one-frame loads: 9093/12831, the bot's fights shift with the loads' frames); host_native Forest Follies with 5 ms slices: the map built over 10 frames, the level over 17; with 20 ms (the console's) the level over 5 (PC), 0 exceptions; without slices BOT lines as round 16's |
+| MEMORY line after each load (console): the heap, live objects, files loaded and the census of converted files' bytes and parsed trees by type | host_native: the map 86-97 MB heap, Forest Follies 105 MB (live objects 20,112; file bytes held 19 MB; trees 20 MB, sprites 16 of them) |
+
 ## 2026-11-04 twelfth hardware run and round 16 (hitches: texture thrash, GC, the run-and-gun level)
 
 The twelfth run (`work/console/hw12/`), round 15b build:

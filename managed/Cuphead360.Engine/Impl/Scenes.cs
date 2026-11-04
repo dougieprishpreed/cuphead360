@@ -16,6 +16,8 @@ namespace Cuphead360.Engine
             public int Handle, BuildIndex = -1;
             public string Name = "", Path = "";
             public bool Loaded;
+            /// <summary>Being built a slice a frame: not loaded yet, and not unloaded with the others.</summary>
+            public bool Building;
             public readonly List<NGameObject> Roots = new List<NGameObject>();
         }
 
@@ -25,9 +27,9 @@ namespace Cuphead360.Engine
         /// <summary>Pseudo-scene of DontDestroyOnLoad objects.</summary>
         public static readonly NScene DontDestroy = new NScene { Handle = -1, Name = "DontDestroyOnLoad", Loaded = true };
 
-        public static NScene Create(string name, int buildIndex)
+        public static NScene Create(string name, int buildIndex, bool building = false)
         {
-            var s = new NScene { Handle = nextHandle++, Name = name, BuildIndex = buildIndex, Loaded = true };
+            var s = new NScene { Handle = nextHandle++, Name = name, BuildIndex = buildIndex, Loaded = !building, Building = building };
             scenes.Add(s);
             if (ActiveHandle == 0) ActiveHandle = s.Handle;
             return s;
@@ -57,7 +59,7 @@ namespace Cuphead360.Engine
 
         public static void Forget(NGameObject go) => RemoveRoot(go);
 
-        public static void DropUnloaded() => scenes.RemoveAll(s => !s.Loaded);
+        public static void DropUnloaded() => scenes.RemoveAll(s => !s.Loaded && !s.Building);
 
         public static void MarkDontDestroy(NGameObject go)
         {

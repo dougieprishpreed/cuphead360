@@ -99,7 +99,7 @@ run at once (2 by default).
 
 ```
 python -I tools/convert_objects.py --game game --out work/GameData
-python -I tools/convert_objects.py --game game --out work/GameData --files none --bundles
+python -I tools/convert_objects.py --game game --out work/GameData --files none --bundles   # each file ends in its object index ('CHIX')
 python -I tools/convert_textures.py --game game --out work/GameData --bundles
 python -I tools/convert_console.py --data work/GameData          # BC7 -> DXT1/DXT5/BGRA8, pages halved to 2048 (Lanczos-3)
 python -I tools/convert_console.py --data work/GameData --max-size 4096 --out work/GameData/ctex4k --halved-only --workers 2

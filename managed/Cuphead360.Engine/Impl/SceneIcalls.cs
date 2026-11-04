@@ -18,9 +18,119 @@ namespace Cuphead360.Engine
         sealed class Pending
         {
             public int BuildIndex;
-            public bool Additive;
+            public bool Additive, Sync;
             public Scenes.Operation Op;
             public int RequestFrame;
+            public SceneLoad Work;   // a load built a slice a frame (SliceMs)
+        }
+
+        /// <summary>
+        /// Milliseconds of a scene's building a frame, 0 to build it in one go. The console host
+        /// sets it (CH360_LOAD_SLICE_MS for a PC check): built in one frame, a level's load held
+        /// the loading screen's hourglass still for seconds.
+        /// </summary>
+        public static int SliceMs = int.TryParse(Environment.GetEnvironmentVariable("CH360_LOAD_SLICE_MS"), out var sliceMs) ? sliceMs : 0;
+
+        /// <summary>
+        /// A scene built over frames, as Unity's asynchronous loads are: its file, its GameObjects
+        /// and components, their hierarchy and fields, SliceMs of work a frame while the current
+        /// scene (the loading screen) goes on; then, in one frame, the old scene unloaded and the
+        /// new one activated (Awake, OnEnable). Until then its objects are Building (inactive to
+        /// everything) and its scene not loaded.
+        /// </summary>
+        sealed class SceneLoad
+        {
+            public int Index;
+            public bool Additive;
+            public float Progress;
+            string name, path;
+            ChobFile file;
+            Scenes.NScene scene;
+            SceneBuild build;
+            List<ChobObject> gameObjects;
+            int stage, next, frames;
+            long t0, tReady, files0, bytes0;
+
+            public static SceneLoad Begin(int index, bool additive)
+            {
+                var l = new SceneLoad { Index = index, Additive = additive, path = AssetDb.BuildScenes[index] };
+                l.name = System.IO.Path.GetFileNameWithoutExtension(l.path);
+                l.t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                l.files0 = ChobFile.LoadedFiles;
+                l.bytes0 = ChobFile.LoadedBytes;
+                return l;
+            }
+
+            /// <summary>Builds until done (true) or until ms have gone by (false: more next frame).</summary>
+            public bool Step(int ms)
+            {
+                long hz = System.Diagnostics.Stopwatch.Frequency;
+                long deadline = ms <= 0 ? long.MaxValue : System.Diagnostics.Stopwatch.GetTimestamp() + ms * hz / 1000;
+                bool Over() => System.Diagnostics.Stopwatch.GetTimestamp() > deadline;
+                frames++;
+                while (true)
+                {
+                    switch (stage)
+                    {
+                        case 0:
+                            file = AssetDb.File("level" + Index);
+                            if (file == null) { Log.Line("SCENE level" + Index + " (" + name + ") is not converted"); stage = 9; return true; }
+                            scene = Scenes.Create(name, Index, building: true);
+                            scene.Path = path;
+                            build = new SceneBuild { File = file, SceneHandle = scene.Handle, Building = true };
+                            gameObjects = file.Ordered.Where(o => o.Type == "GameObject").ToList();
+                            stage = 1; next = 0;
+                            if (Over()) return false;
+                            break;
+                        case 1:
+                            while (next < gameObjects.Count)
+                            {
+                                build.CreateOne(gameObjects[next++]);
+                                if (Over()) { Progress = 0.6f * next / gameObjects.Count; return false; }
+                            }
+                            stage = 2;
+                            break;
+                        case 2:
+                            build.FinishHierarchy();
+                            stage = 3; next = 0;
+                            if (Over()) { Progress = 0.6f; return false; }
+                            break;
+                        case 3:
+                            while (next < build.Components.Count)
+                            {
+                                build.ApplyFields(next++);
+                                if (Over()) { Progress = 0.6f + 0.4f * next / build.Components.Count; return false; }
+                            }
+                            stage = 4;
+                            tReady = System.Diagnostics.Stopwatch.GetTimestamp();
+                            Progress = 1f;
+                            return true;
+                        default:
+                            return true;
+                    }
+                }
+            }
+
+            /// <summary>The old scene unloaded (a single load), the new one loaded and activated.</summary>
+            public void Activate()
+            {
+                if (stage == 9) return;
+                if (!Additive) UnloadAll();
+                scene.Building = false;
+                scene.Loaded = true;
+                if (!Additive) { Scenes.ActiveHandle = scene.Handle; Clock.TimeSinceLevelLoadBase = Clock.Time; }
+                Loads++;
+                Log.Line($"SCENE loaded {name} (build {Index}): {build.GameObjects.Count} GameObjects, {build.Components.Count} components");
+                long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
+                build.Activate();
+                if (Timing)
+                {
+                    Log.Line($"SCENE {name}: built in {Ms(t0, tReady)} ms over {frames} frames ({ChobFile.LoadedFiles - files0} files read, "
+                        + $"{(ChobFile.LoadedBytes - bytes0) >> 20} MB), activated in {Ms(t1, System.Diagnostics.Stopwatch.GetTimestamp())} ms");
+                    MemoryLine();
+                }
+                AfterLoad(scene, Index, Additive);
+            }
         }
         static readonly List<Pending> pending = new List<Pending>();
         public static int Loads;
@@ -45,7 +155,7 @@ namespace Cuphead360.Engine
                 return null;
             }
             var op = new Scenes.Operation();
-            pending.Add(new Pending { BuildIndex = index, Additive = additive, Op = op, RequestFrame = Clock.FrameCount });
+            pending.Add(new Pending { BuildIndex = index, Additive = additive, Sync = sync, Op = op, RequestFrame = Clock.FrameCount });
             return Scenes.NewOperation(op);
         }
 
@@ -56,9 +166,17 @@ namespace Cuphead360.Engine
             {
                 var p = pending[i];
                 if (p.RequestFrame >= Clock.FrameCount) continue;
+                // Built over frames (the first load waiting at a time), unless asked to load at once.
+                if (SliceMs > 0 && !p.Sync)
+                {
+                    if (i > 0 && pending[0].Work != null) continue;
+                    p.Work ??= SceneLoad.Begin(p.BuildIndex, p.Additive);
+                    if (!p.Work.Step(SliceMs)) { p.Op.Progress = 0.9f * p.Work.Progress; continue; }
+                }
                 if (!p.Op.AllowActivation) { p.Op.Progress = 0.9f; continue; }
                 pending.RemoveAt(i--);
-                Load(p.BuildIndex, p.Additive);
+                if (p.Work != null) p.Work.Activate();
+                else Load(p.BuildIndex, p.Additive);
                 p.Op.Progress = 1f;
                 p.Op.Done = true;
                 p.Op.Complete?.Invoke();
@@ -84,9 +202,17 @@ namespace Cuphead360.Engine
             long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
             build.Activate();
             if (Timing)
+            {
                 Log.Line($"SCENE {name}: built in {Ms(t0, t1)} ms ({ChobFile.LoadedFiles - files0} files read, {(ChobFile.LoadedBytes - bytes0) >> 20} MB), "
                     + $"activated in {Ms(t1, System.Diagnostics.Stopwatch.GetTimestamp())} ms");
-            // Managed callbacks the native player makes after a load.
+                MemoryLine();
+            }
+            AfterLoad(scene, index, additive);
+        }
+
+        /// <summary>The managed callbacks the native player makes after a load.</summary>
+        static void AfterLoad(Scenes.NScene scene, int index, bool additive)
+        {
             var mode = additive ? LoadSceneMode.Additive : LoadSceneMode.Single;
             var s = new Scene { m_Handle = scene.Handle };
             Invoke(typeof(SceneManager), "Internal_SceneLoaded", s, mode);
@@ -98,11 +224,20 @@ namespace Cuphead360.Engine
 
         static long Ms(long a, long b) => (b - a) * 1000 / System.Diagnostics.Stopwatch.Frequency;
 
+        /// <summary>
+        /// With Timing (the console), what the heap holds after a load: its size (no collection
+        /// forced), live objects, and the converted files' bytes and parsed trees by type. The
+        /// player's memory grew 101 -> 216 MB over the twelfth run.
+        /// </summary>
+        static void MemoryLine() =>
+            Log.Line($"MEMORY after the load: heap {GC.GetTotalMemory(false) >> 20} MB, live objects {Objects.LiveCount}, files loaded {AssetDb.LoadedFiles.Count()}; "
+                + ChobObject.Census(AssetDb.LoadedFiles));
+
         static void UnloadAll()
         {
             foreach (var sc in Scenes.All.ToArray())
             {
-                if (!sc.Loaded) continue;
+                if (!sc.Loaded || sc.Building) continue;
                 foreach (var root in sc.Roots.ToArray()) Lifecycle.DestroyNow(root);
                 sc.Loaded = false;
                 Invoke(typeof(SceneManager), "Internal_SceneUnloaded", new Scene { m_Handle = sc.Handle });

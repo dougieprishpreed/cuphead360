@@ -58,10 +58,12 @@ run-and-gun level ~187 ms a frame; round 16 puts each animation on pages of
 its own, cuts the physics queries' allocations (GCs 3.6x fewer there on
 PC), grids the glue's sprite lookup and frees 12 MB. The Spire360 session
 shares the CTR360-XSDK distro, its xsdk/vulkan4xenon checkouts and the USB
-drive (stage only E:\Apps\cuphead360). Continue with HANDOFF.md's "Next
-round" item 0: the thirteenth run's Forest Follies and fight lines and the
-user's feel of the hitches, then GC pauses, the loading screens, the first
-level load's 17.5 s frame, the roadmap to 30 fps (what TOP names, the native
+drive (stage only E:\Apps\cuphead360). Round 17 (with round 16, not yet
+on hardware) indexes the converted object files (no walk over their values
+at load), builds scenes a slice a frame so the loading screen animates, and
+logs a MEMORY line after each load. Continue with HANDOFF.md's "Next round"
+item 0: the thirteenth run's SCENE and MEMORY lines, Forest Follies and the
+fights, the user's look at loads and hitches, then the memory growth, the roadmap to 30 fps (what TOP names, the native
 mixer, the UI walk and rebuilds, GC, frame pacing), preloading during async
 scene loads, and the other custom sprite shaders. The user's later goal:
 replace the bundled game code with our own so the XEX can be shared.

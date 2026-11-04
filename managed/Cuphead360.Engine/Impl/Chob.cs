@@ -315,6 +315,11 @@ namespace Cuphead360.Engine
                     data = sc.ReadAll();
                     t1 = System.Diagnostics.Stopwatch.GetTimestamp();
                 }
+                else if (sc.Index(n) is byte[] index)
+                {
+                    t1 = t0;
+                    FromIndex(f, index, 0, n, strings, path, null);
+                }
                 else
                 {
                     t1 = t0;
@@ -332,7 +337,9 @@ namespace Cuphead360.Engine
                 read = sc.BytesRead;
             }
             LoadedBytes += read; LoadedFiles++;
-            if (data != null)
+            if (data != null && Trailer(data, data.Length - 16, data.Length, n, out long indexAt))
+                FromIndex(f, data, (int)indexAt, n, strings, null, data);
+            else if (data != null)
             {
                 var r = new Reader(data, start, strings);
                 for (uint i = 0; i < n; i++)
@@ -353,6 +360,51 @@ namespace Cuphead360.Engine
                     Trace($"CHOB {name}: {size >> 10} KB, {n} objects, {read >> 10} KB read; read {(t1 - t0) * 1000 / hz} ms, indexed {(t2 - t1) * 1000 / hz} ms");
             }
             return f;
+        }
+
+        static uint U32At(byte[] b, int p) => (uint)(b[p] | b[p + 1] << 8 | b[p + 2] << 16 | b[p + 3] << 24);
+
+        /// <summary>
+        /// The converter's object index ('CHIX' at the end: tools/convert_objects.py): true and its
+        /// offset when the trailer at t[at..at+16) belongs to a file of length bytes with n objects.
+        /// </summary>
+        static bool Trailer(byte[] t, int at, long length, uint n, out long indexAt)
+        {
+            indexAt = 0;
+            if (at < 0 || length < 16) return false;
+            uint off = U32At(t, at), count = U32At(t, at + 4);
+            if (U32At(t, at + 8) != 0x58494843u || U32At(t, at + 12) != 1 || count != n || off + (long)count * 32 > length - 16) return false;
+            indexAt = off;
+            return true;
+        }
+
+        /// <summary>
+        /// The file's objects from its index (no walk over their values, which took the console
+        /// 5.7 s for a level's shared files): their place and length, and for a file read from the
+        /// drive its fonts' large m_FontData (read when the font is drawn), as the walk noted them.
+        /// </summary>
+        static void FromIndex(ChobFile f, byte[] idx, int at, uint n, string[] strings, string diskPath, byte[] data)
+        {
+            for (uint i = 0; i < n; i++, at += 32)
+            {
+                var o = new ChobObject
+                {
+                    PathId = (long)(U32At(idx, at) | (ulong)U32At(idx, at + 4) << 32), ClassId = (int)U32At(idx, at + 8),
+                    Type = strings[U32At(idx, at + 12)], File = f
+                };
+                o.Strings = strings;
+                o.Offset = (int)U32At(idx, at + 16);
+                o.Length = (int)U32At(idx, at + 20);
+                if (data != null) o.Data = data;
+                else
+                {
+                    o.DiskPath = diskPath;
+                    uint holeLen = U32At(idx, at + 28);
+                    if (holeLen > 0) { o.HoleAt = U32At(idx, at + 24); o.HoleLen = (int)holeLen; }
+                }
+                f.Objects[o.PathId] = o;
+                f.Ordered.Add(o);
+            }
         }
 
         /// <summary>A converted file read through a 64 KB buffer, seeking over what is skipped.</summary>
@@ -397,6 +449,26 @@ namespace Cuphead360.Engine
                 return Encoding.UTF8.GetString(t);
             }
             /// <summary>The whole file (what was read is kept; the rest read now).</summary>
+            /// <summary>The file's object index (n entries), or null: the scan then goes on where it was.</summary>
+            public byte[] Index(uint count)
+            {
+                if (Length < 16) return null;
+                var t = new byte[16];
+                fs.Seek(Length - 16, SeekOrigin.Begin);
+                ReadFully(fs, t, 0, 16);
+                BytesRead += 16;
+                byte[] idx = null;
+                if (Trailer(t, 0, Length, count, out long indexAt))
+                {
+                    idx = new byte[count * 32];
+                    fs.Seek(indexAt, SeekOrigin.Begin);
+                    ReadFully(fs, idx, 0, idx.Length);
+                    BytesRead += idx.Length;
+                }
+                fs.Seek(at + n, SeekOrigin.Begin);
+                return idx;
+            }
+
             public byte[] ReadAll()
             {
                 var all = new byte[Length];

@@ -50,7 +50,8 @@ time (builds, conversions, ILC) so the user's PC stays usable;
     streamed clips), `c5321d8` round 15 (full-size sprites, packs, the
     map's CPU), `35090b4` round 15b (packs under 2 GB); round 16's commit
     after them (per-animation sprite pages, physics allocations, the
-    glue's grid, memory).
+    glue's grid, memory), then round 17's (object indexes, scenes built
+    over frames, the MEMORY line).
 - Side branch `interpreter-d1-r4-wip` (`ecbff5b`): the interrupted D1 r4
   interpreter edits, committed as found, not accepted, not continued.
 - Uncommitted: nothing intended. `managed/lib`, `managed/**/Generated`,
@@ -112,8 +113,33 @@ Xenia, hardware, memory.
 
 ## Next round (in order)
 
-0. **The thirteenth run (round 16 staged: per-animation sprite pages, the
-   run-and-gun level, hitches).** The twelfth run (VERIFICATION "twelfth
+0. **The thirteenth run (round 17 staged: per-animation sprite pages, the
+   run-and-gun level, hitches, loads).** Round 16 (per-animation sprite
+   pages, physics allocations, the glue's grid, memory) went untested on
+   hardware; round 17 adds, from the twelfth run's open items:
+   - **Object indexes:** `convert_objects.py` appends each file's object
+     index ('CHIX'); `ChobFile.Load` reads it instead of walking every
+     value (the console's first level load walked 31 MB for 5.7 s; on PC
+     Forest Follies read 75 -> 1 MB to load).
+   - **Scenes built over frames** (`SceneLoader.SliceMs`, 20 ms on the
+     console): the loading screen's hourglass should turn while a level
+     builds; activation (Awake/OnEnable) is still one frame, as Unity's.
+   - **MEMORY line** after each load: heap, live objects, files, the
+     census of file bytes and parsed trees by type.
+
+   Read: SCENE lines ("built in N ms over F frames", activated), MEMORY
+   lines across scenes (what grows: the player's memory went 101 -> 216
+   MB), then round 16's items: Forest Follies' FRAMES/TOP/HOST (glue,
+   fixed, GCs), the fights' worst frames and texture reloads, memory
+   free/textures; the user's look at loading screens, the first level's
+   load and the hitches.
+
+   Next: the memory growth by what the MEMORY lines show; activation's
+   one-frame cost (2-3 s on the console?) and the first frame's texture
+   loads after it; GC pauses; then the list below.
+
+   Round 16's item, kept:
+   **Round 16 (per-animation sprite pages, the run-and-gun level, hitches).** The twelfth run (VERIFICATION "twelfth
    hardware run"): fights near full speed with hitches every second or so
    (texture reloads of Cuphead's and the bosses' pages under the memory
    floor, and gen0 GCs ~20-25 ms), the map ~38 ms, Forest Follies 187 ms a
@@ -124,12 +150,7 @@ Xenia, hardware, memory.
      (JIT captures); the map stays ~91 MB.
    - **Physics queries:** casts and overlaps filter by layer before the
      walks up the hierarchy, over the collider table itself; boxes,
-     circles and capsules keep their shapes as they move; `Shapes()` no
-     longer allocates a closure at every call (C# put its local function's
-     captured matrix on the heap). Forest Follies on PC: gen0 GCs over
-     4,200 frames 6,258 -> 1,722, the frame 8.8 -> 6.3 ms, draw lists
-     identical.
-   - `RenderUvs`' cache check no longer boxes (Rect/Vector4 Equals).
+     circles and capsules keep their shapes as they move.
    - **The glue's lookup:** an 8x8 grid of each page's rectangles.
    - **Memory:** the vertex ring 8 -> 2 MB a frame (+12 MB); the texture
      budget 96 -> 112 MB, evicting to 7/8 of it.
@@ -146,7 +167,6 @@ Xenia, hardware, memory.
    first level load's 17.5 s (31 MB of shared objects indexed), the
    player's linear memory (101 -> 216 MB over a session), then the list
    below.
-
    Round 15b's item, kept: the twelfth run (round 15b staged: the packs split under 2 GB). The
    eleventh run (VERIFICATION "eleventh hardware run"): the map at ~36.5 ms
    a frame (round 14 ~88), the Root Pack at 22-25 ms (43-50), texture loads

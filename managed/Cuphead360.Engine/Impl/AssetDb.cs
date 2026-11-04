@@ -394,13 +394,25 @@ namespace Cuphead360.Engine
             return null;
         }
 
+        /// <summary>
+        /// A scene built a slice a frame (SceneLoader.SliceMs): its GameObjects are Building,
+        /// inactive to everything (drawing, physics, finds) until Activate.
+        /// </summary>
+        public bool Building;
+
         void Create(List<ChobObject> gameObjects)
         {
-            foreach (var g in gameObjects)
+            foreach (var g in gameObjects) CreateOne(g);
+        }
+
+        /// <summary>One GameObject of the file and its components (fields come in Finish).</summary>
+        internal void CreateOne(ChobObject g)
+        {
             {
                 var managed = (GameObject)Lifecycle.NewManaged(typeof(GameObject));
                 var go = Lifecycle.CreateGameObject(managed, Tree.Str(g.Tree, "m_Name"), persistent: true);
                 go.IsAsset = IsAsset;
+                go.Building = Building;
                 go.Scene = IsAsset ? 0 : SceneHandle;
                 go.Layer = (int)Tree.Int(g.Tree, "m_Layer");
                 go.Tag = AssetDb.TagName(Tree.Int(g.Tree, "m_Tag"));
@@ -476,6 +488,13 @@ namespace Cuphead360.Engine
 
         void Finish()
         {
+            FinishHierarchy();
+            for (int i = 0; i < Components.Count; i++) ApplyFields(i);
+        }
+
+        /// <summary>The transforms' places and parents, the scene's roots, RectTransforms' anchors.</summary>
+        internal void FinishHierarchy()
+        {
             // Hierarchy.
             foreach (var (rec, co) in Components)
             {
@@ -500,12 +519,14 @@ namespace Cuphead360.Engine
             int Depth(NTransform t) { int d = 0; for (var p = t.Parent; p != null; p = p.Parent) d++; return d; }
             rects.Sort((x, y) => Depth(x).CompareTo(Depth(y)));
             foreach (var rt in rects) rt.AnchoredPosition = rt.SerializedAnchored;
-            foreach (var (rec, co) in Components)
-            {
-                if (rec is NBehaviour) FieldDecoder.Apply(rec.Managed, co, this);
-                else if (!(rec is NTransform)) Builtins.OnLoaded(rec, co, this);
-                else Builtins.OnLoaded(rec, co, this);
-            }
+        }
+
+        /// <summary>Component i's fields: scripts by Unity's rules, built-ins by their modules.</summary>
+        internal void ApplyFields(int i)
+        {
+            var (rec, co) = Components[i];
+            if (rec is NBehaviour) FieldDecoder.Apply(rec.Managed, co, this);
+            else Builtins.OnLoaded(rec, co, this);
         }
 
         public UObject Resolve(PPtr p) => AssetDb.Resolve(File, p, this);
@@ -513,6 +534,7 @@ namespace Cuphead360.Engine
         /// <summary>Unity's scene activation: Awake + OnEnable for every active object.</summary>
         public void Activate()
         {
+            foreach (var go in GameObjects) go.Building = false;
             foreach (var go in GameObjects)
                 if (go.Transform.Parent == null && go.ActiveInHierarchy) Lifecycle.ActivateTreeNew(go.Transform);
         }

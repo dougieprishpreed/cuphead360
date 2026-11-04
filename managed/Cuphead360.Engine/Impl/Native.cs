@@ -39,11 +39,13 @@ namespace Cuphead360.Engine
         public bool DontDestroy;
         /// <summary>Part of a prefab asset: never awake, updated or found as a scene object.</summary>
         public bool IsAsset;
+        /// <summary>Part of a scene still being built over frames (SceneBuild.Building): inactive until it activates.</summary>
+        public bool Building;
         public bool ActiveInHierarchy
         {
             get
             {
-                if (IsAsset) return false;
+                if (IsAsset || Building) return false;
                 for (var t = Transform; t != null; t = t.Parent)
                     if (!t.GameObject.ActiveSelf) return false;
                 return true;

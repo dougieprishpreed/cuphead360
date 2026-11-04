@@ -123,6 +123,9 @@ namespace Cuphead360.Player
         {
             var scripted = Inputs.Source;   // --bot / --input still drive a console run when given
             if (scripted == null) Inputs.Source = f => input;
+            // Scenes built a slice a frame, so the loading screen's hourglass keeps turning (bot
+            // runs keep one-frame loads, frame for frame as before, unless CH360_LOAD_SLICE_MS).
+            if (scripted == null && Cuphead360.Engine.SceneLoader.SliceMs == 0) Cuphead360.Engine.SceneLoader.SliceMs = 20;
             // The mix goes to the host as it is (floats; the host clamps where it hands them on):
             // converting each sample here went through memory twice on the console's CPU.
             Audio.Output = (mix, frames) => { fixed (float* p = mix) AudioOut(p, frames); };

@@ -29,6 +29,14 @@ CHOB v1 (little-endian):
     0 null | 1 false | 2 true | 3 int (zigzag LEB128) | 4 f32 | 5 f64
     6 string (u32 len, utf-8) | 7 bytes (u32 len) | 8 list (u32 n, values)
     9 map (u32 n, (u32 key string, value)...) | 10 pptr (i32 fileID, i64 pathID)
+  then the objects' index, so a reader finds them without walking each
+  value (the console walked a level's shared files for 5.7 s):
+    n x (i64 pathID, i32 classID, u32 type-name string, u32 value offset,
+         u32 value length, u32 font hole offset, u32 font hole length)
+    u32 index offset, u32 n, 'CHIX', u32 1
+  offsets from the file's start; the font hole is the object's first
+  m_FontData of 1 MB or more (its bytes, read when the font is drawn), 0 0
+  for none. Readers of the objects alone stop before the index.
 
 Reads the game folder only; never writes into it.
 """
@@ -50,6 +58,7 @@ class Writer:
         self.strings = {}
         self.slist = []
         self.buf = bytearray()
+        self.hole = None   # (offset in buf, length) of the object's first m_FontData of 1 MB+
 
     def sid(self, s):
         i = self.strings.get(s)
@@ -105,7 +114,12 @@ class Writer:
             self.u8(9); self.u32(len(v))
             for k, x in v.items():
                 self.u32(self.sid(k))
+                at = len(self.buf)
                 self.value("_omitted" if k in OMIT_KEYS and x not in (None, "", b"") else x)
+                if k == "m_FontData" and self.hole is None and self.buf[at] == 7:
+                    n = struct.unpack_from("<I", self.buf, at + 1)[0]
+                    if n >= 1 << 20:
+                        self.hole = (at + 5, n)
         elif isinstance(v, (list, tuple)) and len(v) >= 16 and all(type(x) is int and 0 <= x <= 255 for x in v):
             # Byte blobs UnityPy reads as integer lists (a font's m_FontData,
             # mesh index buffers): raw bytes, which the engine skips in one
@@ -176,18 +190,29 @@ def convert_file(sf, out_path, stats):
     for ext in sf.externals:
         body.u32(body.sid(ext.path))
     body.u32(len(objects))
+    index = []
     for path_id, class_id, tname, tree in objects:
-        body.i64(path_id); body.i32(class_id); body.u32(body.sid(tname))
+        tid = body.sid(tname)
+        body.i64(path_id); body.i32(class_id); body.u32(tid)
+        at = len(body.buf)
+        body.hole = None
         body.value(tree)
+        index.append((path_id, class_id, tid, at, len(body.buf) - at, body.hole))
     head = bytearray(b"CHOB") + struct.pack("<I", 1) + struct.pack("<I", len(body.slist))
     for s in body.slist:
         b = s.encode("utf-8", "surrogateescape")
         head += struct.pack("<I", len(b)) + b
+    base = len(head)
+    table = bytearray()
+    for path_id, class_id, tid, at, n, hole in index:
+        table += struct.pack("<qiIIIII", path_id, class_id, tid, base + at, n, base + hole[0] if hole else 0, hole[1] if hole else 0)
+    table += struct.pack("<II4sI", base + len(body.buf), len(index), b"CHIX", 1)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     tmp = out_path + ".tmp"
     with open(tmp, "wb") as f:
         f.write(head)
         f.write(body.buf)
+        f.write(table)
     os.replace(tmp, out_path)
 
 
