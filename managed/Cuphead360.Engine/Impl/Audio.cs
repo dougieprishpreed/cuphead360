@@ -14,6 +14,11 @@ namespace Cuphead360.Engine
         public AudioMixerGroup Group;
         public float Volume = 1f, Pitch = 1f, Pan, SpatialBlend;
         public bool Loop, Mute, PlayOnAwake = true, IgnoreListenerPause, IgnoreListenerVolume;
+        // 3D: AudioRolloffMode (0 logarithmic, 1 linear, 2 custom), distances in world units, spread in degrees.
+        public int Rolloff;
+        public float MinDistance = 1f, MaxDistance = 500f, Spread;
+        /// <summary>The custom curves over distance / MaxDistance, as serialized (null: none; a single key is a constant).</summary>
+        public List<Keyframe> RolloffCurve, BlendCurve, SpreadCurve;
         /// <summary>The voice Play() started (null when stopped); one-shots are separate voices.</summary>
         internal Audio.Voice Main;
         /// <summary>Playback position set while stopped (Unity starts the next Play there).</summary>
@@ -30,6 +35,23 @@ namespace Cuphead360.Engine
             Loop = Tree.Bool(t, "Loop");
             Mute = Tree.Bool(t, "Mute");
             Pan = Tree.Float(t, "Pan2D");
+            Rolloff = (int)Tree.Int(t, "rolloffMode");
+            MinDistance = Tree.Float(t, "MinDistance", 1f);
+            MaxDistance = Tree.Float(t, "MaxDistance", 500f);
+            RolloffCurve = Keys(t, "rolloffCustomCurve");
+            BlendCurve = Keys(t, "panLevelCustomCurve");
+            SpreadCurve = Keys(t, "spreadCustomCurve");
+            SpatialBlend = BlendCurve != null ? BlendCurve[0].value : 0f;
+            Spread = SpreadCurve != null ? SpreadCurve[0].value * 360f : 0f;
+        }
+
+        static List<Keyframe> Keys(object t, string key)
+        {
+            var list = Tree.List(Tree.Get(t, key), "m_Curve");
+            if (list.Count == 0) return null;
+            var keys = new List<Keyframe>(list.Count);
+            foreach (var k in list) keys.Add(new Keyframe(Tree.Float(k, "time"), Tree.Float(k, "value"), Tree.Float(k, "inSlope"), Tree.Float(k, "outSlope")));
+            return keys;
         }
 
         public override void CopyFrom(NComponent src, Dictionary<NObject, NObject> map)
@@ -37,6 +59,8 @@ namespace Cuphead360.Engine
             var s = (NAudioSource)src;
             Clip = s.Clip; Group = s.Group; Volume = s.Volume; Pitch = s.Pitch; Pan = s.Pan; SpatialBlend = s.SpatialBlend;
             Loop = s.Loop; Mute = s.Mute; PlayOnAwake = s.PlayOnAwake; IgnoreListenerPause = s.IgnoreListenerPause; IgnoreListenerVolume = s.IgnoreListenerVolume;
+            Rolloff = s.Rolloff; MinDistance = s.MinDistance; MaxDistance = s.MaxDistance; Spread = s.Spread;
+            RolloffCurve = s.RolloffCurve; BlendCurve = s.BlendCurve; SpreadCurve = s.SpreadCurve;
         }
 
         // Unity plays a playOnAwake source when it becomes active and stops every
@@ -48,6 +72,27 @@ namespace Cuphead360.Engine
         }
 
         public override void Removed() => Audio.StopAll(this);
+    }
+
+    /// <summary>An AudioListener: where 3D sources are heard from (every one made is kept, the newest live one listens).</summary>
+    public sealed class NAudioListener : NComponent
+    {
+        static readonly List<NAudioListener> made = new List<NAudioListener>();
+        public NAudioListener() { made.Add(this); }
+
+        public static NAudioListener Active
+        {
+            get
+            {
+                for (int i = made.Count - 1; i >= 0; i--)
+                {
+                    var l = made[i];
+                    if (l.Destroyed) { made.RemoveAt(i); continue; }
+                    if (l.Enabled && l.GameObject != null && l.GameObject.ActiveInHierarchy) return l;
+                }
+                return null;
+            }
+        }
     }
 
     /// <summary>
@@ -88,8 +133,8 @@ namespace Cuphead360.Engine
             public void Dispose() => r.Dispose();
         }
 
-        /// <summary>Opens a converted clip (.ogg) for decoding, or null; the console host swaps in its native decoder.</summary>
-        public static Func<string, IClipReader> OpenReader = path => new NVorbisClip(path);
+        /// <summary>Opens a converted clip (.ogg) for decoding, or null if it isn't there; the console host swaps in its native decoder.</summary>
+        public static Func<string, IClipReader> OpenReader = path => File.Exists(path) ? new NVorbisClip(path) : null;
 
         public sealed class Voice
         {
@@ -164,7 +209,8 @@ namespace Cuphead360.Engine
         static IClipReader Open(Clip c)
         {
             string fn = PathOf(c);
-            var r = fn != null && File.Exists(fn) ? OpenReader(fn) : null;
+            // One lookup (each costs a scan of the folder on the console's FAT32 drive).
+            var r = fn != null ? OpenReader(fn) : null;
             if (r == null)
             {
                 c.Missing = true;
@@ -328,6 +374,9 @@ namespace Cuphead360.Engine
                 if (mix.Length < frames * 2) mix = new float[frames * 2];
                 Array.Clear(mix, 0, frames * 2);
             }
+            var listener = NAudioListener.Active;
+            Vector3 hearAt = default, right = Vector3.right;
+            if (listener != null) { var lt = listener.GameObject.Transform; hearAt = lt.Position; right = lt.Rotation * Vector3.right; }
             for (int vi = voices.Count - 1; vi >= 0; vi--)
             {
                 var v = voices[vi];
@@ -343,9 +392,11 @@ namespace Cuphead360.Engine
                 }
                 GroupGain(s.Group, out float gain, out float gpitch);
                 gain *= s.Mute ? 0f : s.Volume * v.VolumeScale * (s.IgnoreListenerVolume ? 1f : ListenerVolume);
+                float pan = s.Pan;
+                if (listener != null && s.GameObject != null && (s.SpatialBlend > 0f || s.BlendCurve?.Count > 1)) Spatial(s, hearAt, right, ref gain, ref pan);
                 double step = v.Clip.Frequency / (double)Rate * Math.Max(0f, s.Pitch) * gpitch;
                 bool loop = !v.OneShot && s.Loop;
-                bool ended = Advance(v, mix, start, frames, step, gain, s.Pan, loop, render);
+                bool ended = Advance(v, mix, start, frames, step, gain, pan, loop, render);
                 if (ended)
                 {
                     Close(v);
@@ -362,6 +413,37 @@ namespace Cuphead360.Engine
                 capturedFrames += frames;
             }
         }
+
+        /// <summary>
+        /// A 3D source as Unity hears it from the listener: the rolloff
+        /// (logarithmic min/d up to MaxDistance, linear from MinDistance to
+        /// MaxDistance, or the custom curve over distance / MaxDistance) and a
+        /// pan from the listener's right, both weighted by the spatial blend;
+        /// the spread narrows the pan (a stereo approximation of Unity's 3D
+        /// panner; no doppler).
+        /// </summary>
+        static void Spatial(NAudioSource s, Vector3 hearAt, Vector3 right, ref float gain, ref float pan)
+        {
+            var rel = s.GameObject.Transform.Position - hearAt;
+            float d = rel.magnitude, max = Math.Max(s.MaxDistance, 1e-4f), x = d / max;
+            float blend = s.BlendCurve != null && s.BlendCurve.Count > 1 ? Mathf.Clamp01(Eval(s.BlendCurve, x)) : Mathf.Clamp01(s.SpatialBlend);
+            if (blend <= 0f) return;
+            float min = Math.Max(s.MinDistance, 1e-4f), att;
+            if (s.Rolloff == 1) att = d <= min ? 1f : d >= max ? 0f : (max - d) / Math.Max(max - min, 1e-4f);
+            else if (s.Rolloff == 2) att = s.RolloffCurve != null ? Mathf.Clamp01(Eval(s.RolloffCurve, x)) : 1f;
+            else att = d <= min ? 1f : min / Math.Min(d, max);
+            float spread = s.SpreadCurve != null && s.SpreadCurve.Count > 1 ? Eval(s.SpreadCurve, x) * 360f : s.Spread;
+            float side = d > 1e-5f ? Mathf.Clamp(Vector3.Dot(rel, right) / d, -1f, 1f) : 0f;
+            float pan3 = side * (1f - Mathf.Clamp(spread, 0f, 360f) / 360f);
+            gain *= 1f + (att - 1f) * blend;
+            pan += (pan3 - pan) * blend;
+            if (trace3d && Clock.FrameCount % 120 == 0)
+                Log.Line($"TRACE audio3d frame {Clock.FrameCount} {s.GameObject.Name}: listener {hearAt}, distance {d:0.00} of {max:0.0}, attenuation {att:0.000}, blend {blend:0.00}, pan {pan:0.00}");
+        }
+
+        static readonly bool trace3d = Environment.GetEnvironmentVariable("CH360_TRACE_AUDIO3D") == "1";
+
+        static float Eval(List<Keyframe> keys, float x) => Icalls.EvaluateCurve(keys, WrapMode.ClampForever, WrapMode.ClampForever, x);
 
         /// <summary>Mix one voice into the block; returns true when a non-looping voice has finished.</summary>
         static bool Advance(Voice v, float[] dst, int start, int frames, double step, float gain, float pan, bool loop, bool render)
@@ -525,7 +607,15 @@ namespace Cuphead360.Engine
         public static float UnityEngine_AudioSource__get_panStereo(AudioSource self) => AS(self)?.Pan ?? 0f;
         public static void UnityEngine_AudioSource__set_panStereo(AudioSource self, float value) { var s = AS(self); if (s != null) s.Pan = Mathf.Clamp(value, -1f, 1f); }
         public static float UnityEngine_AudioSource__get_spatialBlend(AudioSource self) => AS(self)?.SpatialBlend ?? 0f;
-        public static void UnityEngine_AudioSource__set_spatialBlend(AudioSource self, float value) { var s = AS(self); if (s != null) s.SpatialBlend = value; }
+        public static void UnityEngine_AudioSource__set_spatialBlend(AudioSource self, float value) { var s = AS(self); if (s != null) { s.SpatialBlend = Mathf.Clamp01(value); s.BlendCurve = null; } }
+        public static float UnityEngine_AudioSource__get_minDistance(AudioSource self) => AS(self)?.MinDistance ?? 1f;
+        public static void UnityEngine_AudioSource__set_minDistance(AudioSource self, float value) { var s = AS(self); if (s != null) s.MinDistance = Math.Max(0f, value); }
+        public static float UnityEngine_AudioSource__get_maxDistance(AudioSource self) => AS(self)?.MaxDistance ?? 500f;
+        public static void UnityEngine_AudioSource__set_maxDistance(AudioSource self, float value) { var s = AS(self); if (s != null) s.MaxDistance = Math.Max(0f, value); }
+        public static AudioRolloffMode UnityEngine_AudioSource__get_rolloffMode(AudioSource self) => (AudioRolloffMode)(AS(self)?.Rolloff ?? 0);
+        public static void UnityEngine_AudioSource__set_rolloffMode(AudioSource self, AudioRolloffMode value) { var s = AS(self); if (s != null) s.Rolloff = (int)value; }
+        public static float UnityEngine_AudioSource__get_spread(AudioSource self) => AS(self)?.Spread ?? 0f;
+        public static void UnityEngine_AudioSource__set_spread(AudioSource self, float value) { var s = AS(self); if (s != null) { s.Spread = Mathf.Clamp(value, 0f, 360f); s.SpreadCurve = null; } }
         public static bool UnityEngine_AudioSource__get_mute(AudioSource self) => AS(self)?.Mute ?? false;
         public static void UnityEngine_AudioSource__set_mute(AudioSource self, bool value) { var s = AS(self); if (s != null) s.Mute = value; }
     }

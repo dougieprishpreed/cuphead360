@@ -13,7 +13,8 @@ where that has less error: the bounding box alone left dark texels where
 three colours meet (the title's poker chips).
 Pages larger than --max-size (default 2048) are halved until they fit: the
 game's atlases are 4096 px for 1080p and up, the console draws 720p. UVs
-are normalized, so nothing else changes.
+are normalized, so nothing else changes. Halving is Lanczos-3 on
+premultiplied colour (see halve).
 
 File format (little-endian):
 
@@ -30,6 +31,7 @@ import time
 
 import numpy as np
 import texture2ddecoder
+from PIL import Image
 
 
 def decode(fmt, w, h, data):
@@ -68,9 +70,15 @@ def decode(fmt, w, h, data):
 
 
 def halve(img):
+    """Half size with Pillow's Lanczos-3, which filters RGBA premultiplied by
+    alpha. Against a 2x2 average, on the Root Pack's and the player's atlases
+    encoded and magnified back as the console draws them: colour PSNR +0.1 dB,
+    3-4% more of the source's edge contrast (a Mitchell cubic was blurrier
+    than the average, Catmull-Rom level with it). The halved pages' blur is
+    mostly resolution: their one-texel outlines become half a texel."""
     h, w = img.shape[:2]
-    img = img[:h - h % 2, :w - w % 2].astype(np.uint16)
-    return ((img[0::2, 0::2] + img[1::2, 0::2] + img[0::2, 1::2] + img[1::2, 1::2] + 2) // 4).astype(np.uint8)
+    im = Image.fromarray(np.ascontiguousarray(img[:h - h % 2, :w - w % 2]), "RGBA")
+    return np.asarray(im.resize((w // 2, h // 2), Image.LANCZOS)).copy()
 
 
 def pad4(img):

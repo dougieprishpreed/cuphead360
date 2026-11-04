@@ -116,8 +116,20 @@ int ch360_plat_pad(int index, ch360_pad* out) {
     return index == 0; /* one connected pad, idle (the bot drives input when given) */
 }
 
+/* CH360_DUMP_DRAW=<file>:<n>: every n-th frame's draw list, as u32 frame, u32 length, the bytes
+ * (tools comparing two ways of writing it, such as ConsoleHost's CH360_DRAW=managed). */
+static FILE* dump_file;
+static long dump_every;
+
 void ch360_plat_submit(const unsigned char* d, unsigned len) {
     unsigned p = 8, v, i, views;
+    if (dump_file && dump_every > 0 && frame_no % dump_every == 0) {
+        unsigned head[2];
+        head[0] = (unsigned)frame_no;
+        head[1] = len;
+        fwrite(head, 4, 2, dump_file);
+        fwrite(d, 1, len, dump_file);
+    }
     if (len < 8 || ch360_u32(d) != 0x31464843u) { bad_lists++; return; }
     views = ch360_u32(d + 4);
     views_seen = views;
@@ -227,11 +239,23 @@ int main(int argc, char** argv) {
         if (wav) fwrite("\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 1, 44, wav);
     }
     trace_dir = getenv("CH360_TRACE_TEX");
+    if (getenv("CH360_DUMP_DRAW")) {
+        static char path[1024];
+        char* colon;
+        strncpy(path, getenv("CH360_DUMP_DRAW"), sizeof(path) - 1);
+        colon = strrchr(path, ':');
+        if (colon && colon > path + 1) {
+            *colon = 0;
+            dump_every = atol(colon + 1);
+            dump_file = fopen(path, "wb");
+        }
+    }
     frame_ms = getenv("CH360_FRAME_MS") ? atol(getenv("CH360_FRAME_MS")) : 0;
     for (i = 0; i < TRACE_IDS; i++) tex_bytes[i] = -1;
     started = clock();
     code = ch360_run(root, guestc, guest, memory_mb, 64, -1);
     if (wav) { wav_header(wav, audio_frames); fclose(wav); }
+    if (dump_file) fclose(dump_file);
     printf("[host] exit %d after %ld frames; linear memory %u MB; bad lists %lu\n", code, frame_no, ch360_memory_kb() / 1024,
            bad_lists);
     return code;

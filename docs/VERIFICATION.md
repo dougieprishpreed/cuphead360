@@ -3,6 +3,40 @@
 Newest first. Each entry says what was run, on which build, and what it
 showed. Windows entries use the JIT oracle (`work/managed/jit`).
 
+## 2026-11-03 eighth hardware run and round 13 (hitches, the map, the results board, sound)
+
+The eighth run (`work/console/hw08/`), round 12 build: the title's chips
+were clean. The map ran at ~7 fps: 145 ms a frame, of which list 38.6,
+submit 30.5, audio 30.1, update 20.7, fixed 8.2 and physics 4.8 ms. The
+Root Pack ran at 55-65 ms a frame (~16 fps; 16 ms of it fixed), with
+hitches throughout; the user beat it. The user reported:
+- the boss's textures blurry and "compressed" next to the rest;
+- the results board's text layered;
+- the map's music quiet under loud water and animal noise;
+- no EX pose for Cuphead (the EX shot itself fires);
+- a hitch in the opening logo.
+
+| Finding | How |
+| --- | --- |
+| Every texture load cost at least ~100 ms, a 4 KB one included, and a clip's first play cost ~650 ms (`audio=640-700` frames after a shot). `GameData/ctex` held 1,337 and `GameData/audio` 3,991 files with 70-110 character names, and FAT32 scans a folder from the start for each open. A clip also ran a `File.Exists` before its open, so two scans. The object folder (163 files) opened in well under 25 ms | the texture lines' times against their sizes (a fixed ~100 ms plus ~40 ms/MB); the heartbeat's file counts at the map load; file counts per staged folder |
+| A 4 MB atlas cost ~220 ms more in the frame's submit than its load took. vulkan4xenon copies DXT data into images on the CPU, row by row, from the staging buffer, and that buffer was in the GPU's write-combined memory (read back at 18.5 MB/s by vulkan4xenon's own measurement). vulkan4xenon offers a cached memory type for buffers that are only copied from | `SLOW frame` submit against the texture line; vulkan4xenon `src/command_buffer.c` (drawn_upload: only 8_8_8_8 on the GPU), `src/transfer.c`, `src/memory.c` |
+| The results board's layered lines: two banner texts and their flash copies sit under a UGUI Mask that is 0 px wide at that point (a wipe). The console host ignored masks, so they drew over "TOP-GRADE" | PC capture of scene_win (frame 20140 of the bot run): items with stencil state, and their screen boxes |
+| The map's ambience (8 looping hint and bridge sources: water, frogs, flower, blimp...) is fully 3D: spatial blend 1, custom rolloff falling to 0 at 4-5.6 units. The engine ignored 3D settings and played them all at full volume everywhere | the scene's AudioSources (UnityPy: panLevelCustomCurve, rolloffCustomCurve, Min/MaxDistance); the AudioListener is on MapCamera |
+| The boss's atlases are 4096 px, halved to 2048. The potato is drawn 648x516 px at 720p from 244x194 console texels: 2.8 px a texel (Cuphead: 2.2). Halving makes its one-texel outlines half a texel, so they go grey; that is resolution, and no filter recovers it (below) | a fight frame's capture: screen pixels per texel per sprite; source and console crops side by side |
+| EX: not reproduced on PC. The JIT at 1/60 and 1/30, and the translated build at 1/60, all draw the pose. For the game's 0.083 s after shooting stops, the shooting layers (1, 2) keep weight 1 over layer 0's EX state, so the first frames show idle or run (the game's own code); the pose follows. The console build now traces its first three EX animations | JIT bot with `fight ex` and its captures; CH360_STEP=1/30 from the fight; animator traces; native bot traces (below) |
+
+| Change | Check |
+| --- | --- |
+| 3D audio: the AudioSource's 3D fields (rolloff mode, min/max distance, the rolloff, spatial blend and spread curves) and an NAudioListener. The mixer attenuates and pans each 3D voice from the newest live listener: Unity's logarithmic, linear or custom rolloff weighted by the spatial blend, and a pan from the listener's right narrowed by the spread (no doppler). The 3D getters and setters are implemented | JIT bot: the title, intro and house mix is identical (RMS 1428 both); the map's mix drops from 1846 to 671 RMS. CH360_TRACE_AUDIO3D: the listener is on MapCamera at z 0; near the Root Pack entrance its hint plays at full volume (distance 0.36) and the others at 0 |
+| Staged short names for ctex and audio (`stage_console.py`; `ch360_staged_name` in C), with a collision check. `ogg_open` maps clip paths, and the texture loader opens XX/YYYYYYYY.CTX. A clip open is one lookup (no `File.Exists` first). HostClip closes a handle that has no channels | dry run over all 5,328 names: no collisions; the C and Python names agree (test program); not yet on the console |
+| Staging buffers take vulkan4xenon's cached memory (buffers only copied from); texture files are read straight into it | build only; the next log should say "vk: staging in cached memory" |
+| Native draw path: ConsoleHost calls `draw_view`/`draw_item`/`draw_end`, and the glue writes the CHF1 list. With RenderList.HostTransforms, a sprite under an orthographic camera carries its mesh vertices and one affine map (ProjView * LocalToWorld, the camera rect and the flips) instead of per-vertex screen positions. The old path stays behind CH360_DRAW=managed | native bot, 20,400 frames, run both ways, with every 500th frame's draw list dumped (CH360_DUMP_DRAW): 40 frames, 3,720 items and 286,185 vertices match in count, texture, mode, colour and uv, with positions within 0.0005 px. The one frame that differs is the results board (34 items against 38: the four masked banners clipped away). BOT lines identical. PC map frames: list 2.0 -> 0.85 ms, submit 0.55 -> 0.4 |
+| UGUI masks on the console: nested stencil values are kept as rectangles per view, and items that test them are clipped (Sutherland-Hodgman per triangle, in the glue); an empty mask hides them | the results board frame above |
+| Converter: halving uses Pillow's Lanczos-3 (premultiplied alpha); the 14 boss and player atlases are re-encoded. The other 866 halved pages keep the 2x2 average for now | filter_compare (scratch) on the potato's and Cuphead's atlases (encode, decode, magnify 2x bilinearly, compare with the 4096 source). Colour PSNR, potato / Cuphead: box 22.92 / 23.64 dB (gradient 0.647 / 0.698 of the source's); premultiplied box 22.94 / 23.70; Mitchell 22.14 (0.598); Catmull-Rom 22.74 (0.641); Lanczos-3 23.03 / 23.75 (0.675 / 0.720) |
+| EX trace on the console: the first three Plays of `Ex.*` states on PlayerOne open a 30-frame trace (layers, weights, bools, and the sprite drawn) | native bot: it opened at frames 6975, 7335 and 8415; the EX pose draws from its 7th frame (the game's 0.083 s shooting-layer hold), as on the JIT |
+| Bot and tools: `fight N ex` presses B every 2 s. CH360_STEP sets the frame step for headless JIT runs (`<s>[@frame]`) and scripted console runs. Added CH360_TRACE_ANIM_FRAMES. The animator trace no longer crashes on transitions without conditions, and an animator update no longer allocates an array per layer | JIT bot with ex: the Root Pack won on the 4th attempt (frame 19779), then the results board, then back on the map; JIT capture byte-identical before and after the engine changes |
+| Built and staged: the XEX (record_forms.py added compares in 19 files, no carry patterns); all 5,328 textures and clips under staged names, the 5,328 old loose files removed; saves untouched | not yet run on the console |
+
 ## 2026-11-03 seventh hardware run and round 12 (frame rate on the map, the title's chips)
 
 The seventh run (`work/console/hw07/`): the round 11b build loaded the

@@ -3,7 +3,8 @@
  * platform layer implements: host_native.c on the PC (headless checks of
  * the translated C), xsdk/main.cpp on the Xbox 360.
  *
- * The draw list is the managed ConsoleHost's format (little-endian):
+ * The draw list (written by the glue from ConsoleHost's draw_view/draw_item
+ * calls, or by ConsoleHost itself with CH360_DRAW=managed; little-endian):
  *   u32 'CHF1', u32 views
  *   view: f32 x y w h, u32 clear, f32 r g b a, u32 items
  *   item: i32 texture (-1 none), u32 mode, f32 blend r g b a, u32 vertices
@@ -59,6 +60,14 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
 int ch360_start(unsigned stack_mb, int hw_thread);
 /* The folder the guest's "/" is (ch360_ogg.c opens clips under it). */
 void ch360_ogg_root(const char* root_dir);
+/* Staged names (tools/stage_console.py): on the console, converted textures
+ * and clips are <folder>/XX/YYYYYYYY.CTX/.OGG, XX the top byte and YYYYYYYY
+ * the low word of FNV-1a 64 of the file's key, so no folder holds thousands
+ * of long names (FAT32 scans a folder from the start for every open). The
+ * console host sets ch360_staged_names; the PC reads the loose files. */
+extern int ch360_staged_names;
+/* "XX/YYYYYYYY" and a NUL (12 bytes) for the len bytes of key. */
+void ch360_staged_name(const char* key, size_t len, char* out);
 /* The player's linear memory, in KB (committed as it grows). */
 unsigned ch360_memory_kb(void);
 /* Moves the player's buffered stdout into the log now. One thread drains:

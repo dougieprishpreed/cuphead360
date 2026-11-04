@@ -293,6 +293,7 @@ private:
     size_t ring_used_;
     std::vector<std::pair<VkBuffer, VkDeviceMemory> > staging_;   // uploads larger than the ring
     std::vector<unsigned char> bounce_;                            // file reads, copied on into staging
+    bool staging_cached_;                                          // staging in the CPU's cached memory
     std::vector<unsigned char> on_view_;                           // per item of the frame's list
     bool overflow_logged_;
     unsigned loads_logged_;
@@ -320,7 +321,23 @@ bool Renderer::make_buffer(VkBuffer* buf, VkDeviceMemory* mem, void** map, VkDev
     memset(&ai, 0, sizeof(ai));
     ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     ai.allocationSize = req.size;
-    ai.memoryTypeIndex = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    // Buffers only copied from (staging) take the CPU's cached memory where
+    // there is one: vulkan4xenon copies DXT data into images on the CPU, and
+    // reading the GPU's write-combined memory back ran at 18.5 MB/s
+    // (vulkan4xenon's transfer.c), ~220 ms of every 4 MB atlas in the eighth run.
+    const VkMemoryPropertyFlags visible = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    bool cached = false;
+    ai.memoryTypeIndex = memory_type(req.memoryTypeBits, visible);
+    if (usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+        for (uint32_t i = 0; i < mem_props_.memoryTypeCount; ++i)
+            if ((req.memoryTypeBits & (1u << i)) &&
+                (mem_props_.memoryTypes[i].propertyFlags & (visible | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) ==
+                    (visible | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) {
+                ai.memoryTypeIndex = i;
+                cached = true;
+                break;
+            }
+    if (usage == VK_BUFFER_USAGE_TRANSFER_SRC_BIT) staging_cached_ = cached;
     if (!vk(vkAllocateMemory(dev_, &ai, NULL, mem), "vkAllocateMemory (buffer)")) {
         vkDestroyBuffer(dev_, *buf, NULL);
         return false;
@@ -579,6 +596,7 @@ bool Renderer::init() {
     if (!make_buffer(&ring_buf_, &ring_mem_, &rm, STAGING_RING, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) return false;
     ring_map_ = (unsigned char*)rm;
     ring_used_ = 0;
+    logf("vk: staging in %s memory", staging_cached_ ? "cached" : "write-combined");
     bounce_.resize(256 * 1024);
     unsigned char px[4] = { 255, 255, 255, 255 };
     if (!upload(white_, TARGET_FORMAT, 1, 1, px, 4)) return false;
@@ -920,13 +938,16 @@ void Renderer::texture_pixels(int id, int w, int h, const unsigned char* bgra) {
     }
 }
 
-// A converted texture (tools/convert_console.py's .ctx) on first use, read
-// in pieces through a bounce buffer into staging (the kernel's copies into
-// the GPU's write-combined memory aren't safe: g_memcpy is). Out of memory,
-// it is drawn without and tried again two seconds later.
+// A converted texture (tools/convert_console.py's .ctx, staged as
+// ctex/XX/YYYYYYYY.CTX) on first use, read straight into staging when that
+// is cached memory, else in pieces through a bounce buffer (the kernel's
+// copies into the GPU's write-combined memory aren't safe: g_memcpy is).
+// Out of memory, it is drawn without and tried again two seconds later.
 void Renderer::load(Tex& t) {
     if (t.image || t.failed || t.key.empty() || frame_no_ < t.retry_at) return;
-    std::string path = "game:/GameData/ctex/" + t.key + ".ctx";
+    char staged[12];
+    ch360_staged_name(t.key.c_str(), t.key.size(), staged);
+    std::string path = std::string("game:/GameData/ctex/") + staged + ".CTX";
     double t0 = now_ms();
     unsigned char head[28];
     int fd = open(path.c_str(), O_RDONLY);
@@ -935,7 +956,7 @@ void Renderer::load(Tex& t) {
              n = ok ? ch360_u32(head + 24) : 0;
     if (!ok || w == 0 || h == 0 || w > 8192 || h > 8192 || n == 0) {
         if (fd >= 0) close(fd);
-        logf("texture %s: missing or unreadable (run tools/convert_console.py)", path.c_str());
+        logf("texture %s (%s): missing or unreadable (run tools/convert_console.py, stage_console.py)", t.key.c_str(), path.c_str());
         t.failed = true;
         return;
     }
@@ -956,9 +977,10 @@ void Renderer::load(Tex& t) {
     size_t got = 0;
     while (got < n) {
         size_t want = n - got < bounce_.size() ? n - got : bounce_.size();
-        ssize_t r = read(fd, &bounce_[0], want);
+        if (staging_cached_) want = n - got < (4u << 20) ? n - got : (4u << 20);
+        ssize_t r = read(fd, staging_cached_ ? dst + got : &bounce_[0], want);
         if (r <= 0) break;
-        g_memcpy(dst + got, &bounce_[0], (size_t)r);
+        if (!staging_cached_) g_memcpy(dst + got, &bounce_[0], (size_t)r);
         got += (size_t)r;
     }
     close(fd);
@@ -1465,6 +1487,7 @@ int main() {
     // The player's linear memory is reserved first (committed as it grows):
     // xsdk's heap takes the free address space at its first growth.
     static const char* const argv[] = { "cuphead360", "run", "--console", "1", "--data", "/GameData", "--save", "/save" };
+    ch360_staged_names = 1;   // GameData/ctex and audio as stage_console.py writes them
     if (ch360_prepare("game:/", (int)(sizeof(argv) / sizeof(argv[0])), argv, 448) != 0) {
         logf("player set-up failed");
         flush_log();

@@ -150,6 +150,7 @@ namespace Cuphead360.Player
                     case "fight":
                         {
                             int timeout = s.Length > 1 ? I(s[1]) : 36000;
+                            fightEx = s.Length > 2 && s[2] == "ex";
                             if (t == 0) fightScene = Cuphead360.Engine.Scenes.Active?.Name;
                             if (Cuphead360.Engine.Scenes.Active?.Name != fightScene) { Next("scene changed to " + Cuphead360.Engine.Scenes.Active?.Name); continue; }
                             if (t > timeout) { Next("TIMEOUT"); continue; }
@@ -250,6 +251,7 @@ namespace Cuphead360.Player
         }
 
         string fightScene;
+        bool fightEx;
         int jumpUntil, dashUntil, dashCooldown, jumpCooldown;
         readonly Dictionary<NGameObject, Vector3> lastPos = new Dictionary<NGameObject, Vector3>();
 
@@ -327,6 +329,12 @@ namespace Cuphead360.Player
             if (t < jumpUntil) p.Buttons |= PadButton.A;
             if (dashCooldown > 0) dashCooldown--;
             if (t < dashUntil) p.Buttons |= PadButton.Y;   // Dash (Rewired map: gamepad template top row 2)
+            // "fight N ex": an EX shot (B) now and then; it spends a full super card, and does nothing without one.
+            if (fightEx && !jump && !threat && t % 120 < 4)
+            {
+                p.Buttons |= PadButton.B;
+                if (t % 120 == 0) Console.WriteLine($"BOT ex at frame {frame}");
+            }
         }
 
         /// <summary>A GameObject's position, or for a map entrance the point the game measures interaction from.</summary>

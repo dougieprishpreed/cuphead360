@@ -65,11 +65,19 @@ namespace Cuphead360.Engine
         public sealed class Item
         {
             // The name is for captures and tools: built when asked, not per frame.
-            internal string BaseName = "", Suffix;
-            public string Name => Suffix == null ? BaseName : BaseName + Suffix;
+            internal string BaseName = "", Suffix, SpriteName;
+            public string Name => SpriteName != null ? BaseName + " [" + SpriteName + "]" : Suffix == null ? BaseName : BaseName + Suffix;
             public Texture Texture;
             public Material Material;
             public Vector2[] Screen;   // pixels, origin bottom-left
+            /// <summary>
+            /// With HostTransforms, a sprite under an orthographic camera leaves
+            /// Screen null and carries its mesh's own vertices (shared, not to be
+            /// written) and the map to pixels: x' = A00 x + A01 y + B0,
+            /// y' = A10 x + A11 y + B1 (flips folded in).
+            /// </summary>
+            public Vector2[] Local;
+            public float A00, A01, B0, A10, A11, B1;
             public Vector2[] Uv;       // Unity orientation (v up)
             public Color32[] Colors;   // per vertex, or null
             public int[] Triangles;
@@ -106,7 +114,7 @@ namespace Cuphead360.Engine
         {
             if (pooled == pool.Count) pool.Add(new Item());
             var it = pool[pooled++];
-            it.BaseName = ""; it.Suffix = null; it.Texture = null; it.Material = null; it.Screen = null; it.Uv = null; it.Colors = null;
+            it.BaseName = ""; it.Suffix = null; it.SpriteName = null; it.Texture = null; it.Material = null; it.Screen = null; it.Local = null; it.Uv = null; it.Colors = null;
             it.Triangles = null; it.Tint = Color.white; it.Layer = it.Order = 0; it.Depth = 0; it.Sequence = 0; it.Kind = "sprite"; it.GoLayer = 0;
             it.Stencil = null;
             return it;
@@ -151,13 +159,26 @@ namespace Cuphead360.Engine
         /// the world map). The same arithmetic in the same order, so the
         /// results are the same bits.
         /// </summary>
+        /// <summary>
+        /// The console host transforms sprites itself (native code): items get
+        /// Local and the affine map instead of Screen. Off on Windows (captures
+        /// and the live window read Screen).
+        /// </summary>
+        public static bool HostTransforms;
+
         struct CamXform
         {
-            public bool Has;
-            public Matrix4x4 View, Proj;
+            public bool Has, Ortho;
+            public Matrix4x4 View, Proj, ProjView;
             public Rect Pixel;
-            public static CamXform Of(NCamera cam) =>
-                cam == null ? default : new CamXform { Has = true, View = cam.WorldToCamera, Proj = cam.Projection, Pixel = cam.PixelRect };
+            public static CamXform Of(NCamera cam)
+            {
+                if (cam == null) return default;
+                var x = new CamXform { Has = true, View = cam.WorldToCamera, Proj = cam.Projection, Pixel = cam.PixelRect };
+                x.ProjView = x.Proj * x.View;
+                x.Ortho = x.Proj.m30 == 0f && x.Proj.m31 == 0f && x.Proj.m32 == 0f && x.Proj.m33 == 1f;
+                return x;
+            }
             public Vector3 Viewport(Vector3 p)
             {
                 var v = View.MultiplyPoint3x4(p);
@@ -247,17 +268,30 @@ namespace Cuphead360.Engine
             float depth = xf.Viewport(pos).z;
             if (depth < cam.Near || depth > cam.Far) return null;   // outside the clip planes
             var it = NewItem();
-            var screen = it.ScreenOf(info.Vertices.Length);
-            for (int i = 0; i < screen.Length; i++)
+            if (HostTransforms && xf.Ortho)
             {
-                var v = info.Vertices[i];
-                if (sr.FlipX) v.x = -v.x;
-                if (sr.FlipY) v.y = -v.y;
-                screen[i] = ToScreen(xf, m.MultiplyPoint3x4(new Vector3(v.x, v.y, 0)));
+                // One map for the whole sprite (the camera is orthographic, its z is 0): the host applies it per vertex.
+                var pvm = xf.ProjView * m;
+                float hx = 0.5f * xf.Pixel.width, hy = 0.5f * xf.Pixel.height, fx = sr.FlipX ? -1f : 1f, fy = sr.FlipY ? -1f : 1f;
+                it.A00 = hx * pvm.m00 * fx; it.A01 = hx * pvm.m01 * fy; it.B0 = xf.Pixel.x + hx * (pvm.m03 + 1f);
+                it.A10 = hy * pvm.m10 * fx; it.A11 = hy * pvm.m11 * fy; it.B1 = xf.Pixel.y + hy * (pvm.m13 + 1f);
+                it.Local = info.Vertices;
             }
-            it.BaseName = sr.GameObject.Name; it.Suffix = " [" + info.Name + "]"; it.Texture = tex;
+            else
+            {
+                var screen = it.ScreenOf(info.Vertices.Length);
+                for (int i = 0; i < screen.Length; i++)
+                {
+                    var v = info.Vertices[i];
+                    if (sr.FlipX) v.x = -v.x;
+                    if (sr.FlipY) v.y = -v.y;
+                    screen[i] = ToScreen(xf, m.MultiplyPoint3x4(new Vector3(v.x, v.y, 0)));
+                }
+                it.Screen = screen;
+            }
+            it.BaseName = sr.GameObject.Name; it.SpriteName = info.Name; it.Texture = tex;
             it.Material = sr.Materials.Length > 0 ? sr.Materials[0] : null;
-            it.Screen = screen; it.Uv = uv; it.Triangles = info.Triangles32; it.Tint = sr.Color;
+            it.Uv = uv; it.Triangles = info.Triangles32; it.Tint = sr.Color;
             it.Layer = SortingLayers.Index(sr.SortingLayerID); it.Order = sr.SortingOrder;
             it.Depth = depth; it.GoLayer = sr.GameObject.Layer;
             return it;

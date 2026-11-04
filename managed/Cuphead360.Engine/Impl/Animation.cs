@@ -602,11 +602,42 @@ namespace Cuphead360.Engine
         // ---------------------------------------------------------------- update
 
         public static string TraceName = Environment.GetEnvironmentVariable("CH360_TRACE_ANIM");
+        // CH360_TRACE_ANIM_FRAMES=a-b: every update of the traced animator's layers in those frames.
+        static readonly (int from, int to) traceFrames = ParseRange(Environment.GetEnvironmentVariable("CH360_TRACE_ANIM_FRAMES"));
+        static (int, int) ParseRange(string v)
+        {
+            var p = (v ?? "").Split('-');
+            return p.Length == 2 && int.TryParse(p[0], out int a) && int.TryParse(p[1], out int b) ? (a, b) : (-1, -1);
+        }
+        /// <summary>A trace window a host opens at run time (the console's EX check): WindowName's animator until frame WindowUntil.</summary>
+        public static string WindowName;
+        public static int WindowUntil = -1;
+        /// <summary>State name hashes whose Play on WindowName's animator opens the window (WindowFrames frames, WindowsLeft times).</summary>
+        public static HashSet<int> WindowOnPlay;
+        public static int WindowFrames = 30, WindowsLeft;
+        internal bool TraceNow => GameObject != null && (
+            (TraceName != null && GameObject.Name.Contains(TraceName) && Clock.FrameCount >= traceFrames.from && Clock.FrameCount <= traceFrames.to)
+            || (WindowName != null && Clock.FrameCount <= WindowUntil && GameObject.Name == WindowName));
 
         public void Update(float dt)
         {
             if (!Initialized) { Rebind(false); if (!Initialized) return; }
             for (int li = 0; li < Layers.Length; li++) UpdateLayer(li, dt * Speed);
+            if (TraceNow)
+            {
+                // One line a frame: each weighted layer's state (name hash), time / length, and a transition's target.
+                var sb = new System.Text.StringBuilder($"TRACE anim frame {Clock.FrameCount} {GameObject.Name} dt {dt:0.0000}:");
+                for (int li = 0; li < Layers.Length; li++)
+                {
+                    var l = Layers[li];
+                    if (li > 0 && l.Weight <= 0f) continue;
+                    var cs = StateAt(li, l.Current.State);
+                    var ns = l.Next != null ? StateAt(li, l.Next.State) : null;
+                    sb.Append($" L{li} w{l.Weight:0.##} {cs?.NameId:X8} {l.Current.Time:0.000}/{StateLength(li, l.Current.State):0.000}");
+                    if (ns != null) sb.Append($" ->{ns.NameId:X8} {l.TransitionTime:0.000}/{l.TransitionLength:0.000}");
+                }
+                Log.Line(sb.ToString());
+            }
             Apply();
             for (int li = 0; li < Layers.Length; li++) FireEvents(li);
         }
@@ -619,7 +650,8 @@ namespace Cuphead360.Engine
         void UpdateLayer(int li, float dt)
         {
             var l = Layers[li];
-            foreach (var p in new[] { l.Current, l.Next }) if (p != null) { p.Prev = p.Time; }
+            l.Current.Prev = l.Current.Time;
+            if (l.Next != null) l.Next.Prev = l.Next.Time;
             if (l.PendingPlay is (int ps, float pn))
             {
                 l.PendingPlay = null;
@@ -723,7 +755,7 @@ namespace Cuphead360.Engine
             }
             else if (tr.Conditions.Length == 0) return false;   // no exit time and no conditions never fires
             bool held = ConditionsHold(tr.Conditions, triggers, n1, exitReached);
-            if (TraceName != null && GameObject != null && GameObject.Name.Contains(TraceName) && Clock.FrameCount % 60 == 0)
+            if (TraceName != null && GameObject != null && GameObject.Name.Contains(TraceName) && Clock.FrameCount % 60 == 0 && tr.Conditions.Length > 0)
                 Log.Line($"TRACE animator {GameObject.Name} transition ->{tr.Destination} conds={tr.Conditions.Length} c0=({tr.Conditions[0].Mode},{tr.Conditions[0].Param}) param={ParamIndex(tr.Conditions[0].Param)} bool={(ParamIndex(tr.Conditions[0].Param) >= 0 ? Bools[ParamIndex(tr.Conditions[0].Param)] : false)} held={held}");
             return held;
         }
@@ -1339,7 +1371,11 @@ namespace Cuphead360.Engine
         public static void UnityEngine_Animator__SetLayerWeight(Animator self, int layerIndex, float weight)
         {
             var a = Ready(self);
-            if (a != null && layerIndex > 0 && layerIndex < a.Layers.Length) a.Layers[layerIndex].Weight = weight;
+            if (a != null && layerIndex > 0 && layerIndex < a.Layers.Length)
+            {
+                if (a.TraceNow && a.Layers[layerIndex].Weight != weight) Log.Line($"TRACE anim frame {Clock.FrameCount} {a.GameObject.Name} layer {layerIndex} weight {weight}");
+                a.Layers[layerIndex].Weight = weight;
+            }
         }
         public static bool UnityEngine_Animator__HasState(Animator self, int layerIndex, int stateID) => Ready(self)?.FindState(layerIndex, (uint)stateID) >= 0;
 
@@ -1356,6 +1392,13 @@ namespace Cuphead360.Engine
             int st = a.FindState(layer, (uint)hash);
             if (st < 0) { Log.Line("UNITY Warning: Animator.GotoState: State could not be found"); return; }
             var l = a.Layers[layer];
+            if (NAnimator.WindowOnPlay != null && NAnimator.WindowsLeft > 0 && a.GameObject?.Name == NAnimator.WindowName && NAnimator.WindowOnPlay.Contains(hash))
+            {
+                NAnimator.WindowsLeft--;
+                NAnimator.WindowUntil = Clock.FrameCount + NAnimator.WindowFrames;
+                Log.Line($"TRACE anim frame {Clock.FrameCount} {a.GameObject.Name}: window opened by its play of {hash:X8} on layer {layer}");
+            }
+            if (a.TraceNow) Log.Line($"TRACE anim frame {Clock.FrameCount} {a.GameObject.Name} play layer {layer} state {hash:X8} (#{st}) at {normalizedTime} cross {cross}");
             if (cross.HasValue) { l.PendingCross = (st, cross.Value, offset, fixedTime); l.PendingPlay = null; }
             else
             {
@@ -1423,6 +1466,7 @@ namespace Cuphead360.Engine
         {
             var a = Ready(self); int i = Param(a, id, null, "SetBool");
             if (NAnimator.TraceName != null && a?.GameObject != null && a.GameObject.Name.Contains(NAnimator.TraceName)) Log.Line($"TRACE animator {a.GameObject.Name} SetBool/Trigger {id}={value} index {i} frame {Clock.FrameCount}");
+            else if (a != null && a.TraceNow && i >= 0 && a.Bools[i] != value) Log.Line($"TRACE anim frame {Clock.FrameCount} {a.GameObject.Name} bool {id:X8} {value}");
             if (i >= 0) a.Bools[i] = value;
         }
         public static void UnityEngine_Animator__SetBoolString(Animator self, string name, bool value) => UnityEngine_Animator__SetBoolID(self, (int)Crc32(name ?? ""), value);

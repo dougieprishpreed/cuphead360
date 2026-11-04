@@ -35,10 +35,13 @@ launcher). The sixth run confirmed the sign fix (I64CHECK ok) and much faster lo
 then crashed at the map on a texture-budget bug (fixed in round 11b).
 The seventh run reached the map and held memory, at 2-3 fps (audio decode
 and the draw list; round 12 works on both and re-encodes the textures).
-Continue with HANDOFF.md's "Next round" item 0: the eighth run's log
-(the FRAMES lines: per-phase averages on the title, map and a level),
-then frame rate on the map and in a level, load speed, packs and
-720p-sized textures. Rebuild
+The eighth run beat the Root Pack (~16 fps, hitches everywhere; the map
+~7 fps); round 13 removes the folder-scan and staging-copy hitches,
+writes sprites natively, clips UGUI masks, adds 3D sound and traces the
+EX on the console. Continue with HANDOFF.md's "Next round" item 0: the
+ninth run's log (texture times, FRAMES lines, the EX trace), then frame
+rate on the map and in a level, texture preloading, the managed heap
+(memory for full-size boss pages) and 720p-sized textures. Rebuild
 with `python tools/build_managed.py --stage jit` after engine changes; check
 with `selftest`, the bot loop (`run --frames 15301 --save
 work/managed/save_bot --bot tests/input/bot_veggies.txt`, deleting the save

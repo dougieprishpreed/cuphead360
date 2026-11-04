@@ -187,9 +187,15 @@ namespace Cuphead360.Player
                 Audio.EndCapture();
                 return rc;
             }
+            // CH360_STEP=<seconds>[@frame]: a fixed frame step other than 1/60, from that frame on
+            // (the console's frames run 1/60 to 1/30).
+            var stepArg = (Environment.GetEnvironmentVariable("CH360_STEP") ?? "").Split('@');
+            float step = float.TryParse(stepArg[0], System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var st) && st > 0 ? st : 1f / 60f;
+            int stepFrom = stepArg.Length > 1 && int.TryParse(stepArg[1], out int sf) ? sf : 0;
             for (int f = 1; f <= frames && !Icalls.QuitRequested; f++)
             {
-                PlayerLoop.Frame(1f / 60f);
+                PlayerLoop.Frame(f >= stepFrom ? step : 1f / 60f);
                 if (dumpAt.Contains(f)) DumpState(f);
                 if (PlayerLoop.Profile && f % 600 == 0) Console.WriteLine($"frame {f} " + PlayerLoop.ProfileReport(600));
                 if (report > 0 && f % report == 0)

@@ -15,7 +15,7 @@ wait 20
 press A
 waitscene scene_level_veggies 1200
 wait 180
-fight 36000
+fight 36000 ex
 waitscene scene_win 600
 pressuntil scene_map_world_1 A 120 3000
 wait 300

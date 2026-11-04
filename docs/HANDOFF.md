@@ -43,6 +43,10 @@ time (builds, conversions, ILC) so the user's PC stays usable;
   - Round 11 commit after it: record_forms.py (the sign bug's fix), the
     staging ring and texture budget/floor, CHOB font holes and block
     cache; staged for the sixth run.
+  - `168c04a` round 11b (the map crash), `98a52e0` round 12 (native
+    Vorbis, a lighter render list, fitted DXT); round 13's commit after
+    them (staged names, cached staging, the native draw path, masks, 3D
+    audio, the EX trace).
 - Side branch `interpreter-d1-r4-wip` (`ecbff5b`): the interrupted D1 r4
   interpreter edits, committed as found, not accepted, not continued.
 - Uncommitted: nothing intended. `managed/lib`, `managed/**/Generated`,
@@ -104,8 +108,42 @@ Xenia, hardware, memory.
 
 ## Next round (in order)
 
-0. **The eighth run (round 12 build staged: map frame rate, chips).** The
-   seventh run (VERIFICATION "seventh hardware run"): the map loaded and
+0. **The ninth run (round 13 build staged: hitches, the map, the results
+   board, 3D sound).** The eighth run (VERIFICATION "eighth hardware run"):
+   the chips were fixed; the map was at ~7 fps (145 ms: list 38.6, submit
+   30.5, audio 30, update 20.7 ms); the Root Pack was at ~16 fps with hitches
+   everywhere: every texture open ~100 ms and every first clip ~650 ms (FAT32
+   scanning folders of 1,337 and 3,991 long names), plus ~220 ms per 4 MB
+   atlas copied from write-combined staging. Round 13 changed:
+   - textures and clips staged as `XX/YYYYYYYY.CTX/.OGG`;
+   - staging moved to cached memory;
+   - sprites transformed and written natively (`draw_item`);
+   - UGUI masks clipped as rectangles (the results board);
+   - 3D AudioSources attenuated from the listener (the map's ambience);
+   - the boss and player atlases halved by Lanczos.
+   Read:
+   - the texture lines' times: a small texture should now take tens of ms,
+     not ~100;
+   - `audio=` spikes after shots: should be gone;
+   - "vk: staging in cached memory";
+   - the map's FRAMES list/submit against 38.6/30.5;
+   - the EX trace (`window opened`, the `TRACE anim` and `EXTRACE` lines):
+     which sprite the console draws during an EX;
+   - the user's look at the results board, the map's sound and the boss.
+   Still open:
+   - The boss's blur is resolution: its 4096 pages halved to 2048 are drawn
+     at 2.8 px a texel. Full or 2896 px pages need memory the player's
+     216 MB leaves no room for; cutting the managed heap comes first.
+   - Textures still load synchronously (~40 ms/MB read). Preloading a
+     scene's atlases, or a loader thread, would take the remaining hitches
+     out of play.
+   - GC pauses took 23 s over the eighth run's session.
+   - The other 866 halved pages keep the box filter (Lanczos is worth
+     ~+0.1 dB); redo them with the 720p sizing.
+   - The Hit pose is also covered by the shooting layers, the same on the
+     JIT; check it against the real game.
+   Round 12's item, kept: the eighth run (round 12 build staged: map frame
+   rate, chips). The seventh run (VERIFICATION "seventh hardware run"): the map loaded and
    held memory (150 MB, as on PC) but ran at 2-3 fps: "end" (the audio mix:
    12-13 voices, long clips decoded by NVorbis as wasm, up to 0.25 s mixed
    per slow frame) 220-470 ms and the draw list 165-280 ms a frame. Round

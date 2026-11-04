@@ -32,6 +32,12 @@ namespace Cuphead360.Player
         static extern int Pad(int index, byte* state);
         [DllImport("ch360", EntryPoint = "submit"), WasmImportLinkage]
         static extern void Submit(byte* data, int length);
+        [DllImport("ch360", EntryPoint = "draw_view"), WasmImportLinkage]
+        static extern void DrawView(float* view);
+        [DllImport("ch360", EntryPoint = "draw_item"), WasmImportLinkage]
+        static extern void DrawItem(int* args);
+        [DllImport("ch360", EntryPoint = "draw_end"), WasmImportLinkage]
+        static extern void DrawEnd();
         [DllImport("ch360", EntryPoint = "texture_file"), WasmImportLinkage]
         static extern void TextureFile(int id, byte* key, int length);
         [DllImport("ch360", EntryPoint = "texture_pixels"), WasmImportLinkage]
@@ -65,7 +71,8 @@ namespace Cuphead360.Player
                 int* info = stackalloc int[3];
                 int h;
                 fixed (byte* p = b) h = OggOpen(p, b.Length, info);
-                return h < 0 || info[0] <= 0 ? null : new HostClip(h, info[0], info[1], (uint)info[2]);
+                if (h >= 0 && info[0] <= 0) { OggClose(h); h = -1; }
+                return h < 0 ? null : new HostClip(h, info[0], info[1], (uint)info[2]);
             }
 
             public long SamplePosition { set { if (h >= 0) OggSeek(h, (int)Math.Clamp(value, 0, int.MaxValue)); } }
@@ -93,6 +100,21 @@ namespace Cuphead360.Player
         /// time (PlayerLoop.AudioDelta). Scripted runs keep 1/60.
         /// </summary>
         public static float Delta = 1f / 60f;
+        /// <summary>A scripted run's frame step: 1/60, or CH360_STEP (seconds; a PC check through CH360_GUEST_ENV).</summary>
+        static readonly float scriptedStep = float.TryParse(Environment.GetEnvironmentVariable("CH360_STEP"), System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var st) && st > 0 ? st : 1f / 60f;
+        // The eighth run's EX shots showed no pose on the console: the player's first three EX
+        // animations (a Play of "Ex.<direction>_<Ground|Air>") open an animator trace of the player
+        // and log the player's sprite as drawn, 30 frames each.
+        static void TraceEx()
+        {
+            NAnimator.WindowName = "PlayerOne";
+            NAnimator.WindowsLeft = 3;
+            NAnimator.WindowOnPlay = new HashSet<int>();
+            foreach (var d in new[] { "Forward", "Up", "Diagonal_Up", "Down", "Diagonal_Down" })
+                foreach (var g in new[] { "Ground", "Air" })
+                    NAnimator.WindowOnPlay.Add(Animator.StringToHash("Ex." + d + "_" + g));
+        }
         static readonly double[] phaseSum = new double[PlayerLoop.PhaseMs.Length + 2];
         static double frameSum;
 
@@ -107,6 +129,7 @@ namespace Cuphead360.Player
                 fixed (short* p = pcm) AudioOut(p, frames);
             };
             Console.WriteLine("CONSOLE host loop");
+            TraceEx();
             int n = 0;
             long last = System.Diagnostics.Stopwatch.GetTimestamp(), hz = System.Diagnostics.Stopwatch.Frequency;
             PlayerLoop.Profile = true;
@@ -116,7 +139,7 @@ namespace Cuphead360.Player
                 float real = (float)((now - last) / (double)hz);
                 last = now;
                 // A console frame slower than the vblank still moves the game at its real speed.
-                Delta = scripted != null ? 1f / 60f : Math.Clamp(real, 1f / 60f, 1f / 30f);
+                Delta = scripted != null ? scriptedStep : Math.Clamp(real, 1f / 60f, 1f / 30f);
                 PlayerLoop.AudioDelta = scripted != null ? -1 : Math.Clamp(real, 0f, 0.25f);
                 PollPads();
                 if (!frame(++n)) break;
@@ -170,6 +193,7 @@ namespace Cuphead360.Player
             Audio.CacheFloats = 4L * 1024 * 1024;   // 16 MB
             if (ChobObject.TreeBudget == long.MaxValue) ChobObject.TreeBudget = 24L << 20;   // parsed trees kept (estimated bytes)
             ChobFile.BlockBudget = 8L << 20;   // large files' blocks kept
+            RenderList.HostTransforms = !managedDraw;   // sprites' vertices go to the host untransformed
             var bad = new List<string>();
             foreach (var s in new[] { "5848540871337674781", "-2592357432173453771", "4294967296", "-4294967296", "2147483648", "-1" })
                 if (long.Parse(s).ToString() != s) bad.Add("format " + s + " -> " + long.Parse(s));
@@ -228,7 +252,125 @@ namespace Cuphead360.Player
         static void I32(int v) { Need(4); BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(len), v); len += 4; }
         static void F32(float v) { Need(4); BinaryPrimitives.WriteSingleLittleEndian(buf.AsSpan(len), v); len += 4; }
 
+        /// <summary>CH360_DRAW=managed (a PC check, through CH360_GUEST_ENV): the draw list written here, the old way, to compare with.</summary>
+        static readonly bool managedDraw = Environment.GetEnvironmentVariable("CH360_DRAW") == "managed";
+
+        /// <summary>
+        /// The frame's draw list through the host: per view its rect and clear,
+        /// per item its arrays where they lie in wasm memory (the host reads
+        /// them during the call: vertices, uvs, colours, triangles) and, for
+        /// sprites, the map from their own vertices to pixels. The host's
+        /// native code transforms, clips and writes the vertices (as managed
+        /// code here they were most of a world map frame on the console).
+        /// </summary>
         static void Draw(List<RenderList.View> views)
+        {
+            if (managedDraw) { DrawManaged(views); return; }
+            float* vh = stackalloc float[9];
+            int* a = stackalloc int[ItemSlots];
+            foreach (var v in views)
+            {
+                vh[0] = v.PixelRect.x; vh[1] = v.PixelRect.y; vh[2] = v.PixelRect.width; vh[3] = v.PixelRect.height;
+                var cam = v.Camera;
+                bool clear = cam != null && (cam.ClearFlags == CameraClearFlags.SolidColor || cam.ClearFlags == CameraClearFlags.Skybox);
+                ((uint*)vh)[4] = clear ? 1u : 0u;
+                var bg = cam != null ? cam.Background : default;
+                vh[5] = bg.r; vh[6] = bg.g; vh[7] = bg.b; vh[8] = 1f;
+                DrawView(vh);
+                masks.Clear();
+                foreach (var it in v.Items) HostItem(it, a);
+            }
+            DrawEnd();
+        }
+
+        // draw_item's arguments, 32-bit slots (console/ch360_imports.c reads the same):
+        //  0 texture  1 mode  2-5 blend colour (the tint)  6 flags (1 vertex colours as they are, 2 the affine map, 4 clip)
+        //  7 alpha scale  8/9 triangles  10/11 positions  12/13 uvs  14/15 colours (address, count)
+        //  16-21 A00 A01 B0 A10 A11 B1  22-25 clip x0 y0 x1 y1
+        const int ItemSlots = 26;
+
+        static void HostItem(RenderList.Item it, int* a)
+        {
+            if (it.Triangles.Length == 0) return;
+            bool clipped = MaskClip(it, out var clip, out bool stencilOnly);
+            if (stencilOnly) return;
+            int tex = -1;
+            if (it.Texture != null && (tex = TextureId(it.Texture)) < 0) return;   // not drawable (render textures)
+            if (Clock.FrameCount <= NAnimator.WindowUntil && it.Name.StartsWith("Cuphead ["))
+                Console.WriteLine($"EXTRACE frame {Clock.FrameCount} draws {it.Name} texture {tex}, layer {it.Layer} order {it.Order}, {it.Triangles.Length} corners, tint a {it.Tint.a:0.##}");
+            uint mode = ModeOf(MaterialState.Of(it.Material)?.Shader);
+            var tint = it.Tint;
+            bool blend = mode >= 1 && mode <= 3;
+            var f = (float*)a;
+            var pos = it.Screen ?? it.Local;
+            a[0] = tex; a[1] = (int)mode;
+            f[2] = tint.r; f[3] = tint.g; f[4] = tint.b; f[5] = tint.a;
+            a[6] = (blend ? 1 : 0) | (it.Screen == null ? 2 : 0) | (clipped ? 4 : 0);
+            f[7] = blend && it.Kind == "ui" ? Mathf.Clamp01(tint.a) : 1f;
+            a[9] = it.Triangles.Length; a[11] = pos.Length; a[13] = it.Uv?.Length ?? 0; a[15] = it.Colors?.Length ?? 0;
+            f[16] = it.A00; f[17] = it.A01; f[18] = it.B0; f[19] = it.A10; f[20] = it.A11; f[21] = it.B1;
+            f[22] = clip.x; f[23] = clip.y; f[24] = clip.z; f[25] = clip.w;
+            fixed (int* tri = it.Triangles)
+            fixed (Vector2* p = pos)
+            fixed (Vector2* uv = it.Uv)
+            fixed (Color32* c = it.Colors)
+            {
+                a[8] = (int)tri; a[10] = (int)p; a[12] = (int)uv; a[14] = (int)c;
+                DrawItem(a);
+            }
+        }
+
+        // UGUI masks: a mask's graphic writes the stencil (its children test it;
+        // a "pop" after them writes it back), and the console has no stencil
+        // here, so the stencil values are kept as nested screen rectangles and
+        // an item that tests one is clipped to it: exact for rectangular masks,
+        // which is what UGUI's Mask on an Image mostly is (the results board's
+        // banner wipe). The stack is per view, innermost last: (value, x0 y0 x1 y1).
+        static readonly List<(int value, Vector4 rect)> masks = new List<(int, Vector4)>();
+
+        static bool MaskClip(RenderList.Item it, out Vector4 clip, out bool stencilOnly)
+        {
+            clip = default; stencilOnly = false;
+            var st = it.Stencil;   // ref, comp, op, readMask, writeMask, colorMask
+            if (st == null) return false;
+            int rf = st[0], comp = st[1], op = st[2];
+            bool clipped = false;
+            // CompareFunction 3 Equal: where the stencil is ref & readMask; 4 LessEqual: where it is ref or more.
+            if (comp == 3 || comp == 4)
+                for (int i = masks.Count - 1; i >= 0; i--)
+                    if (comp == 3 ? masks[i].value == (rf & st[3]) : masks[i].value >= rf) { clip = masks[i].rect; clipped = true; break; }
+            // StencilOp 2 Replace, 1 Zero, 3/6 increment, 4/7 decrement: the value the item writes.
+            int top = masks.Count > 0 ? masks[masks.Count - 1].value : 0, value = -1;
+            if (op == 2) value = rf & st[4];
+            else if (op == 1) value = 0;
+            else if (op == 3 || op == 6) value = top + 1;
+            else if (op == 4 || op == 7) value = Math.Max(0, top - 1);
+            if (value >= 0)
+            {
+                while (masks.Count > 0 && masks[masks.Count - 1].value > value) masks.RemoveAt(masks.Count - 1);
+                if (value > 0 && (masks.Count == 0 || masks[masks.Count - 1].value != value) && it.Screen != null && it.Screen.Length > 0)
+                {
+                    var r = Bounds(it.Screen);
+                    if (clipped) r = new Vector4(Math.Max(r.x, clip.x), Math.Max(r.y, clip.y), Math.Min(r.z, clip.z), Math.Min(r.w, clip.w));
+                    masks.Add((value, r));
+                }
+            }
+            stencilOnly = st[5] == 0;
+            return clipped;
+        }
+
+        static Vector4 Bounds(Vector2[] s)
+        {
+            float x0 = s[0].x, y0 = s[0].y, x1 = x0, y1 = y0;
+            for (int i = 1; i < s.Length; i++)
+            {
+                if (s[i].x < x0) x0 = s[i].x; else if (s[i].x > x1) x1 = s[i].x;
+                if (s[i].y < y0) y0 = s[i].y; else if (s[i].y > y1) y1 = s[i].y;
+            }
+            return new Vector4(x0, y0, x1, y1);
+        }
+
+        static void DrawManaged(List<RenderList.View> views)
         {
             len = 0;
             U32(0x31464843);   // 'CHF1'

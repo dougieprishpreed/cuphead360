@@ -11,25 +11,40 @@ WASI module, translated to C by w2c2 and compiled for the console's CPU.
 
 - **The player** (`work/managed/c`, from `tools/build_managed.py --stage
   wasm,c`): the game loop, the engine, audio mixing, the render list. Its
-  `ConsoleHost` (`managed/Cuphead360.Player/ConsoleHost.cs`) calls six
-  imports each frame: `frame_begin`, `pad`, `submit` (the frame's draw
-  list), `texture_file`, `texture_pixels` and `audio`, and `ogg_open`,
-  `ogg_read`, `ogg_seek` and `ogg_close` for its clips: Vorbis is decoded
-  natively by stb_vorbis (`ch360_ogg.c`, `third_party/stb_vorbis`), not by
-  the engine's NVorbis, which as translated wasm took most of a frame on
-  the world map.
-- **The glue** (`ch360_imports.c`): those imports, and the start of the
-  module under Spire360's wasm runtime (srt, WASI preview1) on a guest
-  thread with a 16 MB stack; its stdout and stderr go to the log.
+  `ConsoleHost` (`managed/Cuphead360.Player/ConsoleHost.cs`) calls its
+  imports each frame: `frame_begin`, `pad`, `draw_view`/`draw_item`/
+  `draw_end` (the frame's draw list), `texture_file`, `texture_pixels` and
+  `audio`, and `ogg_open`, `ogg_read`, `ogg_seek` and `ogg_close` for its
+  clips: Vorbis is decoded natively by stb_vorbis (`ch360_ogg.c`,
+  `third_party/stb_vorbis`), not by the engine's NVorbis, which as
+  translated wasm took most of a frame on the world map. `draw_item` hands
+  over where an item's arrays lie in wasm memory (triangles, vertices, uvs,
+  colours) and, for a sprite under an orthographic camera, one map from
+  its mesh's own vertices to pixels; UGUI masks become clip rectangles
+  (nested stencil values kept as rectangles: exact for rectangular masks).
+  `submit`, the draw list written in managed code, is still there behind
+  `CH360_DRAW=managed`, to compare with on the PC.
+- **The glue** (`ch360_imports.c`): those imports (the draw imports
+  transform, colour, clip and write the vertices natively, into the same
+  draw list the platform layer reads), and the start of the module under
+  Spire360's wasm runtime (srt, WASI preview1) on a guest thread with a
+  16 MB stack; its stdout and stderr go to the log.
 - **The host** (`xsdk/main.cpp`): Vulkan through vulkan4xenon (one pass a
   frame into the swapchain, a pipeline per sprite shader recipe, batched
-  draws), textures loaded on first use from `GameData/ctex` through one
-  8 MB staging ring, least recently used ones let go to stay within 96 MB
+  draws), textures loaded on first use from `GameData/ctex` (staged names)
+  straight into one 8 MB staging ring in the CPU's cached memory
+  (vulkan4xenon copies DXT data into images on the CPU, and reading the
+  GPU's write-combined memory back cost ~220 ms per 4 MB), least recently
+  used ones let go to stay within 96 MB
   and above 24 MB of free memory, items wholly off screen skipped, the pads through `XamInputGetState`,
   audio through xsdk's feeder, the log through a writer thread.
 - **The PC check** (`host_native.c`): the same translated C and glue as a
   headless Windows program (`tools/build_console.py --stage native`): it
   runs the game with a bot script and checks each frame's draw list.
+  `CH360_DUMP_DRAW=<file>:<n>` writes every n-th frame's draw list;
+  `CH360_GUEST_ENV="DOTNET_GCConserveMemory=7 CH360_DRAW=managed"` (the GC
+  setting must stay) has ConsoleHost write it the old way, and
+  `CH360_STEP=<seconds>` there sets a scripted run's frame step.
 
 ## Build
 
@@ -77,7 +92,7 @@ run at once (2 by default).
 python -I tools/convert_objects.py --game game --out work/GameData
 python -I tools/convert_objects.py --game game --out work/GameData --files none --bundles
 python -I tools/convert_textures.py --game game --out work/GameData --bundles
-python -I tools/convert_console.py --data work/GameData          # BC7 -> DXT1/DXT5/BGRA8, pages halved to 2048
+python -I tools/convert_console.py --data work/GameData          # BC7 -> DXT1/DXT5/BGRA8, pages halved to 2048 (Lanczos-3)
 python -I tools/convert_audio.py --game game --out work/GameData --bundles
 ```
 
@@ -92,7 +107,13 @@ python tools/stage_console.py --to E:\Games\Cuphead360
 ```
 
 That folder holds `default.xex`, `GameData\` (objects, ctex, audio, fonts),
-`save\` and `licenses\`. Start `default.xex` from the dashboard. The game
+`save\` and `licenses\`. Textures and clips are staged under short names,
+`ctex\XX\YYYYYYYY.CTX` and `audio\XX\YYYYYYYY.OGG` (FNV-1a 64 of the key:
+the top byte, the low word; `ch360_staged_name` works out the same): FAT32
+has no folder index, and every open scanned folders of 1,337 and 3,991
+long names (~0.1 s a texture, ~0.3 s a clip, twice for a clip). Staging
+removes the old layout's loose files. Start `default.xex` from the
+dashboard. The game
 writes `cuphead360.txt` next to it: the memory probe, start-up memory,
 I64CHECK, each slow converted-file load (CHOB lines) and scene load (SCENE
 built/activated times), any frame over half a second with its player-loop

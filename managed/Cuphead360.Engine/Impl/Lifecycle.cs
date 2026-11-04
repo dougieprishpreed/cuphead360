@@ -213,6 +213,7 @@ namespace Cuphead360.Engine
         {
             if (typeof(Camera).IsAssignableFrom(t)) return new NCamera();
             if (typeof(AudioSource).IsAssignableFrom(t)) return new NAudioSource();
+            if (typeof(AudioListener).IsAssignableFrom(t)) return new NAudioListener();
             if (typeof(SpriteRenderer).IsAssignableFrom(t)) return new NSpriteRenderer();
             if (typeof(Renderer).IsAssignableFrom(t)) return new NRenderer();
             if (typeof(Animator).IsAssignableFrom(t)) return new NAnimator();

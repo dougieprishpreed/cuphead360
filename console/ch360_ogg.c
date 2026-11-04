@@ -88,6 +88,15 @@ U32 i5_ch3608_oggX5Fopen(wasmModuleInstance* inst, U32 path, U32 len, U32 info) 
     if (root > 0 && full[root - 1] == '/' && srt_mem_ptr(path)[0] == '/') root--;
     memcpy(full + root, srt_mem_ptr(path), len);
     full[root + len] = 0;
+    if (ch360_staged_names) {
+        /* <folder>/<key>.ogg is staged as <folder>/XX/YYYYYYYY.OGG */
+        size_t slash = root + len, end = root + len;
+        while (slash > 0 && full[slash - 1] != '/') slash--;
+        if (end - slash > 4 && memcmp(full + end - 4, ".ogg", 4) == 0) end -= 4;
+        if (slash + 16 > sizeof(full)) return (U32)-1;
+        ch360_staged_name(full + slash, end - slash, full + slash);
+        memcpy(full + slash + 11, ".OGG", 5);
+    }
     data = read_whole(full, &size);
     if (data == NULL) return (U32)-1;
     v = stb_vorbis_open_memory(data, size, &err, NULL);
