@@ -60,34 +60,42 @@ U32 i5_ch3603_pad(wasmModuleInstance* inst, U32 index, U32 state) {
     return 1;
 }
 
-void i5_ch3606_submit(wasmModuleInstance* inst, U32 data, U32 len) {
-    (void)inst;
-    if (srt_mem_ok(data, len)) ch360_plat_submit(srt_mem_ptr(data), (unsigned)len);
+/* ---- the draw list, written here from ConsoleHost's views and items ----
+ * draw_view(view): 9 slots, f32 x y w h, u32 clear, f32 r g b a; draw_item
+ * (args): 26 slots (ConsoleHost.cs, HostItem): i32 texture, u32 mode, f32
+ * blend r g b a, u32 flags (1 vertex colours as they are, 2 positions
+ * through the affine map, 4 clipped), f32 alpha scale, then (address, count)
+ * of the triangles (i32), positions (f32 x y), uvs (f32 u v) and colours (u8
+ * r g b a), f32 A00 A01 B0 A10 A11 B1, f32 clip x0 y0 x1 y1, i32 two more
+ * textures, f32 three floats (mode 6, the light ray); draw_end() hands the
+ * frame to the platform layer (ch360_plat_draw).
+ *
+ * The vertices are written in the host's byte order and the GPU's layout
+ * (ch360_vertex) so the host copies them as they are. On the console's CPU
+ * every move between its integer and floating-point registers goes through
+ * memory and stalls (load-hit-store), so uvs and colours are copied as
+ * words and only a sprite's position (through its map) is arithmetic. */
+
+static ch360_view* draw_views;
+static ch360_item* draw_items;
+static ch360_vertex* draw_verts;
+static unsigned draw_view_count, draw_view_cap, draw_item_count, draw_item_cap, draw_vert_count, draw_vert_cap;
+static double draw_build_ms;
+
+static double draw_now_ms(void) {
+    return (double)srt_plat_time_monotonic_ns() / 1e6;
 }
 
-/* ---- the draw list, written here from ConsoleHost's views and items ----
- * draw_view(view): 9 slots, f32 x y w h, u32 clear, f32 r g b a (CHF1's view
- * header without its item count); draw_item(args): 26 slots (ConsoleHost.cs,
- * HostItem): i32 texture, u32 mode, f32 blend r g b a, u32 flags (1 vertex
- * colours as they are, 2 positions through the affine map, 4 clipped),
- * f32 alpha scale, then (address, count) of the triangles (i32), positions
- * (f32 x y), uvs (f32 u v) and colours (u8 r g b a), f32 A00 A01 B0 A10 A11
- * B1, f32 clip x0 y0 x1 y1; draw_end() submits. The CHF1 list this writes
- * is what ConsoleHost wrote itself before (CH360_DRAW=managed still does). */
-
-static U8* draw_buf;
-static unsigned draw_len, draw_cap, draw_views, draw_view_at, draw_items;
-
-static int draw_room(unsigned more) {
-    unsigned cap;
-    U8* b;
-    if (draw_len + more <= draw_cap) return 1;
-    cap = draw_cap ? draw_cap : (1u << 20);
-    while (cap < draw_len + more) cap *= 2;
-    b = (U8*)realloc(draw_buf, cap);
+static int draw_grow(void** p, unsigned* cap, unsigned need, size_t size) {
+    unsigned c;
+    void* b;
+    if (need <= *cap) return 1;
+    c = *cap ? *cap : 1024;
+    while (c < need) c *= 2;
+    b = realloc(*p, (size_t)c * size);
     if (b == NULL) return 0;
-    draw_buf = b;
-    draw_cap = cap;
+    *p = b;
+    *cap = c;
     return 1;
 }
 
@@ -99,193 +107,291 @@ static float lef(const U8* p) {
     v.u = le32(p);
     return v.f;
 }
-static void put32(U8* p, U32 v) {
-    p[0] = (U8)v; p[1] = (U8)(v >> 8); p[2] = (U8)(v >> 16); p[3] = (U8)(v >> 24);
+static void set_bits(float* f, U32 bits) {
+    memcpy(f, &bits, 4);
 }
-static void putf(U8* p, float f) {
-    union { U32 u; float f; } v;
-    v.f = f;
-    put32(p, v.u);
+static U8 unorm8(float f) {
+    return (U8)(f <= 0.0f ? 0 : f >= 1.0f ? 255 : (int)(f * 255.0f + 0.5f));
 }
 
-static void draw_close_view(void) {
-    if (draw_views > 0) put32(draw_buf + draw_view_at, draw_items);
+static void draw_view_add(const float* xywh, unsigned clear, float r, float g, float b) {
+    ch360_view* v;
+    if (!draw_grow((void**)&draw_views, &draw_view_cap, draw_view_count + 1, sizeof(ch360_view))) return;
+    v = &draw_views[draw_view_count++];
+    v->x = xywh[0];
+    v->y = xywh[1];
+    v->w = xywh[2];
+    v->h = xywh[3];
+    v->clear = clear;
+    v->r = r;
+    v->g = g;
+    v->b = b;
+    v->first_item = draw_item_count;
+    v->items = 0;
+}
+
+/* The item's screen box, from the vertices just written (cached memory, no swaps). */
+static void draw_item_box(ch360_item* it) {
+    const ch360_vertex* v = draw_verts + it->first;
+    float x0 = v->x, y0 = v->y, x1 = x0, y1 = y0;
+    unsigned k;
+    for (k = 1; k < it->count; k++) {
+        float x = v[k].x, y = v[k].y;
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+    }
+    it->x0 = x0;
+    it->y0 = y0;
+    it->x1 = x1;
+    it->y1 = y1;
+}
+
+static void draw_item_done(ch360_item* it) {
+    it->count = draw_vert_count - it->first;
+    if (it->count == 0) {
+        draw_item_count--; /* clipped away */
+        return;
+    }
+    draw_item_box(it);
+    draw_views[draw_view_count - 1].items++;
 }
 
 void i5_ch3609_drawX5Fview(wasmModuleInstance* inst, U32 view) {
+    const U8* p;
+    float xywh[4];
     (void)inst;
     if (!srt_mem_ok(view, 36)) return;
-    if (draw_len == 0) {
-        if (!draw_room(8)) return;
-        put32(draw_buf, 0x31464843u); /* 'CHF1' */
-        put32(draw_buf + 4, 0);
-        draw_len = 8;
-        draw_views = 0;
-    }
-    if (!draw_room(40)) return;
-    draw_close_view();
-    memcpy(draw_buf + draw_len, srt_mem_ptr(view), 36);
-    draw_view_at = draw_len + 36;
-    put32(draw_buf + draw_view_at, 0);
-    draw_len += 40;
-    draw_views++;
-    draw_items = 0;
+    p = srt_mem_ptr(view);
+    xywh[0] = lef(p);
+    xywh[1] = lef(p + 4);
+    xywh[2] = lef(p + 8);
+    xywh[3] = lef(p + 12);
+    draw_view_add(xywh, le32(p + 16), lef(p + 20), lef(p + 24), lef(p + 28));
 }
 
-typedef struct { float x, y, u, v, c[4]; } draw_vertex;
+/* A corner as floats, for clipping: position, uv, colour and blend 0-255. */
+typedef struct { float x, y, u, v, c[4]; } draw_corner_f;
 
-static void draw_put(const draw_vertex* v) {
-    U8* p = draw_buf + draw_len;
-    putf(p, v->x); putf(p + 4, v->y); putf(p + 8, v->u); putf(p + 12, v->v);
-    p[16] = (U8)v->c[0]; p[17] = (U8)v->c[1]; p[18] = (U8)v->c[2]; p[19] = (U8)v->c[3];
-    draw_len += 20;
-}
-
-/* One edge of the clip rectangle: keep where side * (coordinate - at) >= 0. */
-static int draw_clip_edge(const draw_vertex* in, int n, draw_vertex* out, int axis, float at, float side) {
+static int draw_clip_edge(const draw_corner_f* in, int n, draw_corner_f* out, int axis, float at, float side) {
     int i, m = 0;
     for (i = 0; i < n; i++) {
-        const draw_vertex* a = &in[i];
-        const draw_vertex* b = &in[(i + 1) % n];
+        const draw_corner_f* a = &in[i];
+        const draw_corner_f* b = &in[(i + 1) % n];
         float da = side * ((axis ? a->y : a->x) - at), db = side * ((axis ? b->y : b->x) - at);
         if (da >= 0) out[m++] = *a;
         if ((da >= 0) != (db >= 0)) {
             float t = da / (da - db);
             int k;
-            draw_vertex* o = &out[m++];
+            draw_corner_f* o = &out[m++];
             o->x = a->x + (b->x - a->x) * t;
             o->y = a->y + (b->y - a->y) * t;
             o->u = a->u + (b->u - a->u) * t;
             o->v = a->v + (b->v - a->v) * t;
-            for (k = 0; k < 4; k++) o->c[k] = (float)(int)(a->c[k] + (b->c[k] - a->c[k]) * t + 0.5f);
+            for (k = 0; k < 4; k++) o->c[k] = a->c[k] + (b->c[k] - a->c[k]) * t;
         }
     }
     return m;
 }
 
-/* An item's corner i: position (through the affine map for sprites), uv, and
- * the colour ConsoleHost wrote (vertex colour times tint, or for the blend
- * modes the vertex colour with its alpha scaled). */
-typedef struct {
-    const U8 *tri, *pos, *uv, *col;
-    U32 ntri, npos, nuv, ncol;
-    int blend, affine;
-    float tint[4], alpha, m[6];
-} draw_item_in;
-
-static void draw_corner(const draw_item_in* d, U32 i, draw_vertex* v) {
-    static const U8 white[4] = { 255, 255, 255, 255 };
-    int ki = (int)le32(d->tri + 4 * i), k;
-    const U8* c;
-    float x, y;
-    if (ki < 0 || (U32)ki >= d->npos) ki = 0;
-    x = lef(d->pos + 8 * ki);
-    y = lef(d->pos + 8 * ki + 4);
-    if (d->affine) {
-        v->x = d->m[0] * x + d->m[1] * y + d->m[2];
-        v->y = d->m[3] * x + d->m[4] * y + d->m[5];
-    } else {
-        v->x = x;
-        v->y = y;
-    }
-    v->u = (U32)ki < d->nuv ? lef(d->uv + 8 * ki) : 0.0f;
-    v->v = (U32)ki < d->nuv ? lef(d->uv + 8 * ki + 4) : 0.0f;
-    c = (U32)ki < d->ncol ? d->col + 4 * ki : white;
-    if (d->blend) {
-        v->c[0] = c[0];
-        v->c[1] = c[1];
-        v->c[2] = c[2];
-        v->c[3] = (float)(U8)(c[3] * d->alpha);
-    } else {
-        for (k = 0; k < 4; k++) {
-            float f = c[k] * d->tint[k];
-            v->c[k] = (float)(U8)(f < 0 ? 0 : f > 255 ? 255 : f);
-        }
-    }
-}
-
 void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
-    const U8* a;
-    draw_item_in d;
-    U32 flags, i, start;
-    float clip[4];
-    int k, clipped;
+    static const U8 white[4] = { 255, 255, 255, 255 };
+    const U8 *a, *tri, *pos, *uv = NULL, *col = NULL;
+    U32 flags, ntri, npos, nuv, ncol, i;
+    float m[6], clip[4], tint[4];
+    U8 blend[4];
+    int k, mode, affine, clipped;
+    ch360_item* it;
+    double t0 = draw_now_ms();
     (void)inst;
-    if (draw_views == 0 || !srt_mem_ok(args, 26 * 4)) return;
+    if (draw_view_count == 0 || !srt_mem_ok(args, 31 * 4)) return;
     a = srt_mem_ptr(args);
     flags = le32(a + 24);
-    d.ntri = le32(a + 36);
-    d.npos = le32(a + 44);
-    d.nuv = le32(a + 52);
-    d.ncol = le32(a + 60);
-    if (d.ntri == 0 || d.npos == 0 || d.ntri > (1u << 24) || d.npos > (1u << 24) || d.nuv > (1u << 24) ||
-        d.ncol > (1u << 24))
-        return;
-    if (!srt_mem_ok(le32(a + 32), d.ntri * 4) || !srt_mem_ok(le32(a + 40), d.npos * 8)) return;
-    d.tri = srt_mem_ptr(le32(a + 32));
-    d.pos = srt_mem_ptr(le32(a + 40));
-    d.uv = d.nuv > 0 && srt_mem_ok(le32(a + 48), d.nuv * 8) ? srt_mem_ptr(le32(a + 48)) : NULL;
-    if (d.uv == NULL) d.nuv = 0;
-    d.col = d.ncol > 0 && srt_mem_ok(le32(a + 56), d.ncol * 4) ? srt_mem_ptr(le32(a + 56)) : NULL;
-    if (d.col == NULL) d.ncol = 0;
-    d.blend = (flags & 1) != 0;
-    d.affine = (flags & 2) != 0;
+    ntri = le32(a + 36);
+    npos = le32(a + 44);
+    nuv = le32(a + 52);
+    ncol = le32(a + 60);
+    if (ntri == 0 || npos == 0 || ntri > (1u << 24) || npos > (1u << 24) || nuv > (1u << 24) || ncol > (1u << 24)) return;
+    if (!srt_mem_ok(le32(a + 32), ntri * 4) || !srt_mem_ok(le32(a + 40), npos * 8)) return;
+    tri = srt_mem_ptr(le32(a + 32));
+    pos = srt_mem_ptr(le32(a + 40));
+    if (nuv > 0 && srt_mem_ok(le32(a + 48), nuv * 8)) uv = srt_mem_ptr(le32(a + 48));
+    else nuv = 0;
+    if (ncol > 0 && srt_mem_ok(le32(a + 56), ncol * 4)) col = srt_mem_ptr(le32(a + 56));
+    else ncol = 0;
+    mode = (int)le32(a + 4);
+    affine = (flags & 2) != 0;
     clipped = (flags & 4) != 0;
-    for (k = 0; k < 4; k++) d.tint[k] = lef(a + 8 + 4 * k);
-    d.alpha = lef(a + 28);
-    for (k = 0; k < 6; k++) d.m[k] = lef(a + 64 + 4 * k);
+    for (k = 0; k < 6; k++) m[k] = lef(a + 64 + 4 * k);
     for (k = 0; k < 4; k++) clip[k] = lef(a + 88 + 4 * k);
+    for (k = 0; k < 4; k++) tint[k] = lef(a + 8 + 4 * k);
     if (clipped && (clip[2] <= clip[0] || clip[3] <= clip[1])) return; /* an empty mask hides it */
+    /* The renderer colour: the shaders multiply it in (modes 0, 5), or take
+     * its rgb as the blend colour and the alpha scale as its alpha (1-3). */
+    blend[0] = unorm8(tint[0]);
+    blend[1] = unorm8(tint[1]);
+    blend[2] = unorm8(tint[2]);
+    blend[3] = unorm8((flags & 1) ? lef(a + 28) : tint[3]);
     /* a clipped triangle is at most a heptagon: five triangles */
-    if (!draw_room(28 + (clipped ? d.ntri / 3 * 15 : d.ntri) * 20)) return;
-    start = draw_len;
-    memcpy(draw_buf + draw_len, a, 24); /* texture, mode, blend colour */
-    draw_len += 28;
+    if (!draw_grow((void**)&draw_verts, &draw_vert_cap, draw_vert_count + (clipped ? ntri / 3 * 15 : ntri), sizeof(ch360_vertex)) ||
+        !draw_grow((void**)&draw_items, &draw_item_cap, draw_item_count + 1, sizeof(ch360_item)))
+        return;
+    it = &draw_items[draw_item_count++];
+    it->texture = (int)le32(a);
+    it->mode = (unsigned)mode;
+    it->first = draw_vert_count;
+    it->textures[0] = (int)le32(a + 104);
+    it->textures[1] = (int)le32(a + 108);
+    it->params[0] = lef(a + 112);
+    it->params[1] = lef(a + 116);
+    it->params[2] = lef(a + 120);
+    it->params[3] = 0.0f;
     if (!clipped) {
-        for (i = 0; i < d.ntri; i++) {
-            draw_vertex v;
-            draw_corner(&d, i, &v);
-            draw_put(&v);
+        ch360_vertex* out = draw_verts + draw_vert_count;
+        for (i = 0; i < ntri; i++, out++) {
+            int ki = (int)le32(tri + 4 * i);
+            const U8* pp;
+            if (ki < 0 || (U32)ki >= npos) ki = 0;
+            pp = pos + 8 * ki;
+            if (affine) {
+                float x = lef(pp), y = lef(pp + 4);
+                out->x = m[0] * x + m[1] * y + m[2];
+                out->y = m[3] * x + m[4] * y + m[5];
+            } else {
+                set_bits(&out->x, le32(pp));
+                set_bits(&out->y, le32(pp + 4));
+            }
+            if ((U32)ki < nuv) {
+                set_bits(&out->u, le32(uv + 8 * ki));
+                set_bits(&out->v, le32(uv + 8 * ki + 4));
+            } else {
+                out->u = out->v = 0.0f;
+            }
+            memcpy(out->color, (U32)ki < ncol ? col + 4 * ki : white, 4);
+            memcpy(out->blend, blend, 4);
         }
+        draw_vert_count += ntri;
     } else {
         /* Sutherland-Hodgman against the mask's rectangle, then a fan. */
-        for (i = 0; i + 2 < d.ntri; i += 3) {
-            draw_vertex poly[2][8];
+        for (i = 0; i + 2 < ntri; i += 3) {
+            draw_corner_f poly[2][8];
             int j, n;
-            for (j = 0; j < 3; j++) draw_corner(&d, i + j, &poly[1][j]);
+            for (j = 0; j < 3; j++) {
+                draw_corner_f* c = &poly[1][j];
+                int ki = (int)le32(tri + 4 * (i + j));
+                const U8* cc;
+                float x, y;
+                if (ki < 0 || (U32)ki >= npos) ki = 0;
+                x = lef(pos + 8 * ki);
+                y = lef(pos + 8 * ki + 4);
+                c->x = affine ? m[0] * x + m[1] * y + m[2] : x;
+                c->y = affine ? m[3] * x + m[4] * y + m[5] : y;
+                c->u = (U32)ki < nuv ? lef(uv + 8 * ki) : 0.0f;
+                c->v = (U32)ki < nuv ? lef(uv + 8 * ki + 4) : 0.0f;
+                cc = (U32)ki < ncol ? col + 4 * ki : white;
+                for (k = 0; k < 4; k++) c->c[k] = cc[k];
+            }
             n = draw_clip_edge(poly[1], 3, poly[0], 0, clip[0], 1.0f);
             n = draw_clip_edge(poly[0], n, poly[1], 0, clip[2], -1.0f);
             n = draw_clip_edge(poly[1], n, poly[0], 1, clip[1], 1.0f);
             n = draw_clip_edge(poly[0], n, poly[1], 1, clip[3], -1.0f);
             for (j = 1; j + 1 < n; j++) {
-                draw_put(&poly[1][0]);
-                draw_put(&poly[1][j]);
-                draw_put(&poly[1][j + 1]);
+                const draw_corner_f* tri3[3];
+                int q;
+                tri3[0] = &poly[1][0];
+                tri3[1] = &poly[1][j];
+                tri3[2] = &poly[1][j + 1];
+                for (q = 0; q < 3; q++) {
+                    ch360_vertex* out = &draw_verts[draw_vert_count++];
+                    out->x = tri3[q]->x;
+                    out->y = tri3[q]->y;
+                    out->u = tri3[q]->u;
+                    out->v = tri3[q]->v;
+                    for (k = 0; k < 4; k++) out->color[k] = (U8)(tri3[q]->c[k] + 0.5f);
+                    memcpy(out->blend, blend, 4);
+                }
             }
         }
     }
-    if (draw_len == start + 28) {
-        draw_len = start; /* clipped away */
-        return;
-    }
-    put32(draw_buf + start + 24, (draw_len - start - 28) / 20);
-    draw_items++;
+    draw_item_done(it);
+    draw_build_ms += draw_now_ms() - t0;
 }
 
 void i5_ch3608_drawX5Fend(wasmModuleInstance* inst) {
+    ch360_frame f;
     (void)inst;
-    if (draw_len == 0) {
-        if (!draw_room(8)) return;
-        put32(draw_buf, 0x31464843u);
-        put32(draw_buf + 4, 0);
-        draw_len = 8;
-        draw_views = 0;
+    f.views = draw_views;
+    f.view_count = draw_view_count;
+    f.items = draw_items;
+    f.item_count = draw_item_count;
+    f.vertices = draw_verts;
+    f.vertex_count = draw_vert_count;
+    f.build_ms = draw_build_ms;
+    ch360_plat_draw(&f);
+    draw_view_count = draw_item_count = draw_vert_count = 0;
+    draw_build_ms = 0;
+}
+
+/* The draw list ConsoleHost writes itself (CH360_DRAW=managed, a PC check),
+ * read into the same frame: its colours already carry the renderer colour
+ * for modes 0 and 5 and their alpha scale for 1-3, so the blend colour is
+ * white there and the renderer colour's rgb for the blend modes. */
+void i5_ch3606_submit(wasmModuleInstance* inst, U32 data, U32 len) {
+    const U8* d;
+    unsigned p = 8, v, i, views;
+    (void)inst;
+    if (!srt_mem_ok(data, len) || len < 8) return;
+    d = srt_mem_ptr(data);
+    if (le32(d) != 0x31464843u) return;
+    views = le32(d + 4);
+    for (v = 0; v < views && p + 40 <= len; v++) {
+        float xywh[4];
+        unsigned items;
+        xywh[0] = lef(d + p);
+        xywh[1] = lef(d + p + 4);
+        xywh[2] = lef(d + p + 8);
+        xywh[3] = lef(d + p + 12);
+        draw_view_add(xywh, le32(d + p + 16), lef(d + p + 20), lef(d + p + 24), lef(d + p + 28));
+        items = le32(d + p + 36);
+        p += 40;
+        for (i = 0; i < items && p + 28 <= len; i++) {
+            unsigned n = le32(d + p + 24), mode = le32(d + p + 4), k;
+            U8 blend[4];
+            ch360_item* it;
+            if (p + 28 + n * 20 > len) return;
+            if (mode >= 1 && mode <= 3) {
+                blend[0] = unorm8(lef(d + p + 8));
+                blend[1] = unorm8(lef(d + p + 12));
+                blend[2] = unorm8(lef(d + p + 16));
+                blend[3] = 255;
+            } else {
+                memset(blend, 255, 4);
+            }
+            if (!draw_grow((void**)&draw_verts, &draw_vert_cap, draw_vert_count + n, sizeof(ch360_vertex)) ||
+                !draw_grow((void**)&draw_items, &draw_item_cap, draw_item_count + 1, sizeof(ch360_item)))
+                return;
+            it = &draw_items[draw_item_count++];
+            it->texture = (int)le32(d + p);
+            it->mode = mode;
+            it->first = draw_vert_count;
+            it->textures[0] = it->textures[1] = -1;
+            memset(it->params, 0, sizeof(it->params));
+            for (k = 0; k < n; k++) {
+                const U8* s = d + p + 28 + k * 20;
+                ch360_vertex* out = &draw_verts[draw_vert_count++];
+                out->x = lef(s);
+                out->y = lef(s + 4);
+                out->u = lef(s + 8);
+                out->v = lef(s + 12);
+                memcpy(out->color, s + 16, 4);
+                memcpy(out->blend, blend, 4);
+            }
+            draw_item_done(it);
+            p += 28 + n * 20;
+        }
     }
-    draw_close_view();
-    put32(draw_buf + 4, draw_views);
-    ch360_plat_submit(draw_buf, draw_len);
-    draw_len = 0;
-    draw_views = 0;
+    i5_ch3608_drawX5Fend(inst);
 }
 
 void i5_ch36012_textureX5Ffile(wasmModuleInstance* inst, U32 id, U32 key, U32 len) {
@@ -305,7 +411,7 @@ void i5_ch36014_textureX5Fpixels(wasmModuleInstance* inst, U32 id, U32 w, U32 h,
 
 void i5_ch3605_audio(wasmModuleInstance* inst, U32 samples, U32 frames) {
     (void)inst;
-    if (frames == 0 || frames > 48000 || !srt_mem_ok(samples, frames * 4)) return;
+    if (frames == 0 || frames > 48000 || !srt_mem_ok(samples, frames * 8)) return;
     ch360_plat_audio(srt_mem_ptr(samples), (int)frames);
 }
 

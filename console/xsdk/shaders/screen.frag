@@ -8,6 +8,6 @@ layout(location = 0) out vec4 o_color;
 void main() {
     vec4 t = texture(g_tex, v_uv);
     vec3 rgb = vec3(1.0) - (vec3(1.0) - t.rgb) * (vec3(1.0) - v_blend.rgb);
-    float a = t.a * v_color.a;
+    float a = t.a * v_color.a * v_blend.a;   // blend.a: a UI item's alpha (1 for sprites)
     o_color = vec4(rgb * a, a);
 }

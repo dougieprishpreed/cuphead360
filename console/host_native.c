@@ -8,6 +8,7 @@
  * --root (default ".") is mounted as the player's "/"; the player's own
  * arguments follow "--" (default: run --console 1 --data /work/GameData
  * --save /work/managed/save_native). Build: tools/build_console.py --native. */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,19 +54,10 @@ static long tex_cost(int id) {
     return tex_bytes[id] < 0 ? 0 : tex_bytes[id];
 }
 
-static void trace_item(int id, const unsigned char* vs, unsigned n, float vx, float vy, float vw, float vh) {
-    float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
-    unsigned k;
-    int on;
+static void trace_item(const ch360_item* it, const ch360_view* v) {
+    int id = it->texture, on;
     if (id < 0 || id >= TRACE_IDS) return;
-    for (k = 0; k < n; k++, vs += 20) {
-        float x = ch360_f32(vs), y = ch360_f32(vs + 4);
-        if (x < x0) x0 = x;
-        if (x > x1) x1 = x;
-        if (y < y0) y0 = y;
-        if (y > y1) y1 = y;
-    }
-    on = !(x1 < vx || x0 > vx + vw || y1 < vy || y0 > vy + vh);
+    on = !(it->x1 < v->x || it->x0 > v->x + v->w || it->y1 < v->y || it->y0 > v->y + v->h);
     if (on) tex_on_frame[id] = frame_no;
     tex_any_frame[id] = frame_no;
     if (!tex_seen[id]) {
@@ -116,49 +108,40 @@ int ch360_plat_pad(int index, ch360_pad* out) {
     return index == 0; /* one connected pad, idle (the bot drives input when given) */
 }
 
-/* CH360_DUMP_DRAW=<file>:<n>: every n-th frame's draw list, as u32 frame, u32 length, the bytes
+/* CH360_DUMP_DRAW=<file>:<n>: every n-th frame's draw list, as u32 frame, u32 length and the bytes:
+ * u32 views, items, vertices, then the ch360_view, ch360_item and ch360_vertex records as they are
  * (tools comparing two ways of writing it, such as ConsoleHost's CH360_DRAW=managed). */
 static FILE* dump_file;
 static long dump_every;
 
-void ch360_plat_submit(const unsigned char* d, unsigned len) {
-    unsigned p = 8, v, i, views;
-    if (dump_file && dump_every > 0 && frame_no % dump_every == 0) {
-        unsigned head[2];
-        head[0] = (unsigned)frame_no;
-        head[1] = len;
-        fwrite(head, 4, 2, dump_file);
-        fwrite(d, 1, len, dump_file);
-    }
-    if (len < 8 || ch360_u32(d) != 0x31464843u) { bad_lists++; return; }
-    views = ch360_u32(d + 4);
-    views_seen = views;
+void ch360_plat_draw(const ch360_frame* f) {
+    unsigned v, i;
+    views_seen = f->view_count;
     draw_items = draw_vertices = 0;
-    for (v = 0; v < views; v++) {
-        unsigned items;
-        float vx, vy, vw, vh;
-        if (p + 40 > len) { bad_lists++; return; }
-        vx = ch360_f32(d + p);
-        vy = ch360_f32(d + p + 4);
-        vw = ch360_f32(d + p + 8);
-        vh = ch360_f32(d + p + 12);
-        items = ch360_u32(d + p + 36);
-        p += 40;
-        for (i = 0; i < items; i++) {
-            unsigned n;
-            int id;
-            if (p + 28 > len) { bad_lists++; return; }
-            id = (int)ch360_u32(d + p);
-            n = ch360_u32(d + p + 24);
-            p += 28;
-            if (n % 3 != 0 || p + n * 20 > len) { bad_lists++; return; }
-            if (trace_dir) trace_item(id, d + p, n, vx, vy, vw, vh);
-            p += n * 20;
+    if (dump_file && dump_every > 0 && frame_no % dump_every == 0) {
+        unsigned head[5];
+        head[0] = (unsigned)frame_no;
+        head[1] = 12 + f->view_count * (unsigned)sizeof(ch360_view) + f->item_count * (unsigned)sizeof(ch360_item) +
+                  f->vertex_count * (unsigned)sizeof(ch360_vertex);
+        head[2] = f->view_count;
+        head[3] = f->item_count;
+        head[4] = f->vertex_count;
+        fwrite(head, 4, 5, dump_file);
+        fwrite(f->views, sizeof(ch360_view), f->view_count, dump_file);
+        fwrite(f->items, sizeof(ch360_item), f->item_count, dump_file);
+        fwrite(f->vertices, sizeof(ch360_vertex), f->vertex_count, dump_file);
+    }
+    for (v = 0; v < f->view_count; v++) {
+        const ch360_view* view = &f->views[v];
+        if (view->first_item + view->items > f->item_count) { bad_lists++; return; }
+        for (i = view->first_item; i < view->first_item + view->items; i++) {
+            const ch360_item* it = &f->items[i];
+            if (it->count % 3 != 0 || it->first + it->count > f->vertex_count) { bad_lists++; return; }
+            if (trace_dir) trace_item(it, view);
             draw_items++;
-            draw_vertices += n;
+            draw_vertices += it->count;
         }
     }
-    if (p != len) bad_lists++;
     if (trace_dir) trace_frame();
 }
 
@@ -183,9 +166,22 @@ void ch360_plat_texture_pixels(int id, int width, int height, const unsigned cha
     }
 }
 
-void ch360_plat_audio(const unsigned char* s16le, int frames) {
+void ch360_plat_audio(const unsigned char* f32le, int frames) {
     audio_frames += (unsigned long)frames;
-    if (wav) fwrite(s16le, 4, (size_t)frames, wav);
+    if (wav) {
+        /* 16-bit for the WAV, rounded half to even as the managed writer did (Math.Round) */
+        static short pcm[48000 * 2];
+        int i;
+        for (i = 0; i < frames * 2; i++) {
+            float f;
+            unsigned u = (unsigned)f32le[4 * i] | ((unsigned)f32le[4 * i + 1] << 8) | ((unsigned)f32le[4 * i + 2] << 16) |
+                         ((unsigned)f32le[4 * i + 3] << 24);
+            memcpy(&f, &u, 4);
+            f = f < -1.0f ? -1.0f : f > 1.0f ? 1.0f : f;
+            pcm[i] = (short)lrintf(f * 32767.0f);
+        }
+        fwrite(pcm, 4, (size_t)frames, wav);
+    }
 }
 
 void ch360_plat_log(const char* text, size_t len) {

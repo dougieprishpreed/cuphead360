@@ -43,7 +43,7 @@ namespace Cuphead360.Player
         [DllImport("ch360", EntryPoint = "texture_pixels"), WasmImportLinkage]
         static extern void TexturePixels(int id, int width, int height, byte* bgra);
         [DllImport("ch360", EntryPoint = "audio"), WasmImportLinkage]
-        static extern void AudioOut(short* samples, int frames);
+        static extern void AudioOut(float* samples, int frames);
         [DllImport("ch360", EntryPoint = "ogg_open"), WasmImportLinkage]
         static extern int OggOpen(byte* path, int length, int* info);
         [DllImport("ch360", EntryPoint = "ogg_read"), WasmImportLinkage]
@@ -92,7 +92,6 @@ namespace Cuphead360.Player
         static int len;
         static readonly Dictionary<Texture, int> ids = new Dictionary<Texture, int>();
         static readonly Dictionary<int, int> versions = new Dictionary<int, int>();
-        static short[] pcm = new short[0];
         /// <summary>
         /// The last frame's real duration in seconds (Unity's deltaTime), 1/60 to
         /// 1/30: a slower frame moves the game less than real time rather than run
@@ -122,12 +121,9 @@ namespace Cuphead360.Player
         {
             var scripted = Inputs.Source;   // --bot / --input still drive a console run when given
             if (scripted == null) Inputs.Source = f => input;
-            Audio.Output = (mix, frames) =>
-            {
-                if (pcm.Length < frames * 2) pcm = new short[frames * 2];
-                for (int i = 0; i < frames * 2; i++) pcm[i] = (short)Math.Round(Math.Clamp(mix[i], -1f, 1f) * 32767f);
-                fixed (short* p = pcm) AudioOut(p, frames);
-            };
+            // The mix goes to the host as it is (floats; the host clamps where it hands them on):
+            // converting each sample here went through memory twice on the console's CPU.
+            Audio.Output = (mix, frames) => { fixed (float* p = mix) AudioOut(p, frames); };
             Console.WriteLine("CONSOLE host loop");
             TraceEx();
             int n = 0;
@@ -287,7 +283,10 @@ namespace Cuphead360.Player
         //  0 texture  1 mode  2-5 blend colour (the tint)  6 flags (1 vertex colours as they are, 2 the affine map, 4 clip)
         //  7 alpha scale  8/9 triangles  10/11 positions  12/13 uvs  14/15 colours (address, count)
         //  16-21 A00 A01 B0 A10 A11 B1  22-25 clip x0 y0 x1 y1
-        const int ItemSlots = 26;
+        //  26/27 mode 6's shadow and sky glow textures  28-30 its t, textureWidth, textureSpeed
+        const int ItemSlots = 31;
+        static readonly int shadowTex = ShaderProps.Id("_ShadowTex"), skyGlowTex = ShaderProps.Id("_SkyGlowTex");
+        static readonly int rayT = ShaderProps.Id("t"), rayWidth = ShaderProps.Id("textureWidth"), raySpeed = ShaderProps.Id("textureSpeed");
 
         static void HostItem(RenderList.Item it, int* a)
         {
@@ -298,10 +297,21 @@ namespace Cuphead360.Player
             if (it.Texture != null && (tex = TextureId(it.Texture)) < 0) return;   // not drawable (render textures)
             if (Clock.FrameCount <= NAnimator.WindowUntil && it.Name.StartsWith("Cuphead ["))
                 Console.WriteLine($"EXTRACE frame {Clock.FrameCount} draws {it.Name} texture {tex}, layer {it.Layer} order {it.Order}, {it.Triangles.Length} corners, tint a {it.Tint.a:0.##}");
-            uint mode = ModeOf(MaterialState.Of(it.Material)?.Shader);
+            var ms = MaterialState.Of(it.Material);
+            uint mode = ModeOf(ms?.Shader);
             var tint = it.Tint;
             bool blend = mode >= 1 && mode <= 3;
             var f = (float*)a;
+            a[26] = a[27] = -1;
+            f[28] = f[29] = f[30] = 0f;
+            if (mode == 6)
+            {
+                a[26] = ms.Textures.TryGetValue(shadowTex, out var st) && st != null ? TextureId(st) : -1;
+                a[27] = ms.Textures.TryGetValue(skyGlowTex, out var gt) && gt != null ? TextureId(gt) : -1;
+                f[28] = ms.Floats.TryGetValue(rayT, out var rt) ? rt : 0f;
+                f[29] = ms.Floats.TryGetValue(rayWidth, out var rw) ? rw : 1f;
+                f[30] = ms.Floats.TryGetValue(raySpeed, out var rs) ? rs : 0f;
+            }
             var pos = it.Screen ?? it.Local;
             a[0] = tex; a[1] = (int)mode;
             f[2] = tint.r; f[3] = tint.g; f[4] = tint.b; f[5] = tint.a;
@@ -441,6 +451,7 @@ namespace Cuphead360.Player
             else if (shader.Contains("SpriteBlendDynamic/Multiply") || shader.EndsWith("/MultiplyBlend")) mode = 2;
             else if (shader.Contains("SpriteBlendDynamic/Overlay") || shader.EndsWith("/OverlayBlend")) mode = 3;
             else if (shader.Contains("Distance Field")) mode = 5;
+            else if (shader.EndsWith("Sprites/LightRay")) mode = 6;
             modes[sh] = mode;
             return mode;
         }

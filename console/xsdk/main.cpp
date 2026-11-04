@@ -185,13 +185,8 @@ const size_t STAGING_RING = 8u << 20;
 // loads), the kernel and the driver: textures are not loaded into it.
 const unsigned MEMORY_FLOOR_MB = 24;
 
-struct Vertex {
-    float x, y, u, v;
-    float r, g, b, a;
-    float br, bg, bb, ba;
-};
 
-enum { MODE_SPRITE, MODE_SCREEN, MODE_MULTIPLY, MODE_OVERLAY, MODE_SDF, MODES };
+enum { MODE_SPRITE, MODE_SCREEN, MODE_MULTIPLY, MODE_OVERLAY, MODE_SDF, MODE_LIGHTRAY, MODES };
 
 struct Tex {
     VkImage image;
@@ -226,13 +221,16 @@ struct Frame {
 class Renderer {
 public:
     bool init();
-    void frame(const unsigned char* list, unsigned len);
+    void frame(const ch360_frame* f);
     void texture_file(int id, const char* key);
     void texture_pixels(int id, int w, int h, const unsigned char* bgra);
     size_t texture_bytes() const { return texture_bytes_; }
     // Frees textures not drawn lately for the player's memory (the commit wrap).
     size_t make_room(size_t bytes) { return release_unused(bytes); }
     double gpu_wait_ms, present_ms;
+    double host_ms_[8];
+    unsigned host_draws_, host_items_;
+    unsigned long long host_vertices_;
     unsigned uploads, evictions;
 
 private:
@@ -244,7 +242,7 @@ private:
     uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want);
     bool make_buffer(VkBuffer* buf, VkDeviceMemory* mem, void** map, VkDeviceSize size, VkBufferUsageFlags usage);
     VkShaderModule module(const uint32_t* code, unsigned bytes);
-    VkPipeline make_pipeline(VkShaderModule frag);
+    VkPipeline make_pipeline(VkShaderModule frag, VkPipelineLayout layout);
     bool make_image(Tex& t, VkFormat format, int w, int h);
     unsigned char* staging(size_t bytes, VkBuffer* buf, VkDeviceSize* off);
     void record_copy(Tex& t, VkBuffer buf, VkDeviceSize off);
@@ -274,6 +272,7 @@ private:
     VkDescriptorSetLayout set_layout_;
     VkDescriptorPool desc_pool_;
     VkPipelineLayout pipe_layout_;
+    VkPipelineLayout ray_layout_;   // the light ray: three textures, its floats for the fragment stage
     VkShaderModule vert_;
     VkPipeline pipes_[MODES];
     VkSampler sampler_;
@@ -559,6 +558,17 @@ bool Renderer::init() {
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &push;
     if (!vk(vkCreatePipelineLayout(dev_, &pli, NULL, &pipe_layout_), "vkCreatePipelineLayout")) return false;
+    VkDescriptorSetLayout three[3] = { set_layout_, set_layout_, set_layout_ };
+    VkPushConstantRange ray_push[2];
+    ray_push[0] = push;
+    ray_push[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    ray_push[1].offset = 16;
+    ray_push[1].size = 16;
+    pli.setLayoutCount = 3;
+    pli.pSetLayouts = three;
+    pli.pushConstantRangeCount = 2;
+    pli.pPushConstantRanges = ray_push;
+    if (!vk(vkCreatePipelineLayout(dev_, &pli, NULL, &ray_layout_), "vkCreatePipelineLayout (light ray)")) return false;
     VkDescriptorPoolSize ps;
     ps.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     ps.descriptorCount = 4096;
@@ -583,10 +593,11 @@ bool Renderer::init() {
                                     module(screen_frag_spirv, SCREEN_FRAG_SPIRV_BYTES),
                                     module(multiply_frag_spirv, MULTIPLY_FRAG_SPIRV_BYTES),
                                     module(overlay_frag_spirv, OVERLAY_FRAG_SPIRV_BYTES),
-                                    module(sdf_frag_spirv, SDF_FRAG_SPIRV_BYTES) };
+                                    module(sdf_frag_spirv, SDF_FRAG_SPIRV_BYTES),
+                                    module(lightray_frag_spirv, LIGHTRAY_FRAG_SPIRV_BYTES) };
     vert_ = vert;
     for (int i = 0; i < MODES; ++i) {
-        pipes_[i] = make_pipeline(frags[i]);
+        pipes_[i] = make_pipeline(frags[i], i == MODE_LIGHTRAY ? ray_layout_ : pipe_layout_);
         if (!pipes_[i]) return false;
     }
     void* vm = NULL;
@@ -606,7 +617,7 @@ bool Renderer::init() {
     return true;
 }
 
-VkPipeline Renderer::make_pipeline(VkShaderModule frag) {
+VkPipeline Renderer::make_pipeline(VkShaderModule frag, VkPipelineLayout layout) {
     VkPipelineShaderStageCreateInfo st[2];
     memset(st, 0, sizeof(st));
     st[0].sType = st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -616,11 +627,12 @@ VkPipeline Renderer::make_pipeline(VkShaderModule frag) {
     st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     st[1].module = frag;
     st[1].pName = "main";
-    VkVertexInputBindingDescription vb = { 0, (uint32_t)sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX };
+    // ch360_vertex: position and uv as floats, the colour and blend colour 8 bits each by address.
+    VkVertexInputBindingDescription vb = { 0, (uint32_t)sizeof(ch360_vertex), VK_VERTEX_INPUT_RATE_VERTEX };
     VkVertexInputAttributeDescription va[4] = { { 0, 0, VK_FORMAT_R32G32_SFLOAT, 0 },
-                                                { 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 16 },
+                                                { 1, 0, VK_FORMAT_R8G8B8A8_UNORM, 16 },
                                                 { 2, 0, VK_FORMAT_R32G32_SFLOAT, 8 },
-                                                { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 32 } };
+                                                { 3, 0, VK_FORMAT_R8G8B8A8_UNORM, 20 } };
     VkPipelineVertexInputStateCreateInfo vi;
     memset(&vi, 0, sizeof(vi));
     vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -679,7 +691,7 @@ VkPipeline Renderer::make_pipeline(VkShaderModule frag) {
     ci.pMultisampleState = &ms;
     ci.pColorBlendState = &cb;
     ci.pDynamicState = &ds;
-    ci.layout = pipe_layout_;
+    ci.layout = layout;
     ci.renderPass = pass_;
     VkPipeline p = VK_NULL_HANDLE;
     vk(vkCreateGraphicsPipelines(dev_, VK_NULL_HANDLE, 1, &ci, NULL, &p), "vkCreateGraphicsPipelines");
@@ -1032,68 +1044,65 @@ void Renderer::evict() {
         }
 }
 
-void Renderer::frame(const unsigned char* d, unsigned len) {
+void Renderer::frame(const ch360_frame* f) {
     ++frame_no_;
-    if (len < 8 || ch360_u32(d) != 0x31464843u) return;
-    unsigned views = ch360_u32(d + 4);
+    double t0 = now_ms();
 
-    // Pass 1: which items meet their view (the scissor would clip the rest
-    // away: the map draws 17 MB of textures wholly off screen), load what
-    // those draw, then run the uploads.
+    // Pass 1: which items meet their view (the glue worked out their boxes;
+    // the scissor would clip the rest away: the map draws 17 MB of textures
+    // wholly off screen), load what those draw, then run the uploads.
     Stage marker("vk: loading textures");
-    on_view_.clear();
-    unsigned p = 8;
-    for (unsigned v = 0; v < views && p + 40 <= len; ++v) {
-        float vx = ch360_f32(d + p), vy = ch360_f32(d + p + 4), vw = ch360_f32(d + p + 8), vh = ch360_f32(d + p + 12);
-        float rx0 = vx < 0 ? 0 : vx, ry0 = vy < 0 ? 0 : vy, rx1 = vx + vw > W ? W : vx + vw, ry1 = vy + vh > H ? H : vy + vh;
-        unsigned items = ch360_u32(d + p + 36);
-        p += 40;
-        for (unsigned i = 0; i < items && p + 28 <= len; ++i) {
-            int id = (int)ch360_u32(d + p);
-            unsigned n = ch360_u32(d + p + 24);
-            const unsigned char* vs = d + p + 28;
-            float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
-            for (unsigned k = 0; k < n; ++k, vs += 20) {
-                float x = ch360_f32(vs), y = ch360_f32(vs + 4);
-                if (x < x0) x0 = x;
-                if (x > x1) x1 = x;
-                if (y < y0) y0 = y;
-                if (y > y1) y1 = y;
-            }
-            bool on = n > 0 && x1 >= rx0 && x0 <= rx1 && y1 >= ry0 && y0 <= ry1;
-            on_view_.push_back(on ? 1 : 0);
-            Tex* t = on && id >= 0 ? tex(id) : NULL;
+    on_view_.assign(f->item_count, 0);
+    for (unsigned v = 0; v < f->view_count; ++v) {
+        const ch360_view& view = f->views[v];
+        float rx0 = view.x < 0 ? 0 : view.x, ry0 = view.y < 0 ? 0 : view.y;
+        float rx1 = view.x + view.w > W ? W : view.x + view.w, ry1 = view.y + view.h > H ? H : view.y + view.h;
+        unsigned end = view.first_item + view.items;
+        for (unsigned i = view.first_item; i < end && i < f->item_count; ++i) {
+            const ch360_item& it = f->items[i];
+            bool on = it.count > 0 && (it.x0 > it.x1 || (it.x1 >= rx0 && it.x0 <= rx1 && it.y1 >= ry0 && it.y0 <= ry1));
+            on_view_[i] = on ? 1 : 0;
+            Tex* t = on && it.texture >= 0 ? tex(it.texture) : NULL;
             if (t) {
                 load(*t);
                 t->last_used = frame_no_;
             }
-            p += 28 + n * 20;
+            for (int k = 0; on && it.mode == 6 && k < 2; ++k) {
+                Tex* e = it.textures[k] >= 0 ? tex(it.textures[k]) : NULL;
+                if (e) {
+                    load(*e);
+                    e->last_used = frame_no_;
+                }
+            }
         }
     }
-    Frame& f = frames_[frame_];
+    double t1 = now_ms();
+    Frame& fr = frames_[frame_];
     g_stage = "vk: waiting for the frame's fence";
-    double w0 = now_ms();
-    vkWaitForFences(dev_, 1, &f.fence, VK_TRUE, ~(uint64_t)0);
-    gpu_wait_ms += now_ms() - w0;
-    vkResetFences(dev_, 1, &f.fence);
-    for (size_t i = 0; i < f.dead.size(); ++i) {
-        vkFreeDescriptorSets(dev_, desc_pool_, 1, &f.dead[i].set);
-        vkDestroyImageView(dev_, f.dead[i].view, NULL);
-        vkDestroyImage(dev_, f.dead[i].image, NULL);
-        vkFreeMemory(dev_, f.dead[i].mem, NULL);
+    vkWaitForFences(dev_, 1, &fr.fence, VK_TRUE, ~(uint64_t)0);
+    double t2 = now_ms();
+    gpu_wait_ms += t2 - t1;
+    vkResetFences(dev_, 1, &fr.fence);
+    for (size_t i = 0; i < fr.dead.size(); ++i) {
+        vkFreeDescriptorSets(dev_, desc_pool_, 1, &fr.dead[i].set);
+        vkDestroyImageView(dev_, fr.dead[i].view, NULL);
+        vkDestroyImage(dev_, fr.dead[i].image, NULL);
+        vkFreeMemory(dev_, fr.dead[i].mem, NULL);
     }
-    f.dead.clear();
+    fr.dead.clear();
     flush_uploads();
+    double t3 = now_ms();
 
     uint32_t image = 0;
     g_stage = "vk: acquiring a swapchain image";
-    VkResult r = vkAcquireNextImageKHR(dev_, swapchain_, ~(uint64_t)0, f.acquired, VK_NULL_HANDLE, &image);
+    VkResult r = vkAcquireNextImageKHR(dev_, swapchain_, ~(uint64_t)0, fr.acquired, VK_NULL_HANDLE, &image);
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
         vk(r, "vkAcquireNextImageKHR");
         return;
     }
+    double t4 = now_ms();
     g_stage = "vk: recording";
-    VkCommandBuffer cmd = f.cmd;
+    VkCommandBuffer cmd = fr.cmd;
     vkResetCommandBuffer(cmd, 0);
     VkCommandBufferBeginInfo bi;
     memset(&bi, 0, sizeof(bi));
@@ -1115,41 +1124,43 @@ void Renderer::frame(const unsigned char* d, unsigned len) {
     vkCmdBeginRenderPass(cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     VkViewport vp = { 0, 0, (float)W, (float)H, 0, 1 };
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    float pc[4] = { 2.0f / W, 2.0f / H, -1.0f, -1.0f };
+    // Unity's screen pixels (bottom-left origin) straight to clip space: y flips here.
+    float pc[4] = { 2.0f / W, -2.0f / H, -1.0f, 1.0f };
     vkCmdPushConstants(cmd, pipe_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), pc);
     VkDeviceSize base = (VkDeviceSize)frame_ * VERTEX_RING;
     vkCmdBindVertexBuffers(cmd, 0, 1, &vbuf_, &base);
-    Vertex* ring = (Vertex*)(vmap_ + base);
-    size_t used = 0, cap = VERTEX_RING / sizeof(Vertex);
+    ch360_vertex* ring = (ch360_vertex*)(vmap_ + base);
+    size_t used = 0, cap = VERTEX_RING / sizeof(ch360_vertex);
 
     // Pass 2: record the views' draws, consecutive items of one pipeline and
-    // texture batched into one draw.
+    // texture batched into one draw; each item's vertices are copied as the
+    // glue wrote them.
     VkPipeline bound = VK_NULL_HANDLE;
     VkDescriptorSet bound_set = VK_NULL_HANDLE;
-    size_t batch_start = 0, batch_count = 0, item = 0;
-    p = 8;
-    for (unsigned v = 0; v < views && p + 40 <= len; ++v) {
-        float vx = ch360_f32(d + p), vy = ch360_f32(d + p + 4), vw = ch360_f32(d + p + 8), vh = ch360_f32(d + p + 12);
-        bool clear = ch360_u32(d + p + 16) != 0;
-        unsigned items = ch360_u32(d + p + 36);
+    size_t batch_start = 0, batch_count = 0;
+    unsigned draws = 0;
+    bool repush = false;
+    for (unsigned v = 0; v < f->view_count; ++v) {
+        const ch360_view& view = f->views[v];
         if (batch_count) {
             vkCmdDraw(cmd, (uint32_t)batch_count, 1, (uint32_t)batch_start, 0);
+            ++draws;
             batch_count = 0;
         }
         VkRect2D sc;
-        int x0 = (int)vx, y0 = H - (int)(vy + vh);
+        int x0 = (int)view.x, y0 = H - (int)(view.y + view.h);
         sc.offset.x = x0 < 0 ? 0 : x0;
         sc.offset.y = y0 < 0 ? 0 : y0;
-        sc.extent.width = (uint32_t)(vw < 0 ? 0 : (vw > W ? W : vw));
-        sc.extent.height = (uint32_t)(vh < 0 ? 0 : (vh > H ? H : vh));
+        sc.extent.width = (uint32_t)(view.w < 0 ? 0 : (view.w > W ? W : view.w));
+        sc.extent.height = (uint32_t)(view.h < 0 ? 0 : (view.h > H ? H : view.h));
         vkCmdSetScissor(cmd, 0, 1, &sc);
-        if (clear) {
+        if (view.clear) {
             VkClearAttachment ca;
             memset(&ca, 0, sizeof(ca));
             ca.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            ca.clearValue.color.float32[0] = ch360_f32(d + p + 20);
-            ca.clearValue.color.float32[1] = ch360_f32(d + p + 24);
-            ca.clearValue.color.float32[2] = ch360_f32(d + p + 28);
+            ca.clearValue.color.float32[0] = view.r;
+            ca.clearValue.color.float32[1] = view.g;
+            ca.clearValue.color.float32[2] = view.b;
             ca.clearValue.color.float32[3] = 1.0f;
             VkClearRect cr;
             cr.rect = sc;
@@ -1157,85 +1168,131 @@ void Renderer::frame(const unsigned char* d, unsigned len) {
             cr.layerCount = 1;
             vkCmdClearAttachments(cmd, 1, &ca, 1, &cr);
         }
-        p += 40;
-        for (unsigned i = 0; i < items && p + 28 <= len; ++i) {
-            int id = (int)ch360_u32(d + p);
-            unsigned mode = ch360_u32(d + p + 4);
-            float br = ch360_f32(d + p + 8), bg = ch360_f32(d + p + 12), bb = ch360_f32(d + p + 16), ba = ch360_f32(d + p + 20);
-            unsigned n = ch360_u32(d + p + 24);
-            const unsigned char* vs = d + p + 28;
-            p += 28 + n * 20;
-            if (item < on_view_.size() && !on_view_[item++]) continue;
-            Tex* t = id >= 0 ? tex(id) : &white_;
+        unsigned end = view.first_item + view.items;
+        for (unsigned i = view.first_item; i < end && i < f->item_count; ++i) {
+            const ch360_item& it = f->items[i];
+            if (!on_view_[i]) continue;
+            Tex* t = it.texture >= 0 ? tex(it.texture) : &white_;
             if (!t || !t->image) continue;
-            int m = mode == 1 ? MODE_SCREEN : mode == 2 ? MODE_MULTIPLY : mode == 3 ? MODE_OVERLAY : mode == 5 ? MODE_SDF : MODE_SPRITE;
-            if (used + n > cap) {
+            unsigned mode = it.mode;
+            int m = mode == 1 ? MODE_SCREEN : mode == 2 ? MODE_MULTIPLY : mode == 3 ? MODE_OVERLAY : mode == 5 ? MODE_SDF
+                  : mode == 6 ? MODE_LIGHTRAY : MODE_SPRITE;
+            if (used + it.count > cap) {
                 if (!overflow_logged_) logf("vk: vertex ring full (%u vertices)", (unsigned)cap);
                 overflow_logged_ = true;
                 break;
             }
+            if (m == MODE_LIGHTRAY) {
+                // A draw of its own: three textures and its floats.
+                if (batch_count) {
+                    vkCmdDraw(cmd, (uint32_t)batch_count, 1, (uint32_t)batch_start, 0);
+                    ++draws;
+                    batch_count = 0;
+                }
+                Tex* e[2];
+                for (int k = 0; k < 2; ++k) {
+                    e[k] = it.textures[k] >= 0 ? tex(it.textures[k]) : NULL;
+                    if (!e[k] || !e[k]->image) e[k] = &white_;
+                }
+                VkDescriptorSet sets[3] = { t->set, e[0]->set, e[1]->set };
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipes_[m]);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ray_layout_, 0, 3, sets, 0, NULL);
+                vkCmdPushConstants(cmd, ray_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), pc);
+                vkCmdPushConstants(cmd, ray_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 16, sizeof(it.params), it.params);
+                g_memcpy(&ring[used], &f->vertices[it.first], it.count * sizeof(ch360_vertex));
+                vkCmdDraw(cmd, it.count, 1, (uint32_t)used, 0);
+                ++draws;
+                used += it.count;
+                bound = pipes_[m];
+                bound_set = VK_NULL_HANDLE;
+                repush = true;
+                continue;
+            }
             if (pipes_[m] != bound || t->set != bound_set) {
-                if (batch_count) vkCmdDraw(cmd, (uint32_t)batch_count, 1, (uint32_t)batch_start, 0);
+                if (batch_count) {
+                    vkCmdDraw(cmd, (uint32_t)batch_count, 1, (uint32_t)batch_start, 0);
+                    ++draws;
+                }
                 batch_start = used;
                 batch_count = 0;
                 if (pipes_[m] != bound) vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipes_[m]);
+                if (repush) {   // after a light ray's layout
+                    vkCmdPushConstants(cmd, pipe_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), pc);
+                    repush = false;
+                }
                 if (t->set != bound_set)
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe_layout_, 0, 1, &t->set, 0, NULL);
                 bound = pipes_[m];
                 bound_set = t->set;
             }
-            Vertex tmp;
-            for (unsigned k = 0; k < n; ++k, vs += 20) {
-                tmp.x = ch360_f32(vs);
-                tmp.y = (float)H - ch360_f32(vs + 4);
-                tmp.u = ch360_f32(vs + 8);
-                tmp.v = ch360_f32(vs + 12);
-                tmp.r = vs[16] / 255.0f;
-                tmp.g = vs[17] / 255.0f;
-                tmp.b = vs[18] / 255.0f;
-                tmp.a = vs[19] / 255.0f;
-                tmp.br = br;
-                tmp.bg = bg;
-                tmp.bb = bb;
-                tmp.ba = ba;
-                g_memcpy(&ring[used + k], &tmp, sizeof(tmp));
-            }
-            used += n;
-            batch_count += n;
+            g_memcpy(&ring[used], &f->vertices[it.first], it.count * sizeof(ch360_vertex));
+            used += it.count;
+            batch_count += it.count;
         }
     }
-    if (batch_count) vkCmdDraw(cmd, (uint32_t)batch_count, 1, (uint32_t)batch_start, 0);
+    if (batch_count) {
+        vkCmdDraw(cmd, (uint32_t)batch_count, 1, (uint32_t)batch_start, 0);
+        ++draws;
+    }
     vkCmdEndRenderPass(cmd);
     vkEndCommandBuffer(cmd);
+    double t5 = now_ms();
     VkPipelineStageFlags stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo si;
     memset(&si, 0, sizeof(si));
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.waitSemaphoreCount = 1;
-    si.pWaitSemaphores = &f.acquired;
+    si.pWaitSemaphores = &fr.acquired;
     si.pWaitDstStageMask = &stage;
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
     si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores = &f.rendered;
+    si.pSignalSemaphores = &fr.rendered;
     g_stage = "vk: submitting";
-    vk(vkQueueSubmit(queue_, 1, &si, f.fence), "vkQueueSubmit");
+    vk(vkQueueSubmit(queue_, 1, &si, fr.fence), "vkQueueSubmit");
+    double t6 = now_ms();
     VkPresentInfoKHR pi;
     memset(&pi, 0, sizeof(pi));
     pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores = &f.rendered;
+    pi.pWaitSemaphores = &fr.rendered;
     pi.swapchainCount = 1;
     pi.pSwapchains = &swapchain_;
     pi.pImageIndices = &image;
     g_stage = "vk: presenting";
-    double p0 = now_ms();
     vk(vkQueuePresentKHR(queue_, &pi), "vkQueuePresentKHR");
-    present_ms += now_ms() - p0;
+    double t7 = now_ms();
+    present_ms += t7 - t6;
     frame_ = (frame_ + 1) % FRAMES;
     g_stage = "vk: evicting";
     evict();
     g_texture_bytes = texture_bytes_;
+
+    // Where the host's part of a frame goes, averaged over 300 frames (after
+    // the player's FRAMES line): the glue writing the list, pass 1 with its
+    // texture loads, the GPU fence, uploads, acquiring, recording (vertex
+    // copies), vkQueueSubmit and present.
+    host_ms_[0] += f->build_ms;
+    host_ms_[1] += t1 - t0;
+    host_ms_[2] += t2 - t1;
+    host_ms_[3] += t3 - t2;
+    host_ms_[4] += t4 - t3;
+    host_ms_[5] += t5 - t4;
+    host_ms_[6] += t6 - t5;
+    host_ms_[7] += t7 - t6;
+    host_draws_ += draws;
+    host_vertices_ += used;
+    host_items_ += f->item_count;
+    if (frame_no_ % 300 == 0) {
+        logf("HOST frames %u-%u: glue %.1f, boxes+loads %.1f, fence %.1f, uploads %.1f, acquire %.1f, record %.1f, submit %.1f, "
+             "present %.1f ms/frame; %u draws, %u vertices, %u items a frame",
+             frame_no_ - 299, frame_no_, host_ms_[0] / 300, host_ms_[1] / 300, host_ms_[2] / 300, host_ms_[3] / 300,
+             host_ms_[4] / 300, host_ms_[5] / 300, host_ms_[6] / 300, host_ms_[7] / 300, host_draws_ / 300,
+             (unsigned)(host_vertices_ / 300), host_items_ / 300);
+        memset(host_ms_, 0, sizeof(host_ms_));
+        host_draws_ = host_items_ = 0;
+        host_vertices_ = 0;
+    }
 }
 
 Renderer* g_renderer = NULL;
@@ -1269,8 +1326,9 @@ void* audio_thread(void*) {
         if (avail < XSDK_AUDIO_FRAME_SAMPLES) ++g_audio_underruns;
         for (int i = 0; i < XSDK_AUDIO_FRAME_SAMPLES && g_ring_read != g_ring_write; ++i) {
             unsigned at = (g_ring_read % AUDIO_RING) * 2;
-            left[i] = g_ring[at];
-            right[i] = g_ring[at + 1];
+            float l = g_ring[at], r = g_ring[at + 1];
+            left[i] = l < -1.0f ? -1.0f : l > 1.0f ? 1.0f : l;
+            right[i] = r < -1.0f ? -1.0f : r > 1.0f ? 1.0f : r;
             ++g_ring_read;
         }
         pthread_mutex_unlock(&g_audio_lock);
@@ -1377,8 +1435,8 @@ extern "C" int ch360_plat_pad(int index, ch360_pad* out) {
     return 1;
 }
 
-extern "C" void ch360_plat_submit(const unsigned char* data, unsigned len) {
-    g_renderer->frame(data, len);
+extern "C" void ch360_plat_draw(const ch360_frame* f) {
+    g_renderer->frame(f);
     g_stage = "game";
 }
 
@@ -1393,11 +1451,15 @@ extern "C" void ch360_plat_audio(const unsigned char* s, int frames) {
     if (!g_audio_open) return;
     Stage stage("host: audio");
     pthread_mutex_lock(&g_audio_lock);
-    for (int i = 0; i < frames; ++i, s += 4) {
+    // Little-endian floats into the ring as byte-swapped words: no trip
+    // through the FPU (each one a load-hit-store stall on this CPU).
+    for (int i = 0; i < frames; ++i, s += 8) {
         if (g_ring_write - g_ring_read >= AUDIO_RING) ++g_ring_read;   // full: drop the oldest
         unsigned at = (g_ring_write % AUDIO_RING) * 2;
-        g_ring[at] = (short)(s[0] | (s[1] << 8)) / 32768.0f;
-        g_ring[at + 1] = (short)(s[2] | (s[3] << 8)) / 32768.0f;
+        uint32_t l = (uint32_t)s[0] | ((uint32_t)s[1] << 8) | ((uint32_t)s[2] << 16) | ((uint32_t)s[3] << 24);
+        uint32_t r = (uint32_t)s[4] | ((uint32_t)s[5] << 8) | ((uint32_t)s[6] << 16) | ((uint32_t)s[7] << 24);
+        memcpy(&g_ring[at], &l, 4);
+        memcpy(&g_ring[at + 1], &r, 4);
         ++g_ring_write;
     }
     pthread_mutex_unlock(&g_audio_lock);

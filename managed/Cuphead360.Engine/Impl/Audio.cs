@@ -165,6 +165,8 @@ namespace Cuphead360.Engine
         static readonly List<Voice> voices = new List<Voice>();
         static readonly Dictionary<AudioClip, Clip> clips = new Dictionary<AudioClip, Clip>();
         static long cachedSamples, useCounter, mixedFrames;
+        /// <summary>Clips longer than this (seconds) stream rather than decode whole.</summary>
+        public static float StreamOver = 1.5f;
         /// <summary>Decoded short clips kept, in floats (the console host lowers it).</summary>
         public static long CacheFloats = 128L * 1024 * 1024;
         static double frameCarry;
@@ -195,7 +197,10 @@ namespace Cuphead360.Engine
                 ci.Channels = Math.Max(1, (int)Tree.Int(t, "m_Channels", 1));
                 ci.Frequency = Math.Max(1, (int)Tree.Int(t, "m_Frequency", 44100));
                 ci.Frames = (long)Math.Round(Tree.Float(t, "m_Length") * ci.Frequency);
-                ci.Stream = Tree.Int(t, "m_LoadType") == 2 || Tree.Float(t, "m_Length") > 12f;
+                // Longer clips stream (decoded as they play): decoding one whole when it first
+                // sounds took 0.4-0.6 s of a console frame (the world map's 3D loops as the player
+                // neared them, the first EX shot's sound).
+                ci.Stream = Tree.Int(t, "m_LoadType") == 2 || Tree.Float(t, "m_Length") > StreamOver;
                 string k = src.File.Path.Replace('/', '_');
                 if (k.EndsWith(".chob")) k = k.Substring(0, k.Length - 5);
                 ci.Key = k + "_" + IdText.Of(src.PathId);

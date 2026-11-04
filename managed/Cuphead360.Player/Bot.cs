@@ -147,6 +147,28 @@ namespace Cuphead360.Player
                             if (t - stillSince > 150 && d.magnitude > radius + 1f && (t - stillSince) % 45 < 6) p.Buttons |= PadButton.A;
                             return f;
                         }
+                    case "invincible":
+                        {
+                            // Synthetic: the game's own debug switch (PlayerStatsManager.DebugInvincible; a player's
+                            // Awake clears it), so a bot that can't win a fight still plays all of its phases.
+                            Type stats = null;
+                            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies()) stats ??= asm.GetType("PlayerStatsManager");
+                            var prop = stats?.GetProperty("DebugInvincible", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                            prop?.GetSetMethod(true)?.Invoke(null, new object[] { true });
+                            Next(prop != null ? "SYNTHETIC: PlayerStatsManager.DebugInvincible on" : "PlayerStatsManager.DebugInvincible not found");
+                            continue;
+                        }
+                    case "megadamage":
+                        {
+                            // Synthetic: the game's own debug switch (DamageReceiver.DEBUG_DO_MEGA_DAMAGE: the
+                            // player's damage x10), to reach a boss's later phases with a bot that can't win them.
+                            Type receiver = null;
+                            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies()) receiver ??= asm.GetType("DamageReceiver");
+                            var fld = receiver?.GetField("DEBUG_DO_MEGA_DAMAGE", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                            fld?.SetValue(null, true);
+                            Next(fld != null ? "SYNTHETIC: DamageReceiver.DEBUG_DO_MEGA_DAMAGE on (player damage x10)" : "DamageReceiver.DEBUG_DO_MEGA_DAMAGE not found");
+                            continue;
+                        }
                     case "fight":
                         {
                             int timeout = s.Length > 1 ? I(s[1]) : 36000;

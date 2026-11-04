@@ -23,10 +23,16 @@ WASI module, translated to C by w2c2 and compiled for the console's CPU.
   its mesh's own vertices to pixels; UGUI masks become clip rectangles
   (nested stencil values kept as rectangles: exact for rectangular masks).
   `submit`, the draw list written in managed code, is still there behind
-  `CH360_DRAW=managed`, to compare with on the PC.
+  `CH360_DRAW=managed`, to compare with on the PC. Mode 6 is the Ruse of
+  an Ooze's light rays (`shaders/lightray.frag`, translated from the
+  game's own pixel program: three textures and its material's floats).
+  The mixed audio goes over as floats.
 - **The glue** (`ch360_imports.c`): those imports (the draw imports
-  transform, colour, clip and write the vertices natively, into the same
-  draw list the platform layer reads), and the start of the module under
+  write the frame, `ch360_frame` in `ch360_host.h`: vertices in the GPU's
+  layout and the host's byte order, uvs and 8-bit colours copied as words
+  and only sprite positions arithmetic, since on the console's CPU every
+  move between integer and float registers stalls through memory; items
+  with screen boxes, clipped to UGUI masks), and the start of the module under
   Spire360's wasm runtime (srt, WASI preview1) on a guest thread with a
   16 MB stack; its stdout and stderr go to the log.
 - **The host** (`xsdk/main.cpp`): Vulkan through vulkan4xenon (one pass a

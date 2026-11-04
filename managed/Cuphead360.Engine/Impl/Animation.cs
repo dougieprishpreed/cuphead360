@@ -748,7 +748,12 @@ namespace Cuphead360.Engine
                     double k = Math.Ceiling(n0 - e);
                     if (k < 0) k = 0;
                     exitReached = n0 < k + e && k + e <= n1;
-                    if (!loop && n1 >= e) exitReached = true;
+                    // A state that doesn't loop stays past its exit point once there. Exit time 0
+                    // is first reached at the clip's end (its next loop), not on entry: the
+                    // Ooze's Jump_Squish_End -> Up / Punch_Start (exit 0) left at once, before the
+                    // punch's trigger, and the slime hung in Up; the game's many exit-0 hand-offs
+                    // (intros, turns, squishes) played as one frame.
+                    if (!loop && n1 >= (e > 0f ? e : 1f)) exitReached = true;
                 }
                 else exitReached = n0 < e && e <= n1 || (!loop && n1 >= e);
                 if (!exitReached) return false;

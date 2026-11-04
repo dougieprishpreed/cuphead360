@@ -3,15 +3,19 @@
  * platform layer implements: host_native.c on the PC (headless checks of
  * the translated C), xsdk/main.cpp on the Xbox 360.
  *
- * The draw list (written by the glue from ConsoleHost's draw_view/draw_item
- * calls, or by ConsoleHost itself with CH360_DRAW=managed; little-endian):
+ * The frame's draw list (ch360_frame, below) is written by the glue in the
+ * host's own byte order, its vertices already in the GPU's layout: from
+ * ConsoleHost's draw_view/draw_item calls, or, with CH360_DRAW=managed
+ * (a PC check), from the little-endian list ConsoleHost writes itself:
  *   u32 'CHF1', u32 views
  *   view: f32 x y w h, u32 clear, f32 r g b a, u32 items
  *   item: i32 texture (-1 none), u32 mode, f32 blend r g b a, u32 vertices
- *         vertex: f32 x y u v, u8 r g b a      (a triangle list)
+ *         vertex: f32 x y u v, u8 r g b a      (a triangle list; the
+ *         colour already times the renderer colour for modes 0 and 5)
  * Positions are screen pixels, origin bottom-left (Unity's); uv has v = 0
  * at a texture's first stored row. Modes: 0 texel * colour, 1 screen,
- * 2 multiply, 3 overlay (blend colour = renderer colour), 5 SDF text. */
+ * 2 multiply, 3 overlay (blend colour = renderer colour), 5 SDF text,
+ * 6 light ray (the item's extra textures and floats). */
 #ifndef CH360_HOST_H
 #define CH360_HOST_H
 
@@ -33,14 +37,54 @@ typedef struct ch360_pad {
 int ch360_plat_frame_begin(void);
 /* Fills *out for pad 0..3; 0 if it is not connected. */
 int ch360_plat_pad(int index, ch360_pad* out);
-/* The frame's draw list (bytes in guest memory, valid during the call). */
-void ch360_plat_submit(const unsigned char* data, unsigned len);
+/* A vertex as the GPU reads it (24 bytes): position in screen pixels from
+ * the bottom left, uv, the vertex colour and the item's blend colour, 8 bits
+ * each by address (r g b a). The shaders take texel * colour * blend for
+ * modes 0 and 5; for the blend modes (1-3) blend.rgb is the renderer colour
+ * and the alpha is colour.a * blend.a. */
+typedef struct ch360_vertex {
+    float x, y, u, v;
+    unsigned char color[4], blend[4];
+} ch360_vertex;
+
+/* An item: its texture (-1 none), mode, vertices (a triangle list) and their
+ * screen box (x0 > x1 when not worked out: drawn wherever it lands). */
+typedef struct ch360_item {
+    int texture;
+    unsigned mode, first, count;
+    float x0, y0, x1, y1;
+    /* mode 6 (Cuphead/Sprites/LightRay): its shadow and sky glow textures
+     * (-1 none) and its material's t, textureWidth, textureSpeed */
+    int textures[2];
+    float params[4];
+} ch360_item;
+
+typedef struct ch360_view {
+    float x, y, w, h;
+    unsigned clear;
+    float r, g, b;
+    unsigned first_item, items;
+} ch360_view;
+
+typedef struct ch360_frame {
+    const ch360_view* views;
+    unsigned view_count;
+    const ch360_item* items;
+    unsigned item_count;
+    const ch360_vertex* vertices;
+    unsigned vertex_count;
+    double build_ms; /* the glue's time writing it */
+} ch360_frame;
+
+/* The frame's draw list (valid during the call). */
+void ch360_plat_draw(const ch360_frame* frame);
 /* Texture id is the converted texture <key> (GameData/ctex/<key>.ctx). */
 void ch360_plat_texture_file(int id, const char* key);
 /* Texture id's pixels (run-time textures: font atlases), BGRA rows. */
 void ch360_plat_texture_pixels(int id, int width, int height, const unsigned char* bgra);
-/* Mixed audio: frames of 48 kHz stereo 16-bit little-endian samples. */
-void ch360_plat_audio(const unsigned char* s16le, int frames);
+/* Mixed audio: frames of 48 kHz stereo, interleaved little-endian floats
+ * (unclamped; the platform clamps where it hands them on). */
+void ch360_plat_audio(const unsigned char* f32le, int frames);
 /* The player's stdout and stderr. */
 void ch360_plat_log(const char* text, size_t len);
 

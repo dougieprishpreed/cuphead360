@@ -10,6 +10,6 @@ void main() {
     vec3 lo = 2.0 * t.rgb * v_blend.rgb;
     vec3 hi = vec3(1.0) - 2.0 * (vec3(1.0) - t.rgb) * (vec3(1.0) - v_blend.rgb);
     vec3 rgb = mix(lo, hi, step(vec3(0.5), t.rgb));
-    float a = t.a * v_color.a;
+    float a = t.a * v_color.a * v_blend.a;   // blend.a: a UI item's alpha (1 for sprites)
     o_color = vec4(rgb * a, a);
 }

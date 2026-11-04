@@ -44,9 +44,10 @@ time (builds, conversions, ILC) so the user's PC stays usable;
     staging ring and texture budget/floor, CHOB font holes and block
     cache; staged for the sixth run.
   - `168c04a` round 11b (the map crash), `98a52e0` round 12 (native
-    Vorbis, a lighter render list, fitted DXT); round 13's commit after
-    them (staged names, cached staging, the native draw path, masks, 3D
-    audio, the EX trace).
+    Vorbis, a lighter render list, fitted DXT), `7d26d84` round 13 (staged
+    names, cached staging, the native draw path, masks, 3D audio, the EX
+    trace); round 14's commit after them (exit time 0, the host frame,
+    light rays, streamed clips).
 - Side branch `interpreter-d1-r4-wip` (`ecbff5b`): the interrupted D1 r4
   interpreter edits, committed as found, not accepted, not continued.
 - Uncommitted: nothing intended. `managed/lib`, `managed/**/Generated`,
@@ -108,8 +109,74 @@ Xenia, hardware, memory.
 
 ## Next round (in order)
 
-0. **The ninth run (round 13 build staged: hitches, the map, the results
-   board, 3D sound).** The eighth run (VERIFICATION "eighth hardware run"):
+0. **The tenth run (round 14 build staged: the map's host costs, the
+   Ooze, light rays).** The ninth run (VERIFICATION "ninth hardware run"):
+   fights nearly smooth, the map ~112 ms a steady frame (submit 33, update
+   21, list 19, audio 16, fixed 8, physics 4.3), the Ooze hung after phase
+   1 and its rays drew black. Round 14:
+   - **Exit time 0:** a non-looping state's exit time 0 is now reached at
+     the clip's end. It was reached at once, which hung the Ooze and cut
+     every exit-0 hand-off short.
+   - **Host frame:** the glue writes `ch360_frame` in the GPU's vertex
+     layout. 8-bit colours are copied as words, positions are arithmetic
+     only for sprites, the host copies each item in one call, and a `HOST`
+     line splits its part of the frame.
+   - **Light ray mode:** translated from the game's own pixel program.
+   - **Audio:** clips over 1.5 s stream; the mix goes to the host as
+     floats.
+
+   Read:
+   - the `HOST` lines on the map: which part of the old 33 ms submit is
+     left, and the draw counts;
+   - `FRAMES`: audio against 16, list against 19;
+   - whether the map's `audio=` spikes are gone;
+   - the Ooze's phases and rays;
+   - the user's look at everything.
+
+   **The way to 30 fps (the user's goal: 30 locked, then 60 by
+   interpolation).** The translated code runs ~22x slower on the console
+   than on the PC. Native host work that touched little-endian floats ran
+   ~80x slower, from load-hit-store stalls: every integer/float register
+   move goes through memory, and every float in wasm memory is
+   byte-swapped through an integer register. So, measured phase by phase:
+   - **Move the float-heavy engine paths to native code that keeps its
+     own data in native byte order:**
+     - the mixer: voices, positions and gains from managed code; PCM and
+       decoding in the host, on its audio thread, which also ends the
+       underruns;
+     - the render list's per-item work: sprite matrices, sorting;
+     - Physics2D's shape tests;
+     - the animator's curve sampling.
+   - **Profile the game's own Update/FixedUpdate on the map:** Rewired
+     updates twice a frame and reads its clock often.
+   - **Frame pacing:** lock 30 fps (present every second vblank, a 1/30
+     step), then interpolate rendered transforms for 60.
+
+   **Textures at full fidelity within the budget.** At 720p, Cuphead is
+   drawn at ~1.1 and the Root Pack at ~1.4 screen pixels per 4096-source
+   texel. Full pages would be 16 MB each (the player's eight alone 128 MB),
+   but a scene uses a fraction of each page: the player atlas holds 2,392
+   sprites (Cuphead, Mugman, Chalice, the plane...).
+   - **Measure:** per scene, which sprites are drawn and at what scale
+     (captures of bot runs; for unvisited content, the sprites the
+     scene's animator clips reference).
+   - **Repack:** at conversion time, repack atlases by what is used
+     together (character, animation group, scene) at the resolution
+     actually needed, then load only the groups a scene uses. The engine
+     maps (texture, sprite rect) to (page, rect) from a table the
+     converter writes.
+   - **Memory:** cut the player's 216 MB: the managed heap (~130-150 MB),
+     the 100 MB XEX.
+   - **Hitches:** preload a scene's pages during its load; loading screens
+     need the scene built over several frames (async) so the hourglass
+     animates. The logo hitch is the same lazy load.
+
+   **Custom shaders:** 20+ besides LightRay. Translate their small DXBC
+   pixel programs into console shaders the same way, rather than
+   special-casing each.
+
+   Round 13's item, kept: the ninth run (round 13 build staged: hitches,
+   the map, the results board, 3D sound). The eighth run (VERIFICATION "eighth hardware run"):
    the chips were fixed; the map was at ~7 fps (145 ms: list 38.6, submit
    30.5, audio 30, update 20.7 ms); the Root Pack was at ~16 fps with hitches
    everywhere: every texture open ~100 ms and every first clip ~650 ms (FAT32
