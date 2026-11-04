@@ -10,25 +10,9 @@ installed copy.
 
 ## Status
 
-**Early alpha, playable in parts on real hardware.**
+**Early alpha, not ready for release.**
 
-Working on the console:
-
-- The title screen, menus, save slots and the world map.
-- Boss fights (tested: The Root Pack and Ruse of an Ooze, start to finish),
-  close to full speed.
-- Music and sound, saves, and the controller.
-- Every sprite drawn at the game's full resolution.
-
-Still in progress:
-
-- Hitches in fights, and pauses when a level first loads.
-- Run-and-gun levels: the first one ran very slowly in the last test (a fix
-  is in the current build, not yet tested on the console).
-- Loading screens that freeze instead of animating (also in the current
-  build, untested).
-- About 20 special shader effects that still draw as plain sprites.
-- Most levels and the DLC haven't been tried on the console yet.
+Wait a couple of days.
 
 Tested with the GOG version of Cuphead 1.3.2, with The Delicious Last Course.
 
