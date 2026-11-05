@@ -14,7 +14,7 @@ namespace Cuphead360.Engine
     {
         static readonly bool traceMem = Environment.GetEnvironmentVariable("CH360_TRACE_MEM") == "1";
         /// <summary>Log each load's time and the converted files it read (the console host sets it).</summary>
-        public static bool Timing;
+        public static bool Timing = Environment.GetEnvironmentVariable("CH360_SCENE_TIMING") == "1";
         sealed class Pending
         {
             public int BuildIndex;
@@ -122,11 +122,15 @@ namespace Cuphead360.Engine
                 Loads++;
                 Log.Line($"SCENE loaded {name} (build {Index}): {build.GameObjects.Count} GameObjects, {build.Components.Count} components");
                 long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
+                long calls0 = Clone.Calls, copied0 = Clone.Copied, tree0 = Clone.TreeTicks, fields0 = Clone.FieldTicks;
+                long bind0 = Behaviours.BindTicks, objs0 = Behaviours.BoundObjects, thunks0 = Behaviours.BoundThunks;
                 build.Activate();
+                if (!Additive) AssetUnload.SceneActivated(name);
                 if (Timing)
                 {
                     Log.Line($"SCENE {name}: built in {Ms(t0, tReady)} ms over {frames} frames ({ChobFile.LoadedFiles - files0} files read, "
-                        + $"{(ChobFile.LoadedBytes - bytes0) >> 20} MB), activated in {Ms(t1, System.Diagnostics.Stopwatch.GetTimestamp())} ms");
+                        + $"{(ChobFile.LoadedBytes - bytes0) >> 20} MB), activated in {Ms(t1, System.Diagnostics.Stopwatch.GetTimestamp())} ms "
+                        + $"({Instantiated(calls0, copied0, tree0, fields0, bind0, objs0, thunks0)})");
                     MemoryLine();
                 }
                 AfterLoad(scene, Index, Additive);
@@ -200,11 +204,14 @@ namespace Cuphead360.Engine
                 + (traceMem ? $"; heap {GC.GetTotalMemory(true) >> 20} MB, files read {ChobFile.LoadedFiles} ({ChobFile.LoadedBytes >> 20} MB), live objects {Objects.LiveCount}" : ""));
             if (traceMem) Log.Line(ChobObject.Census(AssetDb.LoadedFiles) + $"; trees dropped {ChobObject.TreesDropped}, parsed again {ChobObject.TreesReparsed}");
             long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long calls0 = Clone.Calls, copied0 = Clone.Copied, tree0 = Clone.TreeTicks, fields0 = Clone.FieldTicks;
+            long bind0 = Behaviours.BindTicks, objs0 = Behaviours.BoundObjects, thunks0 = Behaviours.BoundThunks;
             build.Activate();
+            if (!additive) AssetUnload.SceneActivated(name);
             if (Timing)
             {
                 Log.Line($"SCENE {name}: built in {Ms(t0, t1)} ms ({ChobFile.LoadedFiles - files0} files read, {(ChobFile.LoadedBytes - bytes0) >> 20} MB), "
-                    + $"activated in {Ms(t1, System.Diagnostics.Stopwatch.GetTimestamp())} ms");
+                    + $"activated in {Ms(t1, System.Diagnostics.Stopwatch.GetTimestamp())} ms ({Instantiated(calls0, copied0, tree0, fields0, bind0, objs0, thunks0)})");
                 MemoryLine();
             }
             AfterLoad(scene, index, additive);
@@ -224,14 +231,23 @@ namespace Cuphead360.Engine
 
         static long Ms(long a, long b) => (b - a) * 1000 / System.Diagnostics.Stopwatch.Frequency;
 
+        /// <summary>What an activation instantiated since the counters were read (the scene timing lines).</summary>
+        static string Instantiated(long calls0, long copied0, long tree0, long fields0, long bind0, long objs0, long thunks0) =>
+            $"{Clone.Calls - calls0} instantiated, {Clone.Copied - copied0} objects: copies made in {Ms(tree0, Clone.TreeTicks)} ms, "
+            + $"their state copied in {Ms(fields0, Clone.FieldTicks)} ms; classes copied so far by generated copies {Serialization.FastClasses}, by reflection {Serialization.SlowClasses}; "
+            + $"messages bound in {Ms(bind0, Behaviours.BindTicks)} ms ({Behaviours.BoundThunks - thunks0} thunks, {Behaviours.BoundObjects - objs0} delegates for single objects)";
+
         /// <summary>
         /// With Timing (the console), what the heap holds after a load: its size (no collection
         /// forced), live objects, and the converted files' bytes and parsed trees by type. The
         /// player's memory grew 101 -> 216 MB over the twelfth run.
         /// </summary>
-        static void MemoryLine() =>
+        static void MemoryLine()
+        {
             Log.Line($"MEMORY after the load: heap {GC.GetTotalMemory(false) >> 20} MB, live objects {Objects.LiveCount}, files loaded {AssetDb.LoadedFiles.Count()}; "
                 + ChobObject.Census(AssetDb.LoadedFiles));
+            Log.Line(Objects.Census(14));
+        }
 
         static void UnloadAll()
         {
@@ -368,6 +384,10 @@ namespace Cuphead360.Engine
         }
         public static UObject[] UnityEngine_Resources__FindObjectsOfTypeAll(Type type) => Find.ObjectsOfType(type, true);
         public static void UnityEngine_Resources__UnloadAsset(UObject assetToUnload) { }
-        public static AsyncOperation UnityEngine_Resources__UnloadUnusedAssets() => Scenes.NewOperation(new Scenes.Operation { Done = true, Progress = 1 });
+        public static AsyncOperation UnityEngine_Resources__UnloadUnusedAssets()
+        {
+            AssetUnload.Requested();
+            return Scenes.NewOperation(new Scenes.Operation { Done = true, Progress = 1 });
+        }
     }
 }

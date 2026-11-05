@@ -39,14 +39,36 @@ static int file_count;
 static int set_first[PACK_SETS], set_files[PACK_SETS];
 static int set_count;
 
-static unsigned char* in_buf;       /* stored chunks, PACK_IN bytes */
-static unsigned char* chunk_buf;    /* the last chunk decoded whole */
-static int chunk_file = -1;
-static unsigned chunk_entry, chunk_index;
-static unsigned* table;             /* the last entry's chunk sizes, then their starts */
-static unsigned table_cap, table_chunks;
-static int table_file = -1;
-static unsigned table_entry;
+struct ch360_pack_reader {
+    unsigned char* in_buf;       /* stored chunks, PACK_IN bytes */
+    unsigned char* chunk_buf;    /* the last chunk decoded whole */
+    int chunk_file;
+    unsigned chunk_entry, chunk_index;
+    unsigned* table;             /* the last entry's chunk sizes, then their starts */
+    unsigned table_cap, table_chunks;
+    int table_file;
+    unsigned table_entry;
+};
+
+static ch360_pack_reader default_reader = { NULL, NULL, -1, 0, 0, NULL, 0, 0, -1, 0 };
+
+/* A reader for another thread, with everything allocated here: it never calls
+ * malloc while reading (the table holds an entry of up to 2 GB in 256 KB chunks). */
+ch360_pack_reader* ch360_pack_reader_new(void) {
+    ch360_pack_reader* r = (ch360_pack_reader*)calloc(1, sizeof(ch360_pack_reader));
+    if (r == NULL) return NULL;
+    r->chunk_file = -1;
+    r->table_file = -1;
+    r->in_buf = (unsigned char*)malloc(PACK_IN);
+    r->chunk_buf = (unsigned char*)malloc(PACK_CHUNK);
+    r->table_cap = 2 * 8192;
+    r->table = (unsigned*)malloc(r->table_cap * sizeof(unsigned));
+    if (r->in_buf == NULL || r->chunk_buf == NULL || r->table == NULL) {
+        free(r->in_buf); free(r->chunk_buf); free(r->table); free(r);
+        return NULL;
+    }
+    return r;
+}
 
 static unsigned rd32(const unsigned char* p) {
     return (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
@@ -194,52 +216,58 @@ int ch360_lz4_decode(const unsigned char* src, unsigned srclen, unsigned char* d
 }
 
 /* The entry's chunk table: sizes in table[0..n), starts (from the entry's offset) in table[n..2n). */
-static int load_table(const ch360_pack_entry* e) {
+static int load_table(ch360_pack_reader* r, const ch360_pack_entry* e) {
     unsigned char head[4];
     unsigned n, i, at;
     unsigned char* raw;
-    if (table_file == e->file && table_entry == e->offset) return 0;
-    table_file = -1;
+    if (r->table_file == e->file && r->table_entry == e->offset) return 0;
+    r->table_file = -1;
     if (read_at(files[e->file].f, e->offset, head, 4) != 0) return -1;
     n = rd32(head);
     if (n == 0 || n != (e->size + PACK_CHUNK - 1) / PACK_CHUNK) return -1;
-    if (2 * n > table_cap) {
-        free(table);
-        table_cap = 2 * n;
-        table = (unsigned*)malloc(table_cap * sizeof(unsigned));
-        if (table == NULL) {
-            table_cap = 0;
+    if (2 * n > r->table_cap) {
+        free(r->table);
+        r->table_cap = 2 * n;
+        r->table = (unsigned*)malloc(r->table_cap * sizeof(unsigned));
+        if (r->table == NULL) {
+            r->table_cap = 0;
             return -1;
         }
     }
-    raw = (unsigned char*)malloc(4 * n);
-    if (raw == NULL || read_at(files[e->file].f, e->offset + 4, raw, 4 * n) != 0) {
-        free(raw);
-        return -1;
-    }
+    /* The chunk sizes read into the table's second half and converted in place: no
+     * allocation (a reader on another thread never allocates). */
+    raw = (unsigned char*)(r->table + n);
+    if (read_at(files[e->file].f, e->offset + 4, raw, 4 * n) != 0) return -1;
+    for (i = 0; i < n; i++) r->table[i] = rd32(raw + 4 * i);
     at = 4 + 4 * n;
     for (i = 0; i < n; i++) {
-        table[i] = rd32(raw + 4 * i);
-        table[n + i] = at;
-        at += table[i];
+        r->table[n + i] = at;
+        at += r->table[i];
     }
-    free(raw);
     if (at > e->stored) return -1;
-    table_chunks = n;
-    table_file = e->file;
-    table_entry = e->offset;
+    r->table_chunks = n;
+    r->table_file = e->file;
+    r->table_entry = e->offset;
     return 0;
 }
 
 int ch360_pack_read(const ch360_pack_entry* e, unsigned from, void* dst_v, unsigned n) {
+    return ch360_pack_read_with(&default_reader, e, from, dst_v, n);
+}
+
+int ch360_pack_read_with(ch360_pack_reader* r, const ch360_pack_entry* e, unsigned from, void* dst_v, unsigned n) {
     unsigned char* dst = (unsigned char*)dst_v;
     unsigned k, last;
+    unsigned char* in_buf;
+    unsigned* table;
     if (e->file < 0 || e->file >= file_count || from > e->size || n > e->size - from) return -1;
     if (n == 0) return 0;
     if (e->stored == e->size) return read_at(files[e->file].f, e->offset + from, dst, n);
-    if (in_buf == NULL) in_buf = (unsigned char*)malloc(PACK_IN);
-    if (chunk_buf == NULL) chunk_buf = (unsigned char*)malloc(PACK_CHUNK);
-    if (in_buf == NULL || chunk_buf == NULL || load_table(e) != 0) return -1;
+    if (r->in_buf == NULL) r->in_buf = (unsigned char*)malloc(PACK_IN);
+    if (r->chunk_buf == NULL) r->chunk_buf = (unsigned char*)malloc(PACK_CHUNK);
+    if (r->in_buf == NULL || r->chunk_buf == NULL || load_table(r, e) != 0) return -1;
+    in_buf = r->in_buf;
+    table = r->table;
     k = from / PACK_CHUNK;
     last = (from + n - 1) / PACK_CHUNK;
     while (k <= last) {
@@ -247,23 +275,23 @@ int ch360_pack_read(const ch360_pack_entry* e, unsigned from, void* dst_v, unsig
         unsigned run = 1, bytes = table[k], j, pos = 0;
         while (k + run <= last && bytes + table[k + run] <= PACK_IN) bytes += table[k + run++];
         if (bytes > PACK_IN) return -1;
-        if (!(chunk_file == e->file && chunk_entry == e->offset && chunk_index == k && run == 1 &&
+        if (!(r->chunk_file == e->file && r->chunk_entry == e->offset && r->chunk_index == k && run == 1 &&
               !(k * PACK_CHUNK >= from && (k + 1) * PACK_CHUNK <= from + n)))
-            if (read_at(files[e->file].f, e->offset + table[table_chunks + k], in_buf, bytes) != 0) return -1;
+            if (read_at(files[e->file].f, e->offset + table[r->table_chunks + k], in_buf, bytes) != 0) return -1;
         for (j = 0; j < run; j++, k++) {
             unsigned c0 = k * PACK_CHUNK, len = e->size - c0 < PACK_CHUNK ? e->size - c0 : PACK_CHUNK;
             unsigned lo = from > c0 ? from - c0 : 0, hi = from + n - c0 < len ? from + n - c0 : len;
             if (lo == 0 && hi == len) {
                 if (ch360_lz4_decode(in_buf + pos, table[k], dst + (c0 - from), len) != (int)len) return -1;
             } else {
-                if (!(chunk_file == e->file && chunk_entry == e->offset && chunk_index == k)) {
-                    chunk_file = -1;
-                    if (ch360_lz4_decode(in_buf + pos, table[k], chunk_buf, len) != (int)len) return -1;
-                    chunk_file = e->file;
-                    chunk_entry = e->offset;
-                    chunk_index = k;
+                if (!(r->chunk_file == e->file && r->chunk_entry == e->offset && r->chunk_index == k)) {
+                    r->chunk_file = -1;
+                    if (ch360_lz4_decode(in_buf + pos, table[k], r->chunk_buf, len) != (int)len) return -1;
+                    r->chunk_file = e->file;
+                    r->chunk_entry = e->offset;
+                    r->chunk_index = k;
                 }
-                memcpy(dst + (c0 + lo - from), chunk_buf + lo, hi - lo);
+                memcpy(dst + (c0 + lo - from), r->chunk_buf + lo, hi - lo);
             }
             pos += table[k];
         }

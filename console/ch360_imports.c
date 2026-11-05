@@ -725,9 +725,12 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
      * every gen2 marks and moves. With that, conserve-memory mode (7 until
      * round 19) only added gen2s: off, the Forest Follies run had 10 gen2s
      * against 20, a third less pause, and its linear memory peaked 16 MB
-     * lower (round 19). */
-    static const char* const env[4] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCConserveMemory=0",
-                                        "CH360_TREE_BUDGET_MB=4" };
+     * lower (round 19). A 1 MB gen0 budget (2026-11-05, with assets
+     * unloaded): the console route of nine scene loads (host_native) ran 476
+     * gen0 GCs against 1,809 and paused 5.4 s against 5.9 (the map's visits
+     * 160-259 ms against 168-337); 4 MB added gen2 work to the loads. */
+    static const char* const env[5] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCConserveMemory=0",
+                                        "CH360_TREE_BUDGET_MB=4", "DOTNET_GCgen0size=100000" };
     srt_config cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.root_dir = root_dir;

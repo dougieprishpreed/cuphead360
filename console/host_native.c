@@ -180,6 +180,11 @@ void ch360_plat_texture_pixels(int id, int width, int height, const unsigned cha
     }
 }
 
+void ch360_plat_audio_native(const float* lr, int frames) {
+    /* the WAV writer reads little-endian floats: this PC is one */
+    ch360_plat_audio((const unsigned char*)lr, frames);
+}
+
 void ch360_plat_audio(const unsigned char* f32le, int frames) {
     audio_frames += (unsigned long)frames;
     if (wav) {

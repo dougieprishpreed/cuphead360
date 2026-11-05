@@ -254,6 +254,62 @@ const FxPasses PASSES[19] = {
 };
 const VkFormat DEPTH_FORMAT = VK_FORMAT_D24_UNORM_S8_UINT;
 
+// ------------------------------------------------------------ the texture loader thread
+// Reading and decoding a texture from the pack took 8 ms (median) to 478 ms on the frame that first drew
+// it: most of the fifteenth run's slow frames. The loader thread (hardware thread 2) does that part; the
+// game thread asks (load_packed), and at the next frames' start takes what is done (take_loads): the image,
+// staging, the copy. Until then the texture's items draw without it. The loader allocates nothing (newlib's
+// malloc isn't known to be thread safe here): the game thread makes each job and its buffer, sized from the
+// pack's table, and the jobs pass through fixed rings; it has its own pack reader (ch360_pack_reader_new);
+// it reads only the texture pack, whose file nothing else reads after start-up.
+struct LoadJob {
+    int id;
+    std::string key;
+    ch360_pack_entry e;
+    unsigned char* data;   // the texture's bytes after the 28-byte header
+    unsigned n, fmt, w, h;
+    int state;             // 0 read, 1 bad header, 2 bad read
+    double queued, read_ms;
+};
+const unsigned LOAD_RING = 64;
+LoadJob* g_load_in[LOAD_RING];
+LoadJob* g_load_out[LOAD_RING];
+unsigned g_load_in_head, g_load_in_tail, g_load_out_head, g_load_out_tail;   // under g_load_lock
+pthread_mutex_t g_load_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t g_load_cond = PTHREAD_COND_INITIALIZER;
+ch360_pack_reader* g_load_reader = NULL;
+bool g_loader = false;
+
+double now_ms();
+
+void* texture_loader(void*) {
+    xsdk_thread_move(2);
+    for (;;) {
+        pthread_mutex_lock(&g_load_lock);
+        while (g_load_in_head == g_load_in_tail) pthread_cond_wait(&g_load_cond, &g_load_lock);
+        LoadJob* j = g_load_in[g_load_in_head % LOAD_RING];
+        ++g_load_in_head;
+        pthread_mutex_unlock(&g_load_lock);
+        double t0 = now_ms();
+        unsigned char head[28];
+        j->state = 1;
+        if (ch360_pack_read_with(g_load_reader, &j->e, 0, head, sizeof(head)) == 0 && ch360_u32(head) == 0x31585443u) {
+            j->fmt = ch360_u32(head + 4);
+            j->w = ch360_u32(head + 8);
+            j->h = ch360_u32(head + 12);
+            unsigned n = ch360_u32(head + 24);
+            if (j->w && j->h && j->w <= 8192 && j->h <= 8192 && n == j->n)
+                j->state = ch360_pack_read_with(g_load_reader, &j->e, 28, j->data, j->n) == 0 ? 0 : 2;
+        }
+        j->read_ms = now_ms() - t0;
+        pthread_mutex_lock(&g_load_lock);
+        g_load_out[g_load_out_tail % LOAD_RING] = j;   // never fuller than the in ring: at most LOAD_RING jobs exist
+        ++g_load_out_tail;
+        pthread_mutex_unlock(&g_load_lock);
+    }
+    return NULL;
+}
+
 struct Tex {
     VkImage image;
     VkDeviceMemory mem;
@@ -266,8 +322,10 @@ struct Tex {
     unsigned retry_at;   // after running out of memory: the frame to try loading again
     std::string key;     // a converted texture (loaded on first use); empty: run-time pixels
     bool failed;
+    bool pinned;         // kept through evictions (the film grain's frames)
+    bool loading;        // a job for it is with the loader thread
     Tex() : image(VK_NULL_HANDLE), mem(VK_NULL_HANDLE), view(VK_NULL_HANDLE), set(VK_NULL_HANDLE), w(0), h(0),
-            format(VK_FORMAT_UNDEFINED), bytes(0), last_used(0), retry_at(0), failed(false) {}
+            format(VK_FORMAT_UNDEFINED), bytes(0), last_used(0), retry_at(0), failed(false), pinned(false), loading(false) {}
 };
 
 struct Garbage {
@@ -338,8 +396,15 @@ private:
     void flush_uploads();
     bool upload(Tex& t, VkFormat format, int w, int h, const unsigned char* data, size_t bytes);
     void destroy(Tex& t, bool now);
-    void load(Tex& t);
-    void load_packed(Tex& t);
+    void load(int id, Tex& t);
+    void load_packed(int id, Tex& t);
+    void take_loads();
+    std::vector<LoadJob*> taken_;   // done jobs past this frame's upload budget
+    unsigned load_jobs_;            // jobs made and not yet taken back
+    size_t load_bytes_;             // their buffers'
+public:
+    void start_loader();
+private:
     void evict();
     size_t release_unused(size_t want);
     Tex* tex(int id);
@@ -1264,7 +1329,7 @@ void Renderer::load_for(int id) {
     if (id < 0 || id >= CH360_RT_BASE) return;
     Tex* t = tex(id);
     if (t) {
-        load(*t);
+        load(id, *t);
         t->last_used = frame_no_;
     }
 }
@@ -1395,6 +1460,10 @@ void Renderer::texture_file(int id, const char* key) {
     if (t) {
         t->key = key;
         t->failed = false;
+        // The film grain shows its 64 frames in turn, each every two seconds: evicted as the least
+        // recently used, each came back from the USB drive a second later (the fifteenth run's map: texture
+        // loads 4-8 ms a frame, 586 grain loads). Its 8 MB stay.
+        t->pinned = strncmp(key, "bundles_tex_screen_fx_", 22) == 0;
     }
 }
 
@@ -1413,10 +1482,10 @@ void Renderer::texture_pixels(int id, int w, int h, const unsigned char* bgra) {
 // the GPU's write-combined memory aren't safe: g_memcpy is). Without a pack,
 // the loose ctex/XX/YYYYYYYY.CTX files. Out of memory, it is drawn without
 // and tried again two seconds later.
-void Renderer::load(Tex& t) {
-    if (t.image || t.failed || t.key.empty() || frame_no_ < t.retry_at) return;
+void Renderer::load(int id, Tex& t) {
+    if (t.image || t.failed || t.loading || t.key.empty() || frame_no_ < t.retry_at) return;
     if (ch360_ctex_pack >= 0) {
-        load_packed(t);
+        load_packed(id, t);
         return;
     }
     char staged[12];
@@ -1475,7 +1544,113 @@ void Renderer::load(Tex& t) {
     }
 }
 
-void Renderer::load_packed(Tex& t) {
+void Renderer::start_loader() {
+    load_jobs_ = 0;
+    load_bytes_ = 0;
+    if (ch360_ctex_pack < 0) return;
+    g_load_reader = ch360_pack_reader_new();
+    if (!g_load_reader) return;
+    pthread_t th;
+    g_loader = pthread_create(&th, NULL, texture_loader, NULL) == 0;
+    logf("textures: %s", g_loader ? "read and decoded on hardware thread 2" : "loader thread failed: loaded on the game thread");
+}
+
+// The frame's start: textures the loader has read become images, copied into staging, within an upload
+// budget a frame (the copies are the game thread's part).
+void Renderer::take_loads() {
+    if (!g_loader) return;
+    pthread_mutex_lock(&g_load_lock);
+    while (g_load_out_head != g_load_out_tail) {
+        taken_.push_back(g_load_out[g_load_out_head % LOAD_RING]);
+        ++g_load_out_head;
+    }
+    pthread_mutex_unlock(&g_load_lock);
+    size_t budget = 6u << 20, used = 0;
+    size_t k = 0;
+    for (; k < taken_.size() && (used == 0 || used + taken_[k]->n <= budget); ++k) {
+        LoadJob* j = taken_[k];
+        used += j->n;
+        Tex* t = tex(j->id);
+        if (t && t->key == j->key && t->loading && !t->image) {
+            t->loading = false;
+            if (j->state != 0) {
+                logf("texture %s: %s", j->key.c_str(), j->state == 1 ? "missing from the pack or unreadable (run tools/stage_console.py)" : "bad read from the pack");
+                t->failed = true;
+            } else {
+                VkFormat f = j->fmt == 1 ? VK_FORMAT_BC1_RGBA_UNORM_BLOCK : j->fmt == 2 ? VK_FORMAT_BC3_UNORM_BLOCK : TARGET_FORMAT;
+                VkBuffer buf;
+                VkDeviceSize off;
+                unsigned char* dst = NULL;
+                if (make_image(*t, f, (int)j->w, (int)j->h)) {
+                    dst = staging(j->n, &buf, &off);
+                    if (!dst) destroy(*t, true);
+                }
+                if (!dst) {
+                    t->retry_at = frame_no_ + 120;
+                    logf("texture %s: no memory, drawn without it for now", j->key.c_str());
+                } else {
+                    if (staging_cached_) memcpy(dst, j->data, j->n);
+                    else g_memcpy(dst, j->data, j->n);
+                    record_copy(*t, buf, off);
+                    g_texture_bytes = texture_bytes_;
+                    if (loads_logged_ < 400) {
+                        ++loads_logged_;
+                        unsigned free_mb, total_mb;
+                        memory_mb(&free_mb, &total_mb);
+                        logf("texture %s: format %u, %ux%u, %u KB (%u KB stored), read and decode %u ms on the loader, drawn %u ms after the ask; "
+                             "%u MB free, textures %u MB", j->key.c_str(), j->fmt, j->w, j->h, j->n >> 10, j->e.stored >> 10,
+                             (unsigned)j->read_ms, (unsigned)(now_ms() - j->queued), free_mb, (unsigned)(texture_bytes_ >> 20));
+                    }
+                }
+            }
+        } else if (t) {
+            // Given another texture (or pixels) meanwhile: free to load what it is now.
+            t->loading = false;
+        }
+        load_bytes_ -= j->n;
+        --load_jobs_;
+        free(j->data);
+        delete j;
+    }
+    taken_.erase(taken_.begin(), taken_.begin() + (long)k);
+}
+
+void Renderer::load_packed(int id, Tex& t) {
+    if (g_loader) {
+        // A job for the loader (from here on the texture is read off the game thread).
+        if (load_jobs_ >= LOAD_RING || load_bytes_ > (32u << 20)) return;   // asked again next frame
+        ch360_pack_entry pe;
+        if (!ch360_pack_find(ch360_ctex_pack, t.key.c_str(), t.key.size(), &pe) || pe.size < 28) {
+            logf("texture %s: missing from the pack (run tools/stage_console.py)", t.key.c_str());
+            t.failed = true;
+            return;
+        }
+        unsigned n = pe.size - 28;
+        unsigned char* data = (unsigned char*)malloc(n ? n : 1);
+        if (!data) {
+            t.retry_at = frame_no_ + 120;
+            return;
+        }
+        LoadJob* j = new LoadJob();
+        j->id = id;
+        j->key = t.key;
+        j->e = pe;
+        j->data = data;
+        j->n = n;
+        j->fmt = j->w = j->h = 0;
+        j->state = 1;
+        j->queued = now_ms();
+        j->read_ms = 0;
+        ++load_jobs_;
+        load_bytes_ += n;
+        t.loading = true;
+        pthread_mutex_lock(&g_load_lock);
+        g_load_in[g_load_in_tail % LOAD_RING] = j;
+        ++g_load_in_tail;
+        pthread_cond_signal(&g_load_cond);
+        pthread_mutex_unlock(&g_load_lock);
+        return;
+    }
     double t0 = now_ms();
     ch360_pack_entry e;
     unsigned char head[28];
@@ -1537,7 +1712,7 @@ void Renderer::load_packed(Tex& t) {
 size_t Renderer::release_unused(size_t want) {
     std::vector<std::pair<unsigned, size_t> > order;
     for (size_t i = 0; i < textures_.size(); ++i)
-        if (textures_[i].image && !textures_[i].key.empty() && frame_no_ - textures_[i].last_used > 2)
+        if (textures_[i].image && !textures_[i].key.empty() && !textures_[i].pinned && frame_no_ - textures_[i].last_used > 2)
             order.push_back(std::make_pair(textures_[i].last_used, i));
     std::sort(order.begin(), order.end());
     size_t freed = 0;
@@ -1556,7 +1731,7 @@ void Renderer::evict() {
     for (unsigned age = 600; age >= 30 && texture_bytes_ > TEXTURE_BUDGET * 7 / 8; age /= 2)
         for (size_t i = 0; i < textures_.size() && texture_bytes_ > TEXTURE_BUDGET * 7 / 8; ++i) {
             Tex& t = textures_[i];
-            if (t.image && !t.key.empty() && frame_no_ - t.last_used > age) {
+            if (t.image && !t.key.empty() && !t.pinned && frame_no_ - t.last_used > age) {
                 destroy(t, false);
                 ++evictions;
             }
@@ -1566,6 +1741,7 @@ void Renderer::evict() {
 void Renderer::frame(const ch360_frame* f) {
     ++frame_no_;
     double t0 = now_ms();
+    take_loads();
 
     // Pass 1: which items meet their view (the glue worked out their boxes;
     // the scissor would clip the rest away: the map draws 17 MB of textures
@@ -2169,6 +2345,20 @@ extern "C" void ch360_plat_texture_pixels(int id, int width, int height, const u
     g_renderer->texture_pixels(id, width, height, bgra);
 }
 
+extern "C" void ch360_plat_audio_native(const float* lr, int frames) {
+    if (!g_audio_open) return;
+    Stage stage("host: audio");
+    pthread_mutex_lock(&g_audio_lock);
+    for (int i = 0; i < frames; ++i, lr += 2) {
+        if (g_ring_write - g_ring_read >= AUDIO_RING) ++g_ring_read;   // full: drop the oldest
+        unsigned at = (g_ring_write % AUDIO_RING) * 2;
+        g_ring[at] = lr[0];
+        g_ring[at + 1] = lr[1];
+        ++g_ring_write;
+    }
+    pthread_mutex_unlock(&g_audio_lock);
+}
+
 extern "C" void ch360_plat_audio(const unsigned char* s, int frames) {
     if (!g_audio_open) return;
     Stage stage("host: audio");
@@ -2293,6 +2483,7 @@ int main() {
         flush_log();
         return 1;
     }
+    renderer.start_loader();
     if (xsdk_audio_open(0) == 0) {
         g_audio_open = true;
         pthread_t ath;

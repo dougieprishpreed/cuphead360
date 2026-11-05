@@ -132,8 +132,13 @@ namespace Cuphead360.Engine
         public RenderMode Mode;
         public Camera WorldCamera;
         public float PlaneDistance = 100f, ScaleFactor = 1f, ReferencePixelsPerUnit = 100f;
-        public bool PixelPerfect, OverrideSorting, OverridePixelPerfect;
+        public bool PixelPerfect, OverridePixelPerfect;
+        bool overrideSorting;
+        /// <summary>A nested canvas with its own sorting doesn't take its parents' group alpha (UiAlpha.ResetVersion).</summary>
+        public bool OverrideSorting { get => overrideSorting; set { if (overrideSorting != value) { overrideSorting = value; UiAlpha.ResetVersion++; } } }
         public int SortingLayerID, SortingOrder, TargetDisplay;
+        public NCanvas() => UiAlpha.ResetVersion++;
+        public override void Removed() => UiAlpha.ResetVersion++;
         public AdditionalCanvasShaderChannels Channels;
 
         public override void Load(ChobObject co, SceneBuild b)
@@ -221,7 +226,12 @@ namespace Cuphead360.Engine
     public sealed class NCanvasGroup : NComponent
     {
         public float Alpha = 1f;
-        public bool Interactable = true, BlocksRaycasts = true, IgnoreParentGroups;
+        public bool Interactable = true, BlocksRaycasts = true;
+        bool ignoreParentGroups;
+        /// <summary>Its subtree doesn't take its parents' group alpha (UiAlpha.ResetVersion).</summary>
+        public bool IgnoreParentGroups { get => ignoreParentGroups; set { if (ignoreParentGroups != value) { ignoreParentGroups = value; UiAlpha.ResetVersion++; } } }
+        public NCanvasGroup() => UiAlpha.ResetVersion++;
+        public override void Removed() => UiAlpha.ResetVersion++;
 
         public override void Load(ChobObject co, SceneBuild b)
         {
@@ -235,6 +245,35 @@ namespace Cuphead360.Engine
         {
             var s = (NCanvasGroup)src;
             Alpha = s.Alpha; Interactable = s.Interactable; BlocksRaycasts = s.BlocksRaycasts; IgnoreParentGroups = s.IgnoreParentGroups;
+        }
+    }
+
+    /// <summary>
+    /// Whether anything under a transform stops taking its parents' group alpha (a CanvasGroup ignoring
+    /// parent groups, a canvas overriding sorting): with nothing, a subtree under a group at alpha 0 draws
+    /// nothing and the render list skips it whole (the world map's hidden menus, hundreds of objects walked
+    /// every frame). Cached per transform until the hierarchy or any such component changes.
+    /// </summary>
+    public static class UiAlpha
+    {
+        public static int ResetVersion;
+
+        public static bool ResetBelow(NTransform t)
+        {
+            if (t.UiResetAt == NTransform.HierarchyVersion && t.UiResetUi == ResetVersion) return t.UiResetBelow;
+            bool r = false;
+            var kids = t.Children;
+            for (int k = 0; k < kids.Count && !r; k++)
+            {
+                var comps = kids[k].GameObject.Components;
+                for (int i = 0; i < comps.Count && !r; i++)
+                    if ((comps[i] is NCanvasGroup g && g.IgnoreParentGroups) || (comps[i] is NCanvas cv && cv.OverrideSorting)) r = true;
+                if (!r) r = ResetBelow(kids[k]);
+            }
+            t.UiResetBelow = r;
+            t.UiResetAt = NTransform.HierarchyVersion;
+            t.UiResetUi = ResetVersion;
+            return r;
         }
     }
 

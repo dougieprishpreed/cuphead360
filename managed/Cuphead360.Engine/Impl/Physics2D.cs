@@ -13,6 +13,131 @@ namespace Cuphead360.Engine
 
     public enum ColliderKind { Box, Circle, Polygon, Edge, Capsule }
 
+    /// <summary>
+    /// The physics queries' index: colliders by the left edge of their world box, so a cast or overlap
+    /// looks only at those whose x extent meets its own (a cast walked every collider of the level: the
+    /// run-and-gun level's ground enemies cast several times each fixed step, two steps a frame at 30 fps,
+    /// most of its 23 ms fixed phase on the console). Colliders far wider than most (floors spanning the
+    /// level) sit in a list every query looks at. A collider whose transform or shape changed is dirty and
+    /// takes its place again before the next query, so queries see the boxes as they are.
+    /// </summary>
+    public static class QueryIndex
+    {
+        static readonly List<NCollider2D> sorted = new List<NCollider2D>(), wide = new List<NCollider2D>(), dirty = new List<NCollider2D>();
+        static readonly List<NCollider2D> scratch = new List<NCollider2D>();
+        static float maxNarrow, wideOver = float.PositiveInfinity;
+        static bool unsorted, holes;
+        static int seq, loadsSeen = -1;
+
+        public static void Added(NCollider2D c) { c.Seq = ++seq; Dirty(c); }
+
+        public static void Dirty(NCollider2D c)
+        {
+            if (c.IndexDirty) return;
+            c.IndexDirty = true;
+            dirty.Add(c);
+        }
+
+        public static void Moved(NGameObject go)
+        {
+            var cs = go.Components;
+            for (int i = 0; i < cs.Count; i++) if (cs[i] is NCollider2D c) Dirty(c);
+        }
+
+        static void Rebuild()
+        {
+            loadsSeen = SceneLoader.Loads;
+            foreach (var c in sorted) c.InIndex = false;
+            foreach (var c in wide) c.InIndex = false;
+            sorted.Clear(); wide.Clear();
+            // A collider wider than four times the 90th percentile of widths is "wide".
+            var widths = new List<float>();
+            foreach (var c in Typed.Colliders)
+            {
+                if (c.Destroyed || c.GameObject == null || c.GameObject.IsAsset || c.GameObject.Transform == null) continue;
+                c.Shapes();
+                widths.Add(c.AABB.width);
+            }
+            widths.Sort();
+            wideOver = widths.Count >= 8 ? Math.Max(widths[(int)(widths.Count * 0.9f)] * 4f, 1e-3f) : float.PositiveInfinity;
+            maxNarrow = 0f;
+            foreach (var c in Typed.Colliders) Dirty(c);
+        }
+
+        static void Update()
+        {
+            if (loadsSeen != SceneLoader.Loads) Rebuild();
+            if (dirty.Count > 0)
+            {
+                int keep = 0;
+                for (int i = 0; i < dirty.Count; i++)
+                {
+                    var c = dirty[i];
+                    if (c.Destroyed) { c.IndexDirty = false; if (c.InIndex) { c.InIndex = false; holes = true; } continue; }
+                    var go = c.GameObject;
+                    // Not attached yet: placed once it is.
+                    if (go == null || go.Transform == null) { dirty[keep++] = c; continue; }
+                    c.IndexDirty = false;
+                    if (go.IsAsset) continue;   // a prefab asset's (never Live, so never in a query's results)
+                    go.HasColliders = true;
+                    c.Shapes();
+                    float w = c.AABB.width;
+                    bool isWide = w > wideOver;
+                    if (c.InIndex && c.IndexWide != isWide) { c.InIndex = false; holes = true; }
+                    c.IndexMinX = c.AABB.xMin;
+                    if (!c.InIndex)
+                    {
+                        c.InIndex = true;
+                        c.IndexWide = isWide;
+                        (isWide ? wide : sorted).Add(c);
+                    }
+                    if (!isWide) { if (w > maxNarrow) maxNarrow = w; unsorted = true; }
+                }
+                dirty.RemoveRange(keep, dirty.Count - keep);
+            }
+            if (holes)
+            {
+                // Entries that left (destroyed, or moved between the lists) go; a list has each collider once.
+                sorted.RemoveAll(c => !c.InIndex || c.IndexWide);
+                wide.RemoveAll(c => !c.InIndex || !c.IndexWide);
+                holes = false;
+            }
+            if (unsorted)
+            {
+                // Insertion sort: between queries few colliders move far.
+                for (int i = 1; i < sorted.Count; i++)
+                {
+                    var c = sorted[i];
+                    float k = c.IndexMinX;
+                    int j = i - 1;
+                    while (j >= 0 && sorted[j].IndexMinX > k) { sorted[j + 1] = sorted[j]; j--; }
+                    sorted[j + 1] = c;
+                }
+                unsorted = false;
+            }
+        }
+
+        /// <summary>The colliders whose world box may meet [xMin, xMax] in x, in creation order (a list reused by the next call).</summary>
+        public static List<NCollider2D> Candidates(float xMin, float xMax)
+        {
+            Update();
+            scratch.Clear();
+            float lo = xMin - maxNarrow;
+            // The first entry with IndexMinX >= lo.
+            int a = 0, b = sorted.Count;
+            while (a < b) { int m = (a + b) >> 1; if (sorted[m].IndexMinX < lo) a = m + 1; else b = m; }
+            for (int i = a; i < sorted.Count; i++)
+            {
+                var c = sorted[i];
+                if (c.IndexMinX > xMax) break;
+                scratch.Add(c);
+            }
+            scratch.AddRange(wide);
+            if (scratch.Count > 1) scratch.Sort((x, y) => x.Seq.CompareTo(y.Seq));
+            return scratch;
+        }
+    }
+
     public sealed class NCollider2D : NComponent
     {
         public ColliderKind Kind;
@@ -25,7 +150,13 @@ namespace Cuphead360.Engine
         public PhysicsMaterial2D Material;
         // Cached world shape.
         Matrix4x4 cachedM; bool cached; int cachedVersion = -1;
-        public int Version;
+        int version;
+        /// <summary>Changes with the collider's shape (size, offset, points...): it moves in the queries' index.</summary>
+        public int Version { get => version; set { version = value; QueryIndex.Dirty(this); } }
+        // The physics queries' index (QueryIndex).
+        public int Seq;
+        public bool IndexDirty, InIndex, IndexWide;
+        public float IndexMinX;
         public readonly List<Shape> World = new List<Shape>();
         public Rect AABB;
 
@@ -619,9 +750,9 @@ namespace Cuphead360.Engine
             var castBounds = castShape.Bounds();
             var sweep = Rect.MinMaxRect(origin.x + castBounds.xMin + Math.Min(0, dir.x * distance), origin.y + castBounds.yMin + Math.Min(0, dir.y * distance),
                 origin.x + castBounds.xMax + Math.Max(0, dir.x * distance), origin.y + castBounds.yMax + Math.Max(0, dir.y * distance));
-            // The cheap filters before Live's walks up the hierarchy (Colliders() ran Live for every
-            // collider at every cast: the run-and-gun level's enemies cast several times a step).
-            var all = Typed.Colliders;
+            // Only the colliders whose x extent meets the sweep's (QueryIndex), in creation order as the
+            // walk of all was; then the cheap filters before Live's walks up the hierarchy.
+            var all = QueryIndex.Candidates(sweep.xMin, sweep.xMax);
             for (int ci = 0; ci < all.Count; ci++)
             {
                 var c = all[ci];
@@ -689,7 +820,7 @@ namespace Cuphead360.Engine
         {
             var r = new List<NCollider2D>();
             var b = world.Bounds();
-            var all = Typed.Colliders;
+            var all = QueryIndex.Candidates(b.xMin, b.xMax);
             for (int ci = 0; ci < all.Count; ci++)
             {
                 var c = all[ci];

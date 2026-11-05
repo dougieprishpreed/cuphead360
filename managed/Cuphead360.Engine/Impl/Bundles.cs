@@ -23,8 +23,10 @@ namespace Cuphead360.Engine
         }
 
         static readonly Dictionary<string, NBundle> loaded = new Dictionary<string, NBundle>(StringComparer.OrdinalIgnoreCase);
-        static readonly Dictionary<IntPtr, NBundle> createRequests = new Dictionary<IntPtr, NBundle>();
-        static readonly Dictionary<IntPtr, UObject[]> assetRequests = new Dictionary<IntPtr, UObject[]>();
+        // A request's result lives as long as the request: held by id they kept every asset ever loaded
+        // asynchronously (atlases, music) alive for good.
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<AssetBundleCreateRequest, NBundle> createRequests = new System.Runtime.CompilerServices.ConditionalWeakTable<AssetBundleCreateRequest, NBundle>();
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<AssetBundleRequest, UObject[]> assetRequests = new System.Runtime.CompilerServices.ConditionalWeakTable<AssetBundleRequest, UObject[]>();
 
         public static AssetBundle Load(string path)
         {
@@ -142,7 +144,7 @@ namespace Cuphead360.Engine
             var req = new AssetBundleCreateRequest();
             var op = Scenes.NewOperation(new Scenes.Operation { Done = true, Progress = 1 });
             req.m_Ptr = op.m_Ptr;
-            createRequests[req.m_Ptr] = Of(bundle);
+            createRequests.AddOrUpdate(req, Of(bundle));
             return req;
         }
 
@@ -151,14 +153,14 @@ namespace Cuphead360.Engine
             var req = new AssetBundleRequest();
             var op = Scenes.NewOperation(new Scenes.Operation { Done = true, Progress = 1 });
             req.m_Ptr = op.m_Ptr;
-            assetRequests[req.m_Ptr] = assets;
+            assetRequests.AddOrUpdate(req, assets);
             return req;
         }
 
         public static AssetBundle RequestBundle(AssetBundleCreateRequest r) =>
-            r != null && createRequests.TryGetValue(r.m_Ptr, out var b) && b != null && !b.Destroyed ? (AssetBundle)b.Managed : null;
+            r != null && createRequests.TryGetValue(r, out var b) && b != null && !b.Destroyed ? (AssetBundle)b.Managed : null;
         public static UObject[] RequestAssets(AssetBundleRequest r) =>
-            r != null && assetRequests.TryGetValue(r.m_Ptr, out var a) ? a : new UObject[0];
+            r != null && assetRequests.TryGetValue(r, out var a) ? a : new UObject[0];
         public static IEnumerable<NBundle> All => loaded.Values;
     }
 

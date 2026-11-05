@@ -379,6 +379,10 @@ internal static class Program
             patched++;
         }
         int replaced = ReplaceCalls(keep, engine);
+        var publicized = File.Exists(Path.Combine(inDir, "publicized_fields.txt"))
+            ? new HashSet<string>(File.ReadAllLines(Path.Combine(inDir, "publicized_fields.txt")), StringComparer.Ordinal) : new HashSet<string>();
+        GenerateCopies(keep, engine, publicized);
+        GenerateThunks(keep);
         foreach (var asm in keep)
             asm.Write(Path.Combine(outDir, asm.MainModule.Name));
         foreach (var a in keep) a.Dispose();
@@ -399,6 +403,9 @@ internal static class Program
         // Rewired decrypts its platform assembly and loads it from bytes; the
         // port loads the patched copy instead (and AOT can't load bytes at all).
         ["System.Reflection.Assembly System.Reflection.Assembly::Load(System.Byte[])"] = "LoadAssembly",
+        // The game's GC.Collect() (opening the pause and equip menus, starting a load): a full
+        // collection is ~0.5 s on the console, so the engine decides (AssetUnload collects at loads).
+        ["System.Void System.GC::Collect()"] = "GameCollect",
     };
 
     static int ReplaceCalls(List<AssemblyDefinition> assemblies, AssemblyDefinition engine)
@@ -421,8 +428,282 @@ internal static class Program
                         n++;
                     }
                 }
-        Console.WriteLine($"redirect: {n} BCL calls to PC folders now call Cuphead360.Engine.Platform");
+        Console.WriteLine($"redirect: {n} BCL calls (PC folders, assembly loads, GC.Collect) now call Cuphead360.Engine.Platform");
         return n;
+    }
+
+    // ---------------------------------------------------------------- field copies
+
+    // Instantiate copied each script's serialized fields by reflection (FieldInfo.GetValue and
+    // SetValue, a box per value): slow under NativeAOT, and activation instantiates thousands.
+    // Each non-generic class that is a UnityEngine.Object or [Serializable] gets
+    //   static void __ch360_copy(object src, object dst, object map, int depth)
+    // copying the serialized fields it declares (base classes have their own), and
+    //   static string __ch360_fields()
+    // naming them; the engine (Serialization.PlanOf) uses a copy only when those names are the
+    // fields its own rules pick (Serialization.Fields), so the rules below only decide what is
+    // fast. Values copied directly: primitives, enums, strings, UnityEngine structs; objects go
+    // through Serialization.CloneRef (references into the copied hierarchy remapped); anything
+    // else (arrays, lists, nested serializable classes, curves) through Serialization.CloneValue.
+    const string CopyMethod = "__ch360_copy", FieldsMethod = "__ch360_fields";
+
+    enum CopyKind { Skip, Direct, Ref, Value, Unknown }
+
+    static void GenerateCopies(List<AssemblyDefinition> assemblies, AssemblyDefinition engine, HashSet<string> publicized)
+    {
+        var ser = engine.MainModule.GetType(EngineNamespace + ".Serialization")
+            ?? throw new InvalidOperationException("no Serialization type in the engine");
+        var cloneRef = ser.Methods.First(m => m.Name == "CloneRef");
+        var cloneValue = ser.Methods.First(m => m.Name == "CloneValue");
+        int types = 0, fields = 0, unknown = 0;
+        foreach (var asm in assemblies)
+        {
+            var mod = asm.MainModule;
+            MethodReference? typeFromHandle = null, refCall = null, valueCall = null;
+            foreach (var t in AllTypes(mod).ToList())
+            {
+                if (t.Name == "<Module>" || !t.IsClass || t.IsValueType || t.IsInterface || HasGenerics(t)) continue;
+                if (!IsUnityObject(t) && !t.IsSerializable) continue;
+                if (t.Methods.Any(m => m.Name == CopyMethod)) continue;
+                var plan = new List<(FieldDefinition f, CopyKind k)>();
+                bool ok = true;
+                foreach (var fd in t.Fields)
+                {
+                    var k = Kind(t, fd, publicized);
+                    if (k == CopyKind.Unknown) { ok = false; break; }
+                    if (k != CopyKind.Skip) plan.Add((fd, k));
+                }
+                if (!ok) { unknown++; continue; }
+                if (plan.Count == 0) continue;
+                typeFromHandle ??= TypeFromHandle(mod);
+                refCall ??= mod.ImportReference(cloneRef);
+                valueCall ??= mod.ImportReference(cloneValue);
+
+                var copy = new MethodDefinition(CopyMethod, MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig, mod.TypeSystem.Void);
+                copy.Parameters.Add(new ParameterDefinition("src", ParameterAttributes.None, mod.TypeSystem.Object));
+                copy.Parameters.Add(new ParameterDefinition("dst", ParameterAttributes.None, mod.TypeSystem.Object));
+                copy.Parameters.Add(new ParameterDefinition("map", ParameterAttributes.None, mod.TypeSystem.Object));
+                copy.Parameters.Add(new ParameterDefinition("depth", ParameterAttributes.None, mod.TypeSystem.Int32));
+                var s = new VariableDefinition(t);
+                var d = new VariableDefinition(t);
+                copy.Body.Variables.Add(s);
+                copy.Body.Variables.Add(d);
+                copy.Body.InitLocals = true;
+                var il = copy.Body.GetILProcessor();
+                il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Castclass, t); il.Emit(OpCodes.Stloc, s);
+                il.Emit(OpCodes.Ldarg_1); il.Emit(OpCodes.Castclass, t); il.Emit(OpCodes.Stloc, d);
+                foreach (var (fd, k) in plan)
+                {
+                    il.Emit(OpCodes.Ldloc, d);
+                    il.Emit(OpCodes.Ldloc, s);
+                    il.Emit(OpCodes.Ldfld, fd);
+                    if (k == CopyKind.Ref)
+                    {
+                        il.Emit(OpCodes.Ldarg_2);
+                        il.Emit(OpCodes.Call, refCall);
+                        il.Emit(OpCodes.Castclass, fd.FieldType);
+                    }
+                    else if (k == CopyKind.Value)
+                    {
+                        if (fd.FieldType.IsValueType) il.Emit(OpCodes.Box, fd.FieldType);
+                        il.Emit(OpCodes.Ldtoken, fd.FieldType);
+                        il.Emit(OpCodes.Call, typeFromHandle);
+                        il.Emit(OpCodes.Ldarg_2);
+                        il.Emit(OpCodes.Ldarg_3);
+                        il.Emit(OpCodes.Call, valueCall);
+                        il.Emit(fd.FieldType.IsValueType ? OpCodes.Unbox_Any : OpCodes.Castclass, fd.FieldType);
+                    }
+                    il.Emit(OpCodes.Stfld, fd);
+                }
+                il.Emit(OpCodes.Ret);
+                t.Methods.Add(copy);
+
+                var names = new MethodDefinition(FieldsMethod, MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig, mod.TypeSystem.String);
+                var nil = names.Body.GetILProcessor();
+                nil.Emit(OpCodes.Ldstr, string.Join(",", plan.Select(p => p.f.Name)));
+                nil.Emit(OpCodes.Ret);
+                t.Methods.Add(names);
+                types++;
+                fields += plan.Count;
+            }
+        }
+        Console.WriteLine($"redirect: field copies for {types} classes ({fields} fields); {unknown} classes left to reflection (a field type not classified here)");
+    }
+
+    // ---------------------------------------------------------------- message thunks
+
+    // The engine called each behaviour's messages through a delegate it made for that object
+    // (MethodInfo.CreateDelegate, a reflection call per object and message: thousands as a scene
+    // activates). Each Unity message a non-generic MonoBehaviour class declares gets
+    //   static void __ch360_m_<name>_<kind>(object self, object arg)
+    // calling it on self (callvirt, as the delegate did); kind 0 takes no argument, C a Collider2D,
+    // K a Collision2D. The engine (Behaviours.Thunk) makes one delegate per method, for all objects.
+    static readonly HashSet<string> NoArgMessages = new(StringComparer.Ordinal)
+    {
+        "Awake", "Start", "Update", "FixedUpdate", "LateUpdate", "OnEnable", "OnDisable", "OnDestroy",
+        "OnApplicationQuit", "OnBecameVisible", "OnBecameInvisible", "OnWillRenderObject",
+    };
+    static readonly HashSet<string> ColliderMessages = new(StringComparer.Ordinal) { "OnTriggerEnter2D", "OnTriggerStay2D", "OnTriggerExit2D" };
+    static readonly HashSet<string> CollisionMessages = new(StringComparer.Ordinal) { "OnCollisionEnter2D", "OnCollisionStay2D", "OnCollisionExit2D" };
+
+    static bool IsMonoBehaviour(TypeDefinition t)
+    {
+        for (var c = t; c != null;)
+        {
+            if (c.FullName == "UnityEngine.MonoBehaviour") return true;
+            if (c.BaseType == null || c.BaseType.FullName == "System.Object") return false;
+            c = TryResolve(c.BaseType);
+        }
+        return false;
+    }
+
+    static void GenerateThunks(List<AssemblyDefinition> assemblies)
+    {
+        int n = 0;
+        foreach (var asm in assemblies)
+        {
+            var mod = asm.MainModule;
+            foreach (var t in AllTypes(mod).ToList())
+            {
+                if (t.Name == "<Module>" || !t.IsClass || t.IsValueType || HasGenerics(t) || !IsMonoBehaviour(t)) continue;
+                foreach (var m in t.Methods.ToList())
+                {
+                    if (m.IsStatic || m.HasGenericParameters || m.ReturnType.MetadataType != MetadataType.Void) continue;
+                    string? kind = null;
+                    if (m.Parameters.Count == 0 && NoArgMessages.Contains(m.Name)) kind = "0";
+                    else if (m.Parameters.Count == 1 && ColliderMessages.Contains(m.Name) && m.Parameters[0].ParameterType.FullName == "UnityEngine.Collider2D") kind = "C";
+                    else if (m.Parameters.Count == 1 && CollisionMessages.Contains(m.Name) && m.Parameters[0].ParameterType.FullName == "UnityEngine.Collision2D") kind = "K";
+                    if (kind == null) continue;
+                    string name = "__ch360_m_" + m.Name + "_" + kind;
+                    if (t.Methods.Any(x => x.Name == name)) continue;
+                    var th = new MethodDefinition(name, MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.HideBySig, mod.TypeSystem.Void);
+                    th.Parameters.Add(new ParameterDefinition("self", ParameterAttributes.None, mod.TypeSystem.Object));
+                    th.Parameters.Add(new ParameterDefinition("arg", ParameterAttributes.None, mod.TypeSystem.Object));
+                    var il = th.Body.GetILProcessor();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Castclass, t);
+                    if (kind != "0")
+                    {
+                        il.Emit(OpCodes.Ldarg_1);
+                        il.Emit(OpCodes.Isinst, m.Parameters[0].ParameterType);
+                    }
+                    il.Emit(OpCodes.Callvirt, m);
+                    il.Emit(OpCodes.Ret);
+                    t.Methods.Add(th);
+                    n++;
+                }
+            }
+        }
+        Console.WriteLine($"redirect: {n} message thunks");
+    }
+
+    static bool HasGenerics(TypeDefinition t)
+    {
+        for (var c = t; c != null; c = c.DeclaringType) if (c.HasGenericParameters) return true;
+        return false;
+    }
+
+    static TypeDefinition? TryResolve(TypeReference t)
+    {
+        try { return t.Resolve(); } catch (AssemblyResolutionException) { return null; }
+    }
+
+    static bool IsUnityObject(TypeDefinition t)
+    {
+        for (var c = t; c != null;)
+        {
+            if (c.FullName == "UnityEngine.Object") return true;
+            if (c.BaseType == null || c.BaseType.FullName == "System.Object") return false;
+            c = TryResolve(c.BaseType);
+        }
+        return false;
+    }
+
+    // The namespace reflection gives a nested type: its outermost declaring type's.
+    static string NamespaceOf(TypeReference t)
+    {
+        while (t.DeclaringType != null) t = t.DeclaringType;
+        return t.Namespace;
+    }
+
+    // Serialization.IsSerialized, then what the copy does with the field.
+    static CopyKind Kind(TypeDefinition owner, FieldDefinition fd, HashSet<string> publicized)
+    {
+        if (fd.IsStatic || fd.IsInitOnly || fd.IsLiteral || fd.IsNotSerialized) return CopyKind.Skip;
+        bool wasPublic = fd.IsPublic && !publicized.Contains(owner.FullName.Replace('/', '+') + "::" + fd.Name);
+        if (!wasPublic && !fd.CustomAttributes.Any(a => a.AttributeType.FullName == "UnityEngine.SerializeField")) return CopyKind.Skip;
+        var s = Serializable(fd.FieldType);
+        if (s == null) return CopyKind.Unknown;
+        if (s == false) return CopyKind.Skip;
+        var ft = fd.FieldType;
+        if (IsPrimitiveOrString(ft)) return CopyKind.Direct;
+        if (ft is not ArrayType && ft is not GenericInstanceType)
+        {
+            var td = TryResolve(ft);
+            if (td == null) return CopyKind.Unknown;
+            if (td.IsEnum) return CopyKind.Direct;
+            if (IsUnityObject(td)) return CopyKind.Ref;
+            if (ft.IsValueType && NamespaceOf(ft) == "UnityEngine") return CopyKind.Direct;
+        }
+        return CopyKind.Value;
+    }
+
+    static bool IsPrimitiveOrString(TypeReference t) => t.MetadataType switch
+    {
+        MetadataType.Boolean or MetadataType.Char or MetadataType.SByte or MetadataType.Byte or MetadataType.Int16 or MetadataType.UInt16
+            or MetadataType.Int32 or MetadataType.UInt32 or MetadataType.Int64 or MetadataType.UInt64 or MetadataType.Single
+            or MetadataType.Double or MetadataType.String => true,
+        _ => false,
+    };
+
+    // Serialization.IsSerializableType: true, false, or null when a type can't be looked at here.
+    static bool? Serializable(TypeReference t)
+    {
+        if (t.MetadataType == MetadataType.IntPtr || t.MetadataType == MetadataType.UIntPtr) return false;
+        if (IsPrimitiveOrString(t)) return true;
+        if (t.MetadataType == MetadataType.Object) return false;
+        if (t.IsGenericParameter || t.IsPointer || t.IsByReference || t.IsFunctionPointer) return null;
+        if (t is ArrayType at) return at.Rank != 1 ? false : ElementSerializable(at.ElementType);
+        if (t is GenericInstanceType gi)
+        {
+            if (gi.ElementType.FullName == "System.Collections.Generic.List`1") return ElementSerializable(gi.GenericArguments[0]);
+            // Any other generic: only an object type counts (the class libraries' generics aren't here to look at).
+            var gtd = TryResolve(gi.ElementType);
+            return gtd != null && IsUnityObject(gtd);
+        }
+        if (t.FullName is "UnityEngine.AnimationCurve" or "UnityEngine.Gradient" or "UnityEngine.RectOffset") return true;
+        var td = TryResolve(t);
+        if (td == null) return null;
+        if (td.IsEnum) return true;
+        if (IsUnityObject(td)) return true;
+        for (var c = td; c != null;)
+        {
+            if (c.BaseType == null) break;
+            if (c.BaseType.FullName is "System.Delegate" or "System.MulticastDelegate") return false;
+            if (c.BaseType.FullName == "System.Object" || c.BaseType.FullName == "System.ValueType") break;
+            c = TryResolve(c.BaseType);
+            if (c == null) return null;
+        }
+        if (td.IsValueType && NamespaceOf(td) == "UnityEngine") return true;
+        if (td.HasGenericParameters || td.IsAbstract || td.IsInterface) return false;
+        return td.IsSerializable;
+    }
+
+    static bool? ElementSerializable(TypeReference e)
+    {
+        if (e is ArrayType) return false;
+        if (e is GenericInstanceType gi && gi.ElementType.FullName == "System.Collections.Generic.List`1") return false;
+        return Serializable(e);
+    }
+
+    // Type.GetTypeFromHandle from the module's own core library.
+    static MethodReference TypeFromHandle(ModuleDefinition mod)
+    {
+        var type = new TypeReference("System", "Type", mod, mod.TypeSystem.CoreLibrary);
+        var handle = new TypeReference("System", "RuntimeTypeHandle", mod, mod.TypeSystem.CoreLibrary, true);
+        var m = new MethodReference("GetTypeFromHandle", type, type) { HasThis = false };
+        m.Parameters.Add(new ParameterDefinition(handle));
+        return m;
     }
 
     // Ldarg with an index the ILProcessor understands: 'this' is the method

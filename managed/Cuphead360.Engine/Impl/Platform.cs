@@ -57,6 +57,14 @@ namespace Cuphead360.Engine
 
         public static string GetFolderPathOption(Environment.SpecialFolder folder, Environment.SpecialFolderOption option) => GetFolderPath(folder);
 
+        /// <summary>
+        /// The game's GC.Collect(): nothing. Unity's collector made it cheap; here a full collection
+        /// of a ~100 MB heap pauses the console for about half a second, and the game asks for one each
+        /// time the pause or equip menu opens and at every load's start (where AssetUnload's pass, a
+        /// few frames later with the old scene gone, collects anyway).
+        /// </summary>
+        public static void GameCollect() { }
+
         /// <summary>Refuses any port folder that is (or is inside) a real special folder of this PC.</summary>
         public static void Guard(string dir)
         {

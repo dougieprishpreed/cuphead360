@@ -729,6 +729,8 @@ namespace Cuphead360.Engine
                 var go = t.GameObject;
                 if (!go.ActiveSelf) return;
                 float alpha = NCanvasRenderer.AlphaBelow(go, above);
+                // Under a group at alpha 0 nothing below draws, unless something below stops taking the alpha.
+                if (alpha == 0f && !UiAlpha.ResetBelow(t)) return;
                 List<Item> pops = null;
                 // Indexed loops: the translated List enumerators were 5% of a world map frame.
                 var comps = go.Components;

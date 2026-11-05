@@ -122,6 +122,8 @@ void ch360_plat_texture_pixels(int id, int width, int height, const unsigned cha
 /* Mixed audio: frames of 48 kHz stereo, interleaved little-endian floats
  * (unclamped; the platform clamps where it hands them on). */
 void ch360_plat_audio(const unsigned char* f32le, int frames);
+/* The same from the host's own mixer (ch360_ogg.c): native floats. */
+void ch360_plat_audio_native(const float* lr, int frames);
 /* The player's stdout and stderr. */
 void ch360_plat_log(const char* text, size_t len);
 
@@ -163,6 +165,12 @@ typedef struct ch360_pack_entry {
 int ch360_pack_open(const char* root, const char* name);
 /* 1 and *out for the entry with this key, 0 if there is none. */
 int ch360_pack_find(int pack, const char* key, size_t len, ch360_pack_entry* out);
+/* A reader's own buffers and chunk cache: one per thread that reads packs (the
+ * game thread uses the default one through ch360_pack_read; the host's texture
+ * loader thread has its own). Packs are only ever read from one thread each. */
+typedef struct ch360_pack_reader ch360_pack_reader;
+ch360_pack_reader* ch360_pack_reader_new(void);
+int ch360_pack_read_with(ch360_pack_reader* r, const ch360_pack_entry* e, unsigned from, void* dst, unsigned n);
 /* Bytes [from, from + n) of the entry into dst: 0, or -1 on a bad read. */
 int ch360_pack_read(const ch360_pack_entry* e, unsigned from, void* dst, unsigned n);
 int ch360_lz4_decode(const unsigned char* src, unsigned srclen, unsigned char* dst, unsigned dstlen);

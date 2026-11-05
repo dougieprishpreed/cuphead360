@@ -136,6 +136,36 @@ namespace Cuphead360.Engine
         /// <summary>Opens a converted clip (.ogg) for decoding, or null if it isn't there; the console host swaps in its native decoder.</summary>
         public static Func<string, IClipReader> OpenReader = path => File.Exists(path) ? new NVorbisClip(path) : null;
 
+        /// <summary>
+        /// The console host's native mixer (ConsoleHost.HostMixer, console/ch360_ogg.c): mixing here, as
+        /// translated wasm on a big-endian CPU, moved every sample through byte-swapped words and the
+        /// stack (2-3 ms of each console frame). With one set, short clips' samples are decoded into the
+        /// host's memory and each voice mixes there; voices, gains and positions stay here.
+        /// </summary>
+        public interface IHostMixer
+        {
+            /// <summary>An opened clip decoded whole into the host's memory: its id (frames its frames), or -1.</summary>
+            int Decode(IClipReader r, out long frames);
+            void Free(int id);
+            /// <summary>The host's handle of a streamed clip's reader, or -1.</summary>
+            int Handle(IClipReader r);
+            void Begin(int frames);
+            /// <summary>
+            /// One voice into the block over [start, frames): kind 1 a decoded clip, 2 a streamed one, 0 silence
+            /// (only the position moves). True when a clip that doesn't loop ended; stepped counts the samples
+            /// since the start or, when it wrapped, since the wrap at (wrapF0, wrapT).
+            /// </summary>
+            bool Voice(int kind, int id, int start, int frames, bool loop, long total, int channels, long f0, float t, long istep, float fstep,
+                       float gl, float gr, out int stepped, out bool wrapped, out long wrapF0, out float wrapT);
+            /// <summary>The block to the output.</summary>
+            void End(int frames);
+        }
+
+        public static IHostMixer HostMixer;
+        // The host's decoded clips, freed when their clip goes (AssetUnload) or the cache is over budget.
+        sealed class HostEntry { public WeakReference<Clip> Clip; public int Id; public long Floats; }
+        static readonly List<HostEntry> hostPcm = new List<HostEntry>();
+
         public sealed class Voice
         {
             public NAudioSource Src;
@@ -158,12 +188,14 @@ namespace Cuphead360.Engine
             public long Frames;
             public bool Stream;
             public float[] Pcm;           // interleaved, short clips
+            public int HostPcm = -1;      // the host mixer's decoded copy
             public bool Missing;
             public long LastUse;
         }
 
         static readonly List<Voice> voices = new List<Voice>();
-        static readonly Dictionary<AudioClip, Clip> clips = new Dictionary<AudioClip, Clip>(ReferenceEqualityComparer.Instance as IEqualityComparer<AudioClip>);
+        // Weak: a clip nothing references any more goes with its samples (AssetUnload).
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<AudioClip, Clip> clips = new System.Runtime.CompilerServices.ConditionalWeakTable<AudioClip, Clip>();
         static long cachedSamples, useCounter, mixedFrames;
         /// <summary>Clips longer than this (seconds) stream rather than decode whole.</summary>
         public static float StreamOver = 1.5f;
@@ -174,8 +206,8 @@ namespace Cuphead360.Engine
         public static bool ListenerPause;
         public static float ListenerVolume = 1f;
 
-        /// <summary>True when an output consumes samples (device or capture); otherwise only positions advance.</summary>
-        public static bool Render => Output != null || capture != null;
+        /// <summary>True when an output consumes samples (device, capture or the host's mixer); otherwise only positions advance.</summary>
+        public static bool Render => Output != null || capture != null || HostMixer != null;
         /// <summary>Called with each mixed block (interleaved stereo floats) when set (the live host's device queue).</summary>
         public static Action<float[], int> Output;
         static BinaryWriter capture;
@@ -205,7 +237,7 @@ namespace Cuphead360.Engine
                 if (k.EndsWith(".chob")) k = k.Substring(0, k.Length - 5);
                 ci.Key = k + "_" + IdText.Of(src.PathId);
             }
-            clips[c] = ci;
+            clips.AddOrUpdate(c, ci);
             return ci;
         }
 
@@ -245,7 +277,10 @@ namespace Cuphead360.Engine
             // Keep the decoded cache bounded (CacheFloats; about 512 MB of floats by default).
             if (cachedSamples > CacheFloats)
             {
-                var all = new List<Clip>(clips.Values);
+                // Counted again from the clips still here (unloaded clips took their samples with them).
+                var all = new List<Clip>();
+                cachedSamples = 0;
+                foreach (var kv in clips) { all.Add(kv.Value); if (kv.Value.Pcm != null) cachedSamples += kv.Value.Pcm.Length; }
                 all.Sort((a, b) => a.LastUse.CompareTo(b.LastUse));
                 foreach (var o in all)
                 {
@@ -255,6 +290,70 @@ namespace Cuphead360.Engine
                 }
             }
             return c.Pcm;
+        }
+
+        /// <summary>A short clip decoded whole into the host's memory (HostMixer): its id, or -1.</summary>
+        static int HostPcmOf(Clip c)
+        {
+            c.LastUse = ++useCounter;
+            if (c.HostPcm >= 0 || c.Missing) return c.HostPcm;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            using (var r = Open(c))
+            {
+                if (r == null) return -1;
+                int id = HostMixer.Decode(r, out long frames);
+                if (id < 0)
+                {
+                    // Out of host memory or ids: the other decoded clips go and it tries once more.
+                    TrimHost(c, 0);
+                    id = HostMixer.Decode(r, out frames);
+                }
+                if (id < 0)
+                {
+                    c.Missing = true;
+                    Log.Line($"AUDIO clip {c.Name}: no memory to decode it");
+                    return -1;
+                }
+                c.HostPcm = id;
+                long floats = frames * c.Channels;
+                cachedSamples += floats;
+                hostPcm.Add(new HostEntry { Clip = new WeakReference<Clip>(c), Id = id, Floats = floats });
+            }
+            DecodeTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            if (cachedSamples > CacheFloats) TrimHost(c, CacheFloats * 3 / 4);
+            return c.HostPcm;
+        }
+
+        /// <summary>The host's copies of clips that are gone, then the least recently used until the cache is down to keepFloats.</summary>
+        static void TrimHost(Clip keep, long keepFloats)
+        {
+            ReleaseUnloaded();
+            if (cachedSamples <= keepFloats) return;
+            var live = new List<(Clip c, HostEntry e)>();
+            foreach (var e in hostPcm) if (e.Clip.TryGetTarget(out var c)) live.Add((c, e));
+            live.Sort((a, b) => a.c.LastUse.CompareTo(b.c.LastUse));
+            foreach (var (o, e) in live)
+            {
+                if (cachedSamples <= keepFloats) break;
+                if (o == keep || voices.Exists(v => v.Clip == o)) continue;
+                HostMixer.Free(e.Id);
+                o.HostPcm = -1;
+                cachedSamples -= e.Floats;
+                hostPcm.Remove(e);
+            }
+        }
+
+        /// <summary>Frees the host's copies of clips the engine let go (after an AssetUnload pass).</summary>
+        public static void ReleaseUnloaded()
+        {
+            if (HostMixer == null) return;
+            for (int i = hostPcm.Count - 1; i >= 0; i--)
+                if (!hostPcm[i].Clip.TryGetTarget(out _))
+                {
+                    HostMixer.Free(hostPcm[i].Id);
+                    cachedSamples -= hostPcm[i].Floats;
+                    hostPcm.RemoveAt(i);
+                }
         }
 
         // ------------------------------------------------------------ playback
@@ -373,8 +472,9 @@ namespace Cuphead360.Engine
             int frames = (int)frameCarry;
             frameCarry -= frames;
             if (frames <= 0) return;
-            bool render = Render;
-            if (render)
+            bool render = Render, host = HostMixer != null;
+            if (host) HostMixer.Begin(frames);
+            else if (render)
             {
                 if (mix.Length < frames * 2) mix = new float[frames * 2];
                 Array.Clear(mix, 0, frames * 2);
@@ -411,6 +511,11 @@ namespace Cuphead360.Engine
             }
             mixedFrames += frames;
             if (!render) return;
+            if (host)
+            {
+                HostMixer.End(frames);
+                return;
+            }
             Output?.Invoke(mix, frames);
             if (capture != null)
             {
@@ -462,6 +567,7 @@ namespace Cuphead360.Engine
                 if (v.Frame >= total) { if (!loop) return true; v.Frame %= total; }
                 return false;   // a streaming voice's buffer repositions itself when it next renders
             }
+            if (HostMixer != null) return AdvanceHost(v, start, frames, step, gain, pan, loop);
             int ch = c.Channels;
             float gl = gain * (pan > 0f ? 1f - pan : 1f), gr = gain * (pan < 0f ? 1f + pan : 1f);
             float[] pcm = c.Stream ? null : Pcm(c);
@@ -512,6 +618,39 @@ namespace Cuphead360.Engine
             }
             v.Frame = basePos + step * stepped;
             return false;
+        }
+
+        /// <summary>Advance's mix in the host's mixer (the same arithmetic, on native samples).</summary>
+        static bool AdvanceHost(Voice v, int start, int frames, double step, float gain, float pan, bool loop)
+        {
+            var c = v.Clip;
+            float gl = gain * (pan > 0f ? 1f - pan : 1f), gr = gain * (pan < 0f ? 1f + pan : 1f);
+            int kind = 0, id = -1;
+            if (!c.Stream)
+            {
+                id = HostPcmOf(c);
+                if (id >= 0) kind = 1;
+            }
+            else
+            {
+                if (v.Reader == null && !c.Missing)
+                {
+                    v.Reader = Open(c);
+                    if (v.Reader != null) v.Reader.SamplePosition = (long)v.Frame;
+                }
+                if (v.Reader != null && (id = HostMixer.Handle(v.Reader)) >= 0) kind = 2;
+            }
+            // Decoding can correct the clip's frame count.
+            long total = c.Frames;
+            if (total <= 0) return true;
+            double basePos = v.Frame;
+            long f0 = (long)basePos, istep = (long)step;
+            float t = (float)(basePos - f0), fstep = (float)(step - istep);
+            bool ended = HostMixer.Voice(kind, id, start, frames, loop, total, c.Channels, f0, t, istep, fstep, gl, gr,
+                                         out int stepped, out bool wrapped, out long wrapF0, out float wrapT);
+            if (wrapped) basePos = wrapF0 + (double)wrapT;
+            v.Frame = basePos + step * stepped;
+            return ended;
         }
 
         /// <summary>Make a streaming voice's buffer hold frame <paramref name="f0"/> and, when the clip has it, the next one.</summary>

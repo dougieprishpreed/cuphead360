@@ -52,6 +52,48 @@ namespace Cuphead360.Player
         static extern int OggSeek(int handle, int frame);
         [DllImport("ch360", EntryPoint = "ogg_close"), WasmImportLinkage]
         static extern void OggClose(int handle);
+        [DllImport("ch360", EntryPoint = "pcm_decode"), WasmImportLinkage]
+        static extern int PcmDecode(int handle, int* frames);
+        [DllImport("ch360", EntryPoint = "pcm_free"), WasmImportLinkage]
+        static extern void PcmFree(int id);
+        [DllImport("ch360", EntryPoint = "mix_begin"), WasmImportLinkage]
+        static extern void MixBegin(int frames);
+        [DllImport("ch360", EntryPoint = "mix_voice"), WasmImportLinkage]
+        static extern int MixVoice(int kind, int id, int start, int frames, int loop, int total, int channels, int f0, float t, int istep, float fstep,
+                                   float gl, float gr, int* result);
+        [DllImport("ch360", EntryPoint = "mix_end"), WasmImportLinkage]
+        static extern void MixEnd(int frames);
+
+        /// <summary>The host's native mixer (console/ch360_ogg.c; Audio.IHostMixer).</summary>
+        sealed class HostMixer : Audio.IHostMixer
+        {
+            public int Decode(Audio.IClipReader r, out long frames)
+            {
+                int n = 0;
+                int id = r is HostClip hc && hc.Handle >= 0 ? PcmDecode(hc.Handle, &n) : -1;
+                frames = (uint)n;
+                return id;
+            }
+
+            public void Free(int id) => PcmFree(id);
+            public int Handle(Audio.IClipReader r) => r is HostClip hc ? hc.Handle : -1;
+            public void Begin(int frames) => MixBegin(frames);
+
+            public bool Voice(int kind, int id, int start, int frames, bool loop, long total, int channels, long f0, float t, long istep, float fstep,
+                              float gl, float gr, out int stepped, out bool wrapped, out long wrapF0, out float wrapT)
+            {
+                int* r = stackalloc int[6];
+                bool ended = MixVoice(kind, id, start, frames, loop ? 1 : 0, (int)Math.Min(total, int.MaxValue), channels, (int)f0, t, (int)istep, fstep,
+                                      gl, gr, r) != 0;
+                stepped = r[2];
+                wrapped = r[3] != 0;
+                wrapF0 = (uint)r[4];
+                wrapT = *(float*)&r[5];
+                return ended;
+            }
+
+            public void End(int frames) => MixEnd(frames);
+        }
 
         /// <summary>
         /// A clip decoded by the host (stb_vorbis in native code, console/ch360_ogg.c):
@@ -64,6 +106,7 @@ namespace Cuphead360.Player
             public int SampleRate { get; }
             public long TotalSamples { get; }
             HostClip(int handle, int channels, int rate, long frames) { h = handle; Channels = channels; SampleRate = rate; TotalSamples = frames; }
+            public int Handle => h;
 
             public static HostClip Open(string path)
             {
@@ -322,9 +365,13 @@ namespace Cuphead360.Player
             // Scenes built a slice a frame, so the loading screen's hourglass keeps turning (bot
             // runs keep one-frame loads, frame for frame as before, unless CH360_LOAD_SLICE_MS).
             if (scripted == null && Cuphead360.Engine.SceneLoader.SliceMs == 0) Cuphead360.Engine.SceneLoader.SliceMs = 20;
-            // The mix goes to the host as it is (floats; the host clamps where it hands them on):
-            // converting each sample here went through memory twice on the console's CPU.
-            Audio.Output = (mix, frames) => { fixed (float* p = mix) AudioOut(p, frames); };
+            // The host mixes (HostMixer); CH360_MANAGED_MIX=1 mixes here as before (a PC check) and
+            // hands the block over as it is (floats; the host clamps where it hands them on).
+            if (Environment.GetEnvironmentVariable("CH360_MANAGED_MIX") == "1")
+                Audio.Output = (mix, frames) => { fixed (float* p = mix) AudioOut(p, frames); };
+            else
+                Audio.HostMixer = new HostMixer();
+            Console.WriteLine($"CONSOLE audio mixed by the {(Audio.HostMixer != null ? "host" : "engine")}");
             Console.WriteLine("CONSOLE host loop");
             int n = 0;
             long last = System.Diagnostics.Stopwatch.GetTimestamp(), hz = System.Diagnostics.Stopwatch.Frequency;
@@ -341,6 +388,7 @@ namespace Cuphead360.Player
                 PlayerLoop.AudioDelta = scripted != null ? -1 : Math.Clamp(real, 0f, 0.25f);
                 PollPads();
                 if (!frame(++n)) break;
+                if (n % 60 == 1) NoKeyboard();
                 long built = System.Diagnostics.Stopwatch.GetTimestamp();
                 var views = RenderList.Build();
                 long listed = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -355,6 +403,24 @@ namespace Cuphead360.Player
                         + $", trees dropped {ChobObject.TreesDropped}, parsed again {ChobObject.TreesReparsed}");
             }
             return 0;
+        }
+
+        static readonly bool keepKeyboard = Environment.GetEnvironmentVariable("CH360_KEYBOARD") == "1";
+
+        /// <summary>
+        /// The console has no keyboard or mouse, so Rewired's are turned off (checked again now and then, in
+        /// case its input manager starts over): polling the keyboard's 130-odd keys and evaluating each
+        /// player's keyboard and mouse maps were a third to half of its update, which runs before every
+        /// fixed step and every frame (1.6-2 ms of each console frame in the fifteenth run, about 40% of
+        /// the scripts' time in fights). CH360_KEYBOARD=1 keeps them (key-scripted PC checks).
+        /// </summary>
+        static void NoKeyboard()
+        {
+            if (keepKeyboard || !Rewired.ReInput.isReady) return;
+            var k = Rewired.ReInput.controllers.Keyboard;
+            var m = Rewired.ReInput.controllers.Mouse;
+            if (k != null && k.enabled) k.enabled = false;
+            if (m != null && m.enabled) m.enabled = false;
         }
 
         /// <summary>

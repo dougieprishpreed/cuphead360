@@ -27,12 +27,16 @@ namespace Cuphead360.Engine
         public bool PendingDestroy;
         /// <summary>Loaded from game data (an asset or a scene object), not created at run time.</summary>
         public bool Persistent;
+        /// <summary>In AssetUnload's pass: its engine references are weak until the collection is over.</summary>
+        public bool UnloadCandidate;
     }
 
     public sealed class NGameObject : NObject
     {
         public readonly List<NComponent> Components = new List<NComponent>();
         public NTransform Transform;
+        /// <summary>A collider here was indexed for physics queries: its transform's changes move it there.</summary>
+        public bool HasColliders;
         public int Layer;
         public string Tag = "Untagged";
         bool activeSelf = true, isAsset, building;
@@ -106,6 +110,9 @@ namespace Cuphead360.Engine
 
         /// <summary>Changes each time the cached world matrix is let go (colliders keep their shapes while it holds).</summary>
         public int WorldVersion;
+        // UiAlpha.ResetBelow's answer and when it was worked out.
+        public int UiResetAt = -1, UiResetUi = -1;
+        public bool UiResetBelow;
 
         public void Invalidate()
         {
@@ -113,6 +120,9 @@ namespace Cuphead360.Engine
             if (!worldValid) return;
             worldValid = false;
             WorldVersion++;
+            // Colliders here move in the physics queries' index (an invalid transform's children are
+            // invalid too, so the first change after a query is always seen).
+            if (GameObject != null && GameObject.HasColliders) QueryIndex.Moved(GameObject);
             for (int i = 0; i < Children.Count; i++) Children[i].Invalidate();
         }
 
@@ -206,6 +216,20 @@ namespace Cuphead360.Engine
             Typed.Remove(rec);
         }
 
+        /// <summary>An asset AssetUnload found unreferenced: its managed object is already collected.</summary>
+        public static void Unloaded(NObject rec)
+        {
+            if (rec.Destroyed) return;
+            Releases++;
+            if (rec is NComponent c) { try { c.Removed(); } catch (Exception) { } }
+            rec.Destroyed = true;
+            if (rec.Block != IntPtr.Zero) { NativeMemory.Free((void*)rec.Block); rec.Block = IntPtr.Zero; }
+            table[rec.Slot] = null;
+            freeSlots.Push(rec.Slot);
+            byId.Remove(rec.InstanceId);
+            Typed.Remove(rec);
+        }
+
         public static IEnumerable<NObject> Live()
         {
             for (int i = 1; i < table.Count; i++)
@@ -215,6 +239,27 @@ namespace Cuphead360.Engine
         public static int LiveCount
         {
             get { int n = 0; for (int i = 1; i < table.Count; i++) if (table[i] != null) n++; return n; }
+        }
+
+        /// <summary>Live objects by kind (loaded assets, scene objects) and type, the most numerous first.</summary>
+        public static string Census(int top)
+        {
+            var count = new Dictionary<string, int>();
+            int assets = 0, scene = 0;
+            for (int i = 1; i < table.Count; i++)
+            {
+                var r = table[i];
+                if (r == null) continue;
+                if (r.Persistent) assets++; else scene++;
+                string key = (r.Persistent ? "asset " : "") + (r.Managed?.GetType().Name ?? r.GetType().Name);
+                count.TryGetValue(key, out int n);
+                count[key] = n + 1;
+            }
+            var list = new List<KeyValuePair<string, int>>(count);
+            list.Sort((x, y) => y.Value.CompareTo(x.Value));
+            var sb = new System.Text.StringBuilder($"OBJECTS {assets} assets, {scene} scene/run-time:");
+            for (int i = 0; i < list.Count && i < top; i++) sb.Append(i == 0 ? " " : ", ").Append(list[i].Key).Append(' ').Append(list[i].Value);
+            return sb.ToString();
         }
     }
 
@@ -381,7 +426,7 @@ namespace Cuphead360.Engine
         {
             switch (r)
             {
-                case NCollider2D c: colliders.Add(c); break;
+                case NCollider2D c: colliders.Add(c); QueryIndex.Added(c); break;
                 case NSpriteRenderer s: spriteRenderers.Add(s); break;
                 case NCanvas cv: canvases.Add(cv); break;
                 case NCamera cam: cameras.Add(cam); break;
@@ -399,7 +444,7 @@ namespace Cuphead360.Engine
         {
             switch (r)
             {
-                case NCollider2D: dirty |= 1; break;
+                case NCollider2D c: dirty |= 1; QueryIndex.Dirty(c); break;
                 case NSpriteRenderer: dirty |= 2; break;
                 case NCanvas: dirty |= 4; break;
                 case NCamera: dirty |= 8; break;

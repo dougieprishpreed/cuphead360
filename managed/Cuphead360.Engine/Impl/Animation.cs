@@ -51,6 +51,14 @@ namespace Cuphead360.Engine
 
         static readonly Dictionary<ChobObject, ClipData> cache = new Dictionary<ChobObject, ClipData>();
 
+        /// <summary>AssetUnload: only the clips live animators use stay cached (their frames' sprites with them).</summary>
+        public static void Retain(HashSet<ClipData> keep)
+        {
+            var drop = new List<ChobObject>();
+            foreach (var kv in cache) if (!keep.Contains(kv.Value)) drop.Add(kv.Key);
+            foreach (var k in drop) cache.Remove(k);
+        }
+
         public static ClipData Of(UObject clip)
         {
             var src = (Objects.Of(clip) as NAsset)?.Source;
@@ -231,6 +239,14 @@ namespace Cuphead360.Engine
         public readonly Dictionary<uint, string> Names = new Dictionary<uint, string>();
 
         static readonly Dictionary<ChobObject, ControllerData> cache = new Dictionary<ChobObject, ControllerData>();
+
+        /// <summary>AssetUnload: only the controllers live animators use stay cached (their clips with them).</summary>
+        public static void Retain(HashSet<ControllerData> keep)
+        {
+            var drop = new List<ChobObject>();
+            foreach (var kv in cache) if (!keep.Contains(kv.Value)) drop.Add(kv.Key);
+            foreach (var k in drop) cache.Remove(k);
+        }
 
         public static ControllerData Of(RuntimeAnimatorController c)
         {
@@ -790,17 +806,22 @@ namespace Cuphead360.Engine
                 dest = si >= 0 && si < m.Selectors.Length ? Resolve(m, m.Selectors[si]) : -1;
                 if (dest < 0) dest = Entry(m);
             }
-            float over = 0f;
+            float over = 0f, exitAt = float.NaN;
             if (fire.HasExitTime)
             {
                 // Time past the exit point carries into the destination.
                 float exitN = fire.ExitTime <= 1f ? (float)Math.Floor(n1 - fire.ExitTime) + fire.ExitTime : fire.ExitTime;
                 over = Math.Max(0f, (n1 - exitN) * StateLength(li, l.Current.State));
+                exitAt = exitN * StateLength(li, l.Current.State);
             }
             float length = fire.FixedDuration ? fire.Duration : fire.Duration * StateLength(li, l.Current.State);
             float start = fire.Offset * StateLength(li, dest);
             if (length <= 0f)
             {
+                // A state left at its exit point fires its events up to there, not the next loop's: the
+                // onion's cry break (looping, StopCrying at 0) left at its end stopped the tears it had
+                // just started, so his long crying spell rained none.
+                if (!float.IsNaN(exitAt) && exitAt > l.Current.Prev && exitAt < l.Current.Time) l.Current.Time = exitAt;
                 l.Retired.Add(l.Current);
                 l.Current = new StatePlay();
                 Enter(l, l.Current, dest, start + over * StateSpeed(li, dest));
@@ -1352,6 +1373,21 @@ namespace Cuphead360.Engine
         static readonly HashSet<NAnimator> set = new HashSet<NAnimator>();
 
         public static void Register(NAnimator a) { if (set.Add(a)) all.Add(a); }
+
+        /// <summary>AssetUnload: the animation caches keep what live animators use.</summary>
+        public static void RetainLiveData()
+        {
+            var ctls = new HashSet<ControllerData>();
+            var clips = new HashSet<ClipData>();
+            foreach (var a in all)
+            {
+                if (a.Destroyed || a.Data == null) continue;
+                ctls.Add(a.Data);
+                foreach (var c in a.Data.Clips) if (c != null) clips.Add(c);
+            }
+            ControllerData.Retain(ctls);
+            ClipData.Retain(clips);
+        }
 
         public static void Step()
         {

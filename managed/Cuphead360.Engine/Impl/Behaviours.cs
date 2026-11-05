@@ -16,6 +16,8 @@ namespace Cuphead360.Engine
         public MessageSet Messages;
         public bool Awoken, Started, StartQueued;
         public readonly List<CoroutineState> Coroutines = new List<CoroutineState>();
+        public int TrackSeq;                 // the order the player loop first tracked it in
+        public bool InInvokers, CoroutinesDirty;
         public readonly List<InvokeState> Invokes = new List<InvokeState>();
         public long Order;
         /// <summary>Its messages' time since the last PlayerLoop.TopReport (with Profile on).</summary>
@@ -174,11 +176,14 @@ namespace Cuphead360.Engine
             try
             {
                 var bound = Bound(b, m);
+                if (bound is Action<object, object> thunk) { thunk(b.Managed, arg); return null; }
                 if (bound is Action call && arg == null) { call(); return null; }
                 if (bound is Action<Collider2D> onCollider && (arg == null || arg is Collider2D)) { onCollider((Collider2D)arg); return null; }
                 if (bound is Action<Collision2D> onCollision && (arg == null || arg is Collision2D)) { onCollision((Collision2D)arg); return null; }
                 if (arg == null && MessageSet.NoArgVoid(m))
                 {
+                    var thunk2 = Thunk(m);
+                    if (thunk2 != null) { thunk2(b.Managed, null); return null; }
                     var calls = b.Calls ??= new Dictionary<MethodInfo, Action>();
                     if (!calls.TryGetValue(m, out var call2))
                     {
@@ -195,6 +200,32 @@ namespace Cuphead360.Engine
             return null;
         }
 
+        static readonly Dictionary<MethodInfo, Action<object, object>> thunks = new Dictionary<MethodInfo, Action<object, object>>();
+        static readonly bool noThunks = Environment.GetEnvironmentVariable("CH360_REFLECT_CALLS") == "1";
+        /// <summary>Delegates made for single objects (no thunk), and the time making them and the thunks' (the scene timing lines).</summary>
+        public static long BoundObjects, BoundThunks, BindTicks;
+
+        /// <summary>
+        /// The patcher's static thunk for a message method (__ch360_m_name_kind, shared by every object
+        /// of the class), or null: a void method of a non-generic MonoBehaviour taking nothing, a
+        /// Collider2D or a Collision2D. CH360_REFLECT_CALLS=1 makes a delegate per object as before.
+        /// </summary>
+        public static Action<object, object> Thunk(MethodInfo m)
+        {
+            if (thunks.TryGetValue(m, out var d)) return d;
+            var dt = m.DeclaringType;
+            if (!noThunks && dt != null && !dt.IsGenericType && m.ReturnType == typeof(void))
+            {
+                var ps = m.GetParameters();
+                string kind = ps.Length == 0 ? "0" : ps.Length != 1 ? null
+                    : ps[0].ParameterType == typeof(Collider2D) ? "C" : ps[0].ParameterType == typeof(Collision2D) ? "K" : null;
+                var t = kind == null ? null : dt.GetMethod("__ch360_m_" + m.Name + "_" + kind, BindingFlags.Static | BindingFlags.Public | BindingFlags.DeclaredOnly);
+                if (t != null) { d = (Action<object, object>)t.CreateDelegate(typeof(Action<object, object>)); BoundThunks++; }
+            }
+            thunks[m] = d;
+            return d;
+        }
+
         /// <summary>The delegate bound for this message on this behaviour (made the first time), or null.</summary>
         static Delegate Bound(NBehaviour b, MethodInfo m)
         {
@@ -202,18 +233,24 @@ namespace Cuphead360.Engine
             int n = b.SentCount;
             for (int i = 0; i < n; i++) if ((object)keys[i] == m) return b.SentCalls[i];
             if (n == 16) return null;   // sent by name with many methods: the dictionary path
-            Delegate d = null;
-            try
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            Delegate d = Thunk(m);
+            if (d == null)
             {
-                if (m.ReturnType == typeof(void))
+                BoundObjects++;
+                try
                 {
-                    var ps = m.GetParameters();
-                    if (ps.Length == 0) d = m.CreateDelegate(typeof(Action), b.Managed);
-                    else if (ps.Length == 1 && ps[0].ParameterType == typeof(Collider2D)) d = m.CreateDelegate(typeof(Action<Collider2D>), b.Managed);
-                    else if (ps.Length == 1 && ps[0].ParameterType == typeof(Collision2D)) d = m.CreateDelegate(typeof(Action<Collision2D>), b.Managed);
+                    if (m.ReturnType == typeof(void))
+                    {
+                        var ps = m.GetParameters();
+                        if (ps.Length == 0) d = m.CreateDelegate(typeof(Action), b.Managed);
+                        else if (ps.Length == 1 && ps[0].ParameterType == typeof(Collider2D)) d = m.CreateDelegate(typeof(Action<Collider2D>), b.Managed);
+                        else if (ps.Length == 1 && ps[0].ParameterType == typeof(Collision2D)) d = m.CreateDelegate(typeof(Action<Collision2D>), b.Managed);
+                    }
                 }
+                catch (Exception) { d = null; }
             }
-            catch (Exception) { d = null; }
+            BindTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
             if (keys == null) { b.SentKeys = keys = new MethodInfo[4]; b.SentCalls = new Delegate[4]; }
             else if (n == keys.Length) { Array.Resize(ref b.SentKeys, n * 2); Array.Resize(ref b.SentCalls, n * 2); keys = b.SentKeys; }
             keys[n] = m;
@@ -264,6 +301,7 @@ namespace Cuphead360.Engine
         {
             b.Invokes.Add(new InvokeState { Method = method, Due = Clock.Time + Math.Max(0f, time), Repeat = repeat });
             PlayerLoop.Track(b);
+            PlayerLoop.NoteInvoke(b);
         }
 
         public static MethodInfo FindByName(NBehaviour b, string name, int parms)

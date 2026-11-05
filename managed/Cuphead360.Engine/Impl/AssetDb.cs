@@ -187,6 +187,23 @@ namespace Cuphead360.Engine
         }
         public static void SetBuilt(ChobFile f, long pathId, UObject o) => built[(f, pathId)] = o;
 
+        /// <summary>AssetUnload's pass: the built entries of its candidates held weakly (taken out of the table).</summary>
+        public static List<((ChobFile, long) key, WeakReference obj)> WeakenBuilt()
+        {
+            var aside = new List<((ChobFile, long), WeakReference)>();
+            foreach (var kv in built)
+                if (Engine.Objects.Of(kv.Value) is NObject rec && rec.UnloadCandidate) aside.Add((kv.Key, new WeakReference(kv.Value)));
+            foreach (var e in aside) built.Remove(e.Item1);
+            return aside;
+        }
+
+        /// <summary>The pass is over: the entries whose objects stayed go back.</summary>
+        public static void RestoreBuilt(List<((ChobFile, long) key, WeakReference obj)> aside)
+        {
+            foreach (var e in aside)
+                if (e.obj.Target is UObject o && Engine.Objects.Of(o) is NObject rec && !rec.Destroyed && !built.ContainsKey(e.key)) built[e.key] = o;
+        }
+
         /// <summary>The managed object for a PPtr (an asset is built on first use).</summary>
         public static UObject Resolve(ChobFile from, PPtr p, SceneBuild scene = null)
         {

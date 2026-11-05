@@ -211,6 +211,9 @@ namespace Cuphead360.Engine
     /// <summary>Object.Instantiate: a deep copy of a GameObject hierarchy with Unity's serialization rules.</summary>
     public static class Clone
     {
+        /// <summary>Instantiate calls, objects copied, and the time making the copies and copying their state (the scene timing lines).</summary>
+        public static long Calls, Copied, TreeTicks, FieldTicks;
+
         public static UObject Instantiate(UObject original, NTransform parent, bool worldPositionStays, Vector3? pos, Quaternion? rot)
         {
             var src = Objects.Of(original);
@@ -218,11 +221,14 @@ namespace Cuphead360.Engine
             var srcGo = src as NGameObject ?? (src as NComponent)?.GameObject;
             if (srcGo == null) return CloneAsset(src);
 
+            Calls++;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             var map = new Dictionary<NObject, NObject>();
             var srcLayout = NRectTransform.Snapshot(srcGo.Transform);
             var root = CloneTree(srcGo.Transform, map);
             root.GameObject.Name = srcGo.Name + "(Clone)";
             foreach (var c in root.GameObject.Components) c.Name = root.GameObject.Name;
+            long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
             // Remap references to objects inside the copied hierarchy.
             foreach (var kv in map)
                 if (kv.Key is NComponent sc && kv.Value is NComponent dc)
@@ -230,6 +236,10 @@ namespace Cuphead360.Engine
                     if (sc is NBehaviour) Serialization.CopyFields(sc.Managed, dc.Managed, map);
                     else Builtins.CopyState(sc, dc, map);
                 }
+            long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
+            Copied += map.Count;
+            TreeTicks += t1 - t0;
+            FieldTicks += t2 - t1;
             var rt = root;
             if (parent != null) { rt.Parent = parent; parent.Children.Add(rt); }
             else Scenes.AddRoot(rt.GameObject);
@@ -361,11 +371,86 @@ namespace Cuphead360.Engine
 
         static bool IsElementType(Type e) => !(e.IsArray || (e.IsGenericType && e.GetGenericTypeDefinition() == typeof(List<>))) && IsSerializableType(e);
 
-        public static void CopyFields(object src, object dst, Dictionary<NObject, NObject> map)
+        public static void CopyFields(object src, object dst, Dictionary<NObject, NObject> map) => CopyInto(src, dst, map, 0);
+
+        /// <summary>
+        /// How a type's serialized fields are copied, a step per class that declares some (base classes
+        /// first): the class's generated copy (the patcher's __ch360_copy, used when its field names are
+        /// the ones Fields picks), or reflection.
+        /// </summary>
+        sealed class CopyStep
         {
-            foreach (var f in Fields(src.GetType()))
-                f.SetValue(dst, CopyValue(f.GetValue(src), f.FieldType, map, 0));
+            public Action<object, object, object, int> Fast;
+            public FieldInfo[] Fields;
         }
+
+        static readonly Dictionary<Type, CopyStep[]> plans = new Dictionary<Type, CopyStep[]>();
+        static readonly bool noFastCopies = Environment.GetEnvironmentVariable("CH360_REFLECT_COPIES") == "1";
+        /// <summary>Classes copied by their generated copies and by reflection (logged with the scene timing).</summary>
+        public static int FastClasses, SlowClasses;
+
+        static CopyStep[] PlanOf(Type t)
+        {
+            if (plans.TryGetValue(t, out var p)) return p;
+            var steps = new List<CopyStep>();
+            var all = Fields(t);
+            for (int i = 0; i < all.Length;)
+            {
+                var level = all[i].DeclaringType;
+                int j = i;
+                while (j < all.Length && all[j].DeclaringType == level) j++;
+                var fs = all[i..j];
+                i = j;
+                Action<object, object, object, int> fast = null;
+                if (!noFastCopies && !level.IsGenericType)
+                {
+                    const BindingFlags flags = BindingFlags.Static | BindingFlags.Public | BindingFlags.DeclaredOnly;
+                    var copy = level.GetMethod("__ch360_copy", flags);
+                    var names = level.GetMethod("__ch360_fields", flags);
+                    if (copy != null && names != null)
+                    {
+                        var generated = ((string)names.Invoke(null, null)).Split(',');
+                        var mine = Array.ConvertAll(fs, f => f.Name);
+                        Array.Sort(generated, StringComparer.Ordinal);
+                        Array.Sort(mine, StringComparer.Ordinal);
+                        if (string.Join(",", generated) == string.Join(",", mine))
+                            fast = (Action<object, object, object, int>)copy.CreateDelegate(typeof(Action<object, object, object, int>));
+                        else
+                            Log.Line($"CLONE {level.FullName}: the generated copy's fields ({string.Join(",", generated)}) aren't the serialized ones ({string.Join(",", mine)}); copied by reflection");
+                    }
+                }
+                if (fast != null) FastClasses++; else SlowClasses++;
+                steps.Add(new CopyStep { Fast = fast, Fields = fs });
+            }
+            p = steps.ToArray();
+            plans[t] = p;
+            return p;
+        }
+
+        /// <summary>The serialized fields of src into dst, each copied as CopyValue does at that depth.</summary>
+        static void CopyInto(object src, object dst, Dictionary<NObject, NObject> map, int depth)
+        {
+            foreach (var step in PlanOf(src.GetType()))
+            {
+                // A generated copy takes UnityEngine structs as they are: CopyValue drops them below depth 7.
+                if (step.Fast != null && depth <= 7) step.Fast(src, dst, map, depth);
+                else
+                    foreach (var f in step.Fields)
+                        f.SetValue(dst, CopyValue(f.GetValue(src), f.FieldType, map, depth));
+            }
+        }
+
+        /// <summary>A generated copy's object field: references into the copied hierarchy point at the copies.</summary>
+        public static UObject CloneRef(UObject v, object map)
+        {
+            if ((object)v == null) return null;
+            var rec = Objects.Of(v);
+            if (rec != null && map is Dictionary<NObject, NObject> m && m.TryGetValue(rec, out var mapped)) return (UObject)mapped.Managed;
+            return v;
+        }
+
+        /// <summary>A generated copy's other fields (arrays, lists, nested classes, curves), as CopyValue copies them.</summary>
+        public static object CloneValue(object v, Type t, object map, int depth) => CopyValue(v, t, map as Dictionary<NObject, NObject>, depth);
 
         static object CopyValue(object v, Type t, Dictionary<NObject, NObject> map, int depth)
         {
@@ -399,8 +484,7 @@ namespace Cuphead360.Engine
             if (v is Gradient gr) { var g = new Gradient { mode = gr.mode }; g.SetKeys(gr.colorKeys, gr.alphaKeys); return g; }
             // [Serializable] class or struct: copied by value, field by field.
             var copy = FieldDecoder.New(v.GetType());
-            foreach (var f in Fields(v.GetType()))
-                f.SetValue(copy, CopyValue(f.GetValue(v), f.FieldType, map, depth + 1));
+            CopyInto(v, copy, map, depth + 1);
             return copy;
         }
     }

@@ -61,19 +61,53 @@ namespace Cuphead360.Engine
         static readonly List<NBehaviour> ordered = new List<NBehaviour>();
         static readonly List<NBehaviour> orderPending = new List<NBehaviour>();
         static int orderWalks;
+        // The same order, split by message: a pass walks only the behaviours that have its message (each
+        // pass walked all ~3,000 of the map's behaviours, a quarter of its frame with the coroutines').
+        static readonly List<NBehaviour> fixedUpdates = new List<NBehaviour>(), updates = new List<NBehaviour>(), lateUpdates = new List<NBehaviour>();
+        // Behaviours with invokes waiting, in the order they were first tracked (as the walk of all was).
+        static readonly List<NBehaviour> invokers = new List<NBehaviour>(), invokersPending = new List<NBehaviour>();
+        static int trackSeq;
+        static bool invokeWalk;
 
         public static void Track(NBehaviour b)
         {
             if (!trackedSet.Add(b)) return;
+            b.TrackSeq = ++trackSeq;
             tracked.Add(b);
             if (orderWalks > 0) orderPending.Add(b); else InsertOrdered(b);
         }
 
         static void InsertOrdered(NBehaviour b)
         {
-            int i = ordered.Count;
-            while (i > 0 && ordered[i - 1].ExecOrder > b.ExecOrder) i--;
-            ordered.Insert(i, b);
+            Insert(ordered, b);
+            if (b.Messages.FixedUpdate != null) Insert(fixedUpdates, b);
+            if (b.Messages.Update != null) Insert(updates, b);
+            if (b.Messages.LateUpdate != null) Insert(lateUpdates, b);
+        }
+
+        // After everything with a lower or equal execution order: each message's list stays the same
+        // subsequence of the ordered list.
+        static void Insert(List<NBehaviour> list, NBehaviour b)
+        {
+            int i = list.Count;
+            while (i > 0 && list[i - 1].ExecOrder > b.ExecOrder) i--;
+            list.Insert(i, b);
+        }
+
+        /// <summary>A behaviour has an invoke waiting: RunInvokes looks at it until it has none.</summary>
+        public static void NoteInvoke(NBehaviour b)
+        {
+            if (b.InInvokers) return;
+            b.InInvokers = true;
+            if (invokeWalk) { invokersPending.Add(b); return; }   // joins after the walk
+            InsertInvoker(b);
+        }
+
+        static void InsertInvoker(NBehaviour b)
+        {
+            int i = invokers.Count;
+            while (i > 0 && invokers[i - 1].TrackSeq > b.TrackSeq) i--;
+            invokers.Insert(i, b);
         }
 
         public static void QueueStart(NBehaviour b) => startQueue.Add(b);
@@ -126,7 +160,7 @@ namespace Cuphead360.Engine
                 Clock.FixedStepCount++;
                 Clock.FixedUnscaledTime += Clock.FixedDeltaTime;
                 P(1); RunStarts();
-                ForEach(b => b.Messages.FixedUpdate, null);
+                ForEach(fixedUpdates, 0);
                 Animators.FixedStep();
                 P(2); Physics.Step(Clock.FixedDeltaTime);
                 PhysicsStep?.Invoke();
@@ -135,14 +169,14 @@ namespace Cuphead360.Engine
             Clock.InFixedTimeStep = false;
 
             P(3); RunStarts();
-            ForEach(b => b.Messages.Update, null);
+            ForEach(updates, 1);
             RunInvokes();
             ResumeCoroutines(fixedPhase: false, endOfFrame: false);
             AnimationStep?.Invoke();
             P(4); Animators.Step();
             Atlases.Flush();
             P(5); RunStarts();
-            ForEach(b => b.Messages.LateUpdate, null);
+            ForEach(lateUpdates, 2);
             P(6); UI.WillRender();
             Atlases.Flush();
             P(7); RenderList.PreRender();
@@ -182,10 +216,13 @@ namespace Cuphead360.Engine
         /// coroutine step and message was 16% of a world map frame (host_native,
         /// sampled).
         /// </summary>
+        // CH360_SLOW_MS: a lower threshold for PC investigations (the PC runs these calls ~20x faster).
+        static readonly long slowMs = long.TryParse(Environment.GetEnvironmentVariable("CH360_SLOW_MS"), out var sm) && sm > 0 ? sm : 25;
+
         public static long SlowCall(long start, object target, System.Reflection.MethodInfo method, string methodName = null)
         {
             long ticks = System.Diagnostics.Stopwatch.GetTimestamp() - start;
-            if (ticks * 1000 / System.Diagnostics.Stopwatch.Frequency >= 25)
+            if (ticks * 1000 / System.Diagnostics.Stopwatch.Frequency >= slowMs)
                 Log.Line($"SLOW call {(target is Type ty ? ty.FullName : target?.GetType().Name)}.{methodName ?? method?.Name}: {ticks * 1000 / System.Diagnostics.Stopwatch.Frequency} ms (frame {Clock.FrameCount})");
             return ticks;
         }
@@ -256,18 +293,18 @@ namespace Cuphead360.Engine
             return sb.ToString();
         }
 
-        static void ForEach(Func<NBehaviour, System.Reflection.MethodInfo> pick, object arg)
+        static void ForEach(List<NBehaviour> list, int message)
         {
             orderWalks++;
             try
             {
-                int n = ordered.Count;   // objects created during the pass wait for the next frame
+                int n = list.Count;   // objects created during the pass wait for the next frame
                 for (int i = 0; i < n; i++)
                 {
-                    var b = ordered[i];
-                    var m = pick(b);
-                    if (m == null || !b.Started || !Behaviours.ActiveAndEnabled(b)) continue;
-                    Behaviours.Send(b, m, arg);
+                    var b = list[i];
+                    if (!b.Started || !Behaviours.ActiveAndEnabled(b)) continue;
+                    var m = message == 0 ? b.Messages.FixedUpdate : message == 1 ? b.Messages.Update : b.Messages.LateUpdate;
+                    Behaviours.Send(b, m);
                 }
             }
             finally
@@ -300,10 +337,11 @@ namespace Cuphead360.Engine
 
         static void RunInvokes()
         {
-            int n = tracked.Count;
+            int n = invokers.Count;
+            invokeWalk = true;
             for (int i = 0; i < n; i++)
             {
-                var b = tracked[i];
+                var b = invokers[i];
                 if (b.Invokes.Count == 0 || b.Destroyed) continue;
                 int count = b.Invokes.Count;
                 var invokes = System.Buffers.ArrayPool<InvokeState>.Shared.Rent(count);
@@ -321,6 +359,11 @@ namespace Cuphead360.Engine
                 System.Buffers.ArrayPool<InvokeState>.Shared.Return(invokes, true);
                 b.Invokes.RemoveAll(x => x.Cancelled);
             }
+            invokeWalk = false;
+            invokers.RemoveAll(b => { if (b.Invokes.Count > 0 && !b.Destroyed) return false; b.InInvokers = false; return true; });
+            // Behaviours that got their first invoke during the walk run theirs from the next frame.
+            foreach (var b in invokersPending) InsertInvoker(b);
+            invokersPending.Clear();
         }
 
         static readonly List<CoroutineState> due = new List<CoroutineState>();
@@ -350,12 +393,9 @@ namespace Cuphead360.Engine
         static void ResumeCoroutines(bool fixedPhase, bool endOfFrame)
         {
             due.Clear();
-            int n = tracked.Count;
-            for (int i = 0; i < n; i++)
-            {
-                var cs = tracked[i].Coroutines;
-                for (int k = 0; k < cs.Count; k++) if (IsDue(cs[k], fixedPhase, endOfFrame)) due.Add(cs[k]);
-            }
+            // Every live coroutine (the order doesn't matter: they resume in their last yields' order).
+            var live = Coroutines.Live;
+            for (int k = 0; k < live.Count; k++) if (IsDue(live[k], fixedPhase, endOfFrame)) due.Add(live[k]);
             if (due.Count > 1) due.Sort(byYield);
             // A coroutine stopped, or its wait changed, by one that ran before it this pass is looked at again.
             long upTo = yieldSeqNow;
@@ -366,11 +406,7 @@ namespace Cuphead360.Engine
                 Coroutines.Step(c);
             }
             due.Clear();
-            for (int i = 0; i < n; i++)
-            {
-                var cs = tracked[i].Coroutines;
-                if (cs.Count > 0) cs.RemoveAll(x => x.Done);
-            }
+            Coroutines.Compact();
         }
         static long yieldSeqNow => Coroutines.YieldSeqNow;
 
@@ -392,7 +428,14 @@ namespace Cuphead360.Engine
             if (Objects.Releases != releasesSeen)
             {
                 releasesSeen = Objects.Releases;
-                if (tracked.RemoveAll(b => b.Destroyed) > 0) { trackedSet.RemoveWhere(b => b.Destroyed); ordered.RemoveAll(b => b.Destroyed); }
+                if (tracked.RemoveAll(b => b.Destroyed) > 0)
+                {
+                    trackedSet.RemoveWhere(b => b.Destroyed);
+                    ordered.RemoveAll(b => b.Destroyed);
+                    fixedUpdates.RemoveAll(b => b.Destroyed);
+                    updates.RemoveAll(b => b.Destroyed);
+                    lateUpdates.RemoveAll(b => b.Destroyed);
+                }
             }
         }
         static int releasesSeen = -1;
@@ -406,6 +449,25 @@ namespace Cuphead360.Engine
     public static class Coroutines
     {
         static long nextHandle = 1;
+        /// <summary>Every coroutine started and not yet compacted away (the resume passes walk this).</summary>
+        public static readonly List<CoroutineState> Live = new List<CoroutineState>();
+        static readonly List<NBehaviour> dirtyOwners = new List<NBehaviour>();
+
+        /// <summary>After a resume pass: finished coroutines leave the live list and their owners' lists.</summary>
+        public static void Compact()
+        {
+            int w = 0;
+            for (int r = 0; r < Live.Count; r++)
+            {
+                var c = Live[r];
+                if (!c.Done) { Live[w++] = c; continue; }
+                var o = c.Owner;
+                if (o != null && !o.CoroutinesDirty) { o.CoroutinesDirty = true; dirtyOwners.Add(o); }
+            }
+            if (w < Live.Count) Live.RemoveRange(w, Live.Count - w);
+            foreach (var o in dirtyOwners) { o.Coroutines.RemoveAll(x => x.Done); o.CoroutinesDirty = false; }
+            dirtyOwners.Clear();
+        }
 
         public static Coroutine Start(NBehaviour owner, IEnumerator routine)
         {
@@ -415,6 +477,7 @@ namespace Cuphead360.Engine
             c.Handle.m_Ptr = (IntPtr)(nextHandle++);
             handles[c.Handle] = c;
             owner.Coroutines.Add(c);
+            Live.Add(c);
             PlayerLoop.Track(owner);
             Step(c);
             return c.Handle;
@@ -458,6 +521,7 @@ namespace Cuphead360.Engine
                         // Unity treats a yielded IEnumerator as a nested coroutine.
                         var inner = new CoroutineState { Owner = c.Owner, Routine = nested, Handle = new Coroutine() };
                         c.Owner.Coroutines.Add(inner);
+                        Live.Add(inner);
                         c.WaitOn = inner; inner.Waiters.Add(c);
                         Step(inner);
                         break;

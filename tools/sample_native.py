@@ -17,7 +17,7 @@ code). From Git Bash set MSYS_NO_PATHCONV=1 so the player's /paths reach it unch
         --log work/managed/prof.log --after "SCENE scene_map_world_1: built" --delay 4 --seconds 15
         -- <full path of host_native_map.exe> --root . --frames 6000 -- run --console 1 --data /work/GameData
         --save /work/managed/<save copy> --bot /work/managed/bot_map_idle.txt"""
-import argparse, bisect, ctypes, ctypes.wintypes as wt, re, subprocess, sys, time
+import argparse, bisect, ctypes, ctypes.wintypes as wt, os, re, subprocess, sys, time
 from collections import Counter, defaultdict
 
 ap = argparse.ArgumentParser()
@@ -35,7 +35,7 @@ ap.add_argument('--focus', action='append', default=[])
 ap.add_argument('--callers', action='append', default=[], help='functions to list the callers of (the frame above each)')
 ap.add_argument('--out')
 ap.add_argument('--top', type=int, default=50)
-ap.add_argument('--imports', type=int, default=85)
+ap.add_argument('--imports', type=int, help="the wasm module's imported functions (default: counted in work/managed/c/player.h)")
 ap.add_argument('cmd', nargs=argparse.REMAINDER)
 a = ap.parse_args()
 cmd = a.cmd[1:] if a.cmd and a.cmd[0] == '--' else a.cmd
@@ -109,6 +109,10 @@ with open(a.wasm_map, encoding='utf-8', errors='replace') as f:
             m = _fn.match(line)
             if m: wnames.append(m.group(1))
 imports = a.imports
+if imports is None:
+    # w2c2 declares each imported function as i<len>_<module><name>(...) in the player's header.
+    _h = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'work', 'managed', 'c', 'player.h')
+    imports = len(set(re.findall(r'\b(i\d+_\w+)\(', open(_h, encoding='utf-8', errors='replace').read()))) if os.path.exists(_h) else 91
 
 
 def wname(idx):
