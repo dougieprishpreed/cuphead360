@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <deque>
 #include <map>
 #include <new>
 #include <string>
@@ -331,8 +332,11 @@ struct Tex {
     bool pinned;         // kept through evictions (the film grain's frames)
     bool loading;        // a job for it is with the loader thread
     bool prefetching;    // that job is a prefetch
+    bool pre_wanted;     // waiting in the prefetch backlog
+    bool unused_pre;     // prefetched and not drawn yet: the first to make room
     Tex() : image(VK_NULL_HANDLE), mem(VK_NULL_HANDLE), view(VK_NULL_HANDLE), set(VK_NULL_HANDLE), w(0), h(0),
-            format(VK_FORMAT_UNDEFINED), bytes(0), last_used(0), retry_at(0), failed(false), pinned(false), loading(false), prefetching(false) {}
+            format(VK_FORMAT_UNDEFINED), bytes(0), last_used(0), retry_at(0), failed(false), pinned(false), loading(false), prefetching(false),
+            pre_wanted(false), unused_pre(false) {}
 };
 
 struct Garbage {
@@ -382,6 +386,8 @@ public:
     double ts_period_ms_;
     unsigned host_draws_, host_items_;
     unsigned long long host_vertices_;
+    unsigned dense_verts_, dense_frame_;   // the window's frame with the most vertices (over 15,000)
+    char dense_top_[320];                  // and the textures drawing most of them
     unsigned uploads, evictions;
 
 private:
@@ -408,6 +414,8 @@ private:
     void take_loads(bool all = false);
     void finish_waits();
     bool queue_load(int id, Tex& t, bool pre);
+    void feed_prefetch();
+    std::deque<int> pre_backlog_;   // prefetches asked for, queued as the loader and memory have room
     std::vector<LoadJob*> taken_;   // done jobs past this frame's upload budget
     std::vector<int> waiting_;      // textures this frame's items draw that the loader still has
     unsigned load_jobs_;            // jobs made and not yet taken back
@@ -1343,6 +1351,7 @@ void Renderer::load_for(int id) {
     if (t) {
         load(id, *t);
         t->last_used = frame_no_;
+        t->unused_pre = false;
         // Drawn this frame: waited for (finish_waits) rather than drawn without it (the sixteenth run's
         // flicker: the logo, transitions, the onion's new pages); also when the in-flight cap kept it back.
         if (g_loader && (t->loading || (!t->image && !t->failed && !t->key.empty() && frame_no_ >= t->retry_at))) waiting_.push_back(id);
@@ -1612,6 +1621,7 @@ void Renderer::take_loads(bool all) {
                     if (staging_cached_) memcpy(dst, j->data, j->n);
                     else g_memcpy(dst, j->data, j->n);
                     record_copy(*t, buf, off);
+                    t->unused_pre = j->pre;
                     g_texture_bytes = texture_bytes_;
                     if (loads_logged_ < 400) {
                         ++loads_logged_;
@@ -1662,17 +1672,37 @@ void Renderer::finish_waits() {
     wait_ms_ += now_ms() - t0;
 }
 
-// A texture the glue expects to draw soon (the other animations' pages of an atlas page just drawn): read
-// ahead, behind every texture a frame waits for, while memory has room.
+// A texture the glue expects to draw soon: the pages of an atlas the game loaded (Unity's atlas load
+// uploads its textures: the logo's 48 MB of pages were read one by one as its first frames reached them),
+// the other animations' pages of an atlas page just drawn. Read ahead, behind every texture a frame waits
+// for, while memory has room: the backlog feeds the loader as it does.
 void Renderer::prefetch(int id) {
     if (!g_loader || ch360_ctex_pack < 0) return;
     Tex* t = tex(id);
-    if (!t || t->image || t->loading || t->failed || t->key.empty() || frame_no_ < t->retry_at) return;
-    if (pre_bytes_ > (8u << 20) || texture_bytes_ + load_bytes_ > TEXTURE_BUDGET * 3 / 4) return;
+    if (!t || t->image || t->loading || t->failed || t->key.empty() || t->pre_wanted || frame_no_ < t->retry_at) return;
+    if (pre_backlog_.size() >= 1024) return;
+    t->pre_wanted = true;
+    pre_backlog_.push_back(id);
+    feed_prefetch();
+}
+
+void Renderer::feed_prefetch() {
+    if (pre_backlog_.empty()) return;
     unsigned free_mb, total_mb;
-    memory_mb(&free_mb, &total_mb);
-    if (free_mb < MEMORY_FLOOR_MB + 48 + (unsigned)(load_bytes_ >> 20)) return;
-    queue_load(id, *t, true);
+    memory_mb(&free_mb, &total_mb);   // once: the jobs queued below count through load_bytes_
+    while (!pre_backlog_.empty()) {
+        Tex* t = tex(pre_backlog_.front());
+        if (!t || t->image || t->loading || t->failed || t->key.empty() || frame_no_ < t->retry_at) {
+            if (t) t->pre_wanted = false;
+            pre_backlog_.pop_front();
+            continue;
+        }
+        if (pre_bytes_ > (8u << 20) || texture_bytes_ + load_bytes_ > TEXTURE_BUDGET * 3 / 4) return;
+        if (free_mb < MEMORY_FLOOR_MB + 48 + (unsigned)(load_bytes_ >> 20)) return;
+        if (!queue_load(pre_backlog_.front(), *t, true) && !t->failed) return;   // the rings or the in-flight cap: next frame
+        t->pre_wanted = false;
+        pre_backlog_.pop_front();
+    }
 }
 
 // A job for the loader thread: the drawn ring, or the prefetch ring (read when nothing drawn waits). A drawn
@@ -1698,6 +1728,9 @@ bool Renderer::queue_load(int id, Tex& t, bool pre) {
     }
     if (t.loading) return true;
     if (load_jobs_ >= LOAD_RING - 1 || load_bytes_ > (8u << 20)) return false;
+    // The prefetch ring also holds the empty slots of prefetches moved to the drawn ring until the loader
+    // passes them (the loader moves its head; a stale read only holds a prefetch back a frame).
+    if (pre && g_pre_in_tail - g_pre_in_head >= LOAD_RING - 1) return false;
     ch360_pack_entry pe;
     if (!ch360_pack_find(ch360_ctex_pack, t.key.c_str(), t.key.size(), &pe) || pe.size < 28) {
         logf("texture %s: missing from the pack (run tools/stage_console.py)", t.key.c_str());
@@ -1799,9 +1832,10 @@ void Renderer::load_packed(int id, Tex& t) {
 // them: two frames are in flight), oldest first, until want bytes are freed.
 size_t Renderer::release_unused(size_t want) {
     std::vector<std::pair<unsigned, size_t> > order;
+    // Prefetched textures nothing has drawn yet go first (read again if wanted), then the least recently drawn.
     for (size_t i = 0; i < textures_.size(); ++i)
         if (textures_[i].image && !textures_[i].key.empty() && !textures_[i].pinned && frame_no_ - textures_[i].last_used > 2)
-            order.push_back(std::make_pair(textures_[i].last_used, i));
+            order.push_back(std::make_pair(textures_[i].unused_pre ? 0u : textures_[i].last_used, i));
     std::sort(order.begin(), order.end());
     size_t freed = 0;
     for (size_t k = 0; k < order.size() && freed < want; ++k) {
@@ -1831,6 +1865,7 @@ void Renderer::frame(const ch360_frame* f) {
     double t0 = now_ms();
     unsigned uploads_at = uploads;   // the loader's textures taken here count as this frame's loads
     take_loads();
+    feed_prefetch();
 
     // Pass 1: which items meet their view (the glue worked out their boxes;
     // the scissor would clip the rest away: the map draws 17 MB of textures
@@ -2221,6 +2256,25 @@ void Renderer::frame(const ch360_frame* f) {
     host_vertices_ += used;
     host_items_ += f->item_count;
     host_passes_ += passes;
+    // Forest Follies' frames had 43,000 vertices (the glue's 9 ms) where the PC's bot saw 7,000: the window's
+    // densest frame names the textures drawing most of them.
+    if (f->vertex_count > 15000 && f->vertex_count > dense_verts_) {
+        dense_verts_ = f->vertex_count;
+        dense_frame_ = frame_no_;
+        std::map<int, unsigned> by;
+        for (unsigned i = 0; i < f->item_count; ++i) by[f->items[i].texture] += f->items[i].count;
+        std::vector<std::pair<unsigned, int> > top;
+        for (std::map<int, unsigned>::iterator i = by.begin(); i != by.end(); ++i) top.push_back(std::make_pair(i->second, i->first));
+        std::sort(top.rbegin(), top.rend());
+        size_t at = 0;
+        dense_top_[0] = 0;
+        for (size_t k = 0; k < top.size() && k < 4 && at < sizeof(dense_top_) - 1; ++k) {
+            Tex* t = top[k].second < CH360_RT_BASE ? tex(top[k].second) : NULL;
+            std::string name = t && !t->key.empty() ? t->key.substr(0, t->key.find("_CAB-")) : "render texture";
+            if (t && t->key.size() > 6 && t->key.find("_c", t->key.size() - 6) != std::string::npos) name += t->key.substr(t->key.rfind("_c"));
+            at += (size_t)snprintf(dense_top_ + at, sizeof(dense_top_) - at, "%s%s %u", k ? ", " : "", name.c_str(), top[k].first);
+        }
+    }
     host_fill_[0] += fill[0] / (W * H);
     host_fill_[1] += fill[1] / (W * H);
     stats_.frames += 1;
@@ -2257,6 +2311,8 @@ void Renderer::frame(const ch360_frame* f) {
              "fill %.2f screens + %.2f in render textures a frame; %u slow host parts (%u said)",
              frame_no_ - 299, frame_no_, host_gpu_[GPU_KINDS] / gf, host_gpu_[GPU_RT] / gf, host_gpu_[GPU_FX] / gf, host_gpu_[GPU_SCREEN] / gf,
              host_gpu_frames_, host_passes_ / 300.0, host_fill_[0] / 300, host_fill_[1] / 300, host_slow_, host_slow_logged_);
+        if (dense_verts_) logf("HOST densest frame %u: %u vertices: %s", dense_frame_, dense_verts_, dense_top_);
+        dense_verts_ = 0;
         memset(host_ms_, 0, sizeof(host_ms_));
         memset(host_gpu_, 0, sizeof(host_gpu_));
         memset(host_fill_, 0, sizeof(host_fill_));

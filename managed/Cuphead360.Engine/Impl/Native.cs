@@ -29,6 +29,8 @@ namespace Cuphead360.Engine
         public bool Persistent;
         /// <summary>In AssetUnload's pass: its engine references are weak until the collection is over.</summary>
         public bool UnloadCandidate;
+        /// <summary>The host's number for it (the console host's texture id): -1 not asked yet, -2 none.</summary>
+        public int HostId = -1;
     }
 
     public sealed class NGameObject : NObject

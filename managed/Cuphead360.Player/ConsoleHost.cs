@@ -42,6 +42,8 @@ namespace Cuphead360.Player
         static extern void TextureFile(int id, byte* key, int length);
         [DllImport("ch360", EntryPoint = "texture_pixels"), WasmImportLinkage]
         static extern void TexturePixels(int id, int width, int height, byte* bgra);
+        [DllImport("ch360", EntryPoint = "texture_prefetch"), WasmImportLinkage]
+        static extern void TexturePrefetch(int id);
         [DllImport("ch360", EntryPoint = "audio"), WasmImportLinkage]
         static extern void AudioOut(float* samples, int frames);
         [DllImport("ch360", EntryPoint = "ogg_open"), WasmImportLinkage]
@@ -133,8 +135,11 @@ namespace Cuphead360.Player
         static readonly InputFrame input = new InputFrame();
         static byte[] buf = new byte[1 << 20];
         static int len;
-        // By reference: the default comparer runs UnityEngine.Object's Equals (CompareBaseObjects) per lookup.
-        static readonly Dictionary<Texture, int> ids = new Dictionary<Texture, int>(ReferenceEqualityComparer.Instance as IEqualityComparer<Texture>);
+        // A texture's id is kept on its engine object (NObject.HostId); converted textures' ids by their key, so a
+        // texture unloaded and loaded again keeps its id (and the host its image). A table of the textures
+        // themselves held every texture ever drawn, and through them their converted files: never unloaded.
+        static readonly Dictionary<ulong, int> idsByKey = new Dictionary<ulong, int>();
+        static int nextId;
         static readonly Dictionary<int, int> versions = new Dictionary<int, int>();
         /// <summary>
         /// The last frame's real duration in seconds (Unity's deltaTime), 1/60 to
@@ -372,6 +377,8 @@ namespace Cuphead360.Player
             else
                 Audio.HostMixer = new HostMixer();
             Console.WriteLine($"CONSOLE audio mixed by the {(Audio.HostMixer != null ? "host" : "engine")}");
+            // An atlas the game loads: its pages read ahead (the boot's preload of the title's atlases readies the logo).
+            Atlases.Prefetch = src => TexturePrefetch(FileTextureId(src));
             Console.WriteLine("CONSOLE host loop");
             int n = 0;
             long last = System.Diagnostics.Stopwatch.GetTimestamp(), hz = System.Diagnostics.Stopwatch.Frequency;
@@ -730,22 +737,35 @@ namespace Cuphead360.Player
         /// <summary>Render textures' numbers start here (CH360_RT_BASE, console/ch360_host.h); the player's textures from 0.</summary>
         const int RtBase = 0x40000000;
 
+        /// <summary>A converted texture's id by its key (the file's path and the object's path id), given to the host the first time.</summary>
+        static int FileTextureId(ChobObject src)
+        {
+            string k = src.File.Path.Replace('/', '_');
+            if (k.EndsWith(".chob")) k = k.Substring(0, k.Length - 5);
+            var key = Encoding.UTF8.GetBytes(k + "_" + IdText.Of(src.PathId));
+            ulong h = 0xcbf29ce484222325;   // FNV-1a 64 of the key: no key strings kept
+            foreach (var b in key) h = (h ^ b) * 0x100000001b3;
+            if (!idsByKey.TryGetValue(h, out int id))
+            {
+                id = nextId++;
+                idsByKey[h] = id;
+                fixed (byte* p = key) TextureFile(id, p, key.Length);
+            }
+            return id;
+        }
+
         static int TextureId(Texture t)
         {
             if (t is RenderTexture rt) return RtBase | Effects.TargetId(rt);
-            if (!ids.TryGetValue(t, out int id))
+            var no = Objects.Of(t);
+            if (no == null) return -1;
+            int id = no.HostId;
+            if (id == -1)
             {
-                id = ids.Count;
-                ids[t] = id;
-                var src = (Objects.Of(t) as NAsset)?.Source;
-                if (src != null && RuntimePixels.Get(t) == null)
-                {
-                    string k = src.File.Path.Replace('/', '_');
-                    if (k.EndsWith(".chob")) k = k.Substring(0, k.Length - 5);
-                    var key = Encoding.UTF8.GetBytes(k + "_" + IdText.Of(src.PathId));
-                    fixed (byte* p = key) TextureFile(id, p, key.Length);
-                }
-                else if (RuntimePixels.Get(t) == null) { ids[t] = -1; return -1; }
+                var src = (no as NAsset)?.Source;
+                if (src != null && RuntimePixels.Get(t) == null) id = FileTextureId(src);
+                else id = RuntimePixels.Get(t) != null ? nextId++ : -2;
+                no.HostId = id;
             }
             if (id < 0) return -1;
             var rp = RuntimePixels.Get(t);

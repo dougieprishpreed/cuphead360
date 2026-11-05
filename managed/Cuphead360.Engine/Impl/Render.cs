@@ -558,19 +558,31 @@ namespace Cuphead360.Engine
             if (src == null) return;
             string tag = Tree.Str(src.Tree, "m_Tag");
             if (Trace) Log.Line($"TRACE atlas register {tag} id={Objects.Of(atlas)?.InstanceId} destroyed={Objects.Of(atlas)?.Destroyed} frame {Clock.FrameCount}");
+            bool fresh = !(byTag.TryGetValue(tag, out var was) && was.Target == atlas);
             var weak = new WeakReference(atlas);
             byTag[tag] = weak;
             requested.Remove(tag);   // answered: if this atlas is unloaded later, sprites ask again
+            HashSet<(int, long)> pages = fresh && Prefetch != null ? new HashSet<(int, long)>() : null;
             foreach (var e in Tree.List(src.Tree, "m_RenderDataMap"))
                 if (e is List<object> pair && pair.Count == 2)
                 {
                     string key = Sprites.Key(pair[0]);
                     if (key == null) continue;
                     Sprites.ReadBinding(pair[1], out var rect, out _, out var uv, out int settings);
-                    byKey[key] = new Binding { Atlas = weak, Texture = Tree.Ptr(pair[1], "texture"), TextureRect = rect, UvTransform = uv, Settings = settings };
+                    var texture = Tree.Ptr(pair[1], "texture");
+                    byKey[key] = new Binding { Atlas = weak, Texture = texture, TextureRect = rect, UvTransform = uv, Settings = settings };
                     version++;
+                    pages?.Add((texture.FileId, texture.PathId));
                 }
+            // Unity's atlas load uploads its pages: the host reads them ahead (the logo's pages were read as its
+            // first frames reached them, each frame waiting).
+            if (pages != null)
+                foreach (var (f, p) in pages)
+                    if (AssetDb.Lookup(src.File, new PPtr(f, p)) is ChobObject page && page.Type == "Texture2D") Prefetch(page);
         }
+
+        /// <summary>The host's read-ahead of a texture an atlas the game loaded holds (the console host's), by its converted object (no Texture2D built).</summary>
+        public static Action<ChobObject> Prefetch;
 
         /// <summary>Bindings of atlases that were destroyed (unloaded) go (AssetUnload's pass).</summary>
         public static void Prune()

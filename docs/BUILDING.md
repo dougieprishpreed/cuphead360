@@ -101,7 +101,9 @@ The first command patches the game's assemblies and checks them on .NET
 (a few minutes); it ends with `BUILD_MANAGED OK`. The second compiles the
 player to WebAssembly and C (about 15 minutes; the first run also downloads
 the NativeAOT-LLVM packages, a few hundred MB, from the dotnet-experimental
-NuGet feed).
+NuGet feed). It stores the module's data segments in `player.c` as LZ4
+blocks (the `lz4` package from step 1), which the console decodes into the
+player's memory at start.
 
 **Check:** both commands end with `BUILD_MANAGED OK`, and
 `work\managed\c\player.h` exists with about 78 `.c` files beside it.
@@ -196,8 +198,9 @@ python tools\build_console.py --stage xsdk --distro Debian
 
 It runs `console/xsdk/build.sh` in the distro, which compiles the shaders,
 the player's C and the host program, two files at a time (GCC takes over a
-gigabyte for each of the player's large files). The first build takes 30 to
-60 minutes; after a change only what changed is compiled again.
+gigabyte for each of the player's large files; `--jobs 4` compiles four at
+once on a PC with the memory for it). The first build takes 30 to 60
+minutes; after a change only what changed is compiled again.
 
 **Check:** it ends with `BUILD_CONSOLE OK: xsdk`, and
 `work\console\xsdk\default.xex` (about 100 MB) and `work\console\xsdk\licenses`

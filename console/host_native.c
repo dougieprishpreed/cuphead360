@@ -155,8 +155,11 @@ void ch360_plat_draw(const ch360_frame* f) {
     if (trace_dir) trace_frame();
 }
 
+/* CH360_TRACE_PREFETCH=1: each read-ahead asked for, with the frame (the console's loader reads them). */
+static int trace_prefetch = -1;
 void ch360_plat_texture_prefetch(int id) {
-    (void)id;
+    if (trace_prefetch < 0) trace_prefetch = getenv("CH360_TRACE_PREFETCH") != NULL;
+    if (trace_prefetch && id >= 0 && id < TRACE_IDS) printf("PREFETCH frame %ld: %s\n", frame_no, tex_key[id] ? tex_key[id] : "(runtime)");
 }
 
 void ch360_plat_texture_file(int id, const char* key) {

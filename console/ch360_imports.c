@@ -193,6 +193,7 @@ typedef struct remap_page {
      * meets, built on the page's first item. A scan of all its boxes per item
      * was 34 ms a frame on the console in the first run-and-gun level. */
     unsigned* grid;
+    unsigned prefetched;   /* its sprite pages were asked for on a first draw */
 } remap_page;
 #define REMAP_GRID 8
 typedef struct remap_box {
@@ -274,6 +275,7 @@ static void remap_load(void) {
         rm_pages[i].count = le32(p + 12);
         rm_pages[i].last = 0;
         rm_pages[i].grid = NULL;
+        rm_pages[i].prefetched = 0;
     }
     for (i = 0; i < rm_box_count; i++) {
         const U8* p = d + 24 + rm_page_count * 16 + i * 36;
@@ -342,23 +344,28 @@ static unsigned* remap_grid(const remap_page* p) {
     return g;
 }
 
-/* Moves an item drawn from an atlas page onto its sprite's full-size page. */
-/* The sprite pages cut from the same atlas page as one just drawn for the
- * first time: mostly the same character's other animations, so they are read
- * ahead (ch360_plat_texture_prefetch decides by memory) rather than when their
- * first frame is drawn (a frame then waits for them). */
-static void remap_prefetch(const remap_page* p) {
+/* The sprite pages cut from an atlas page, read ahead (ch360_plat_texture_prefetch
+ * decides by memory) rather than when their first frame is drawn (a frame then
+ * waits for them): once when one of them is first drawn (mostly the same
+ * character's other animations), and whenever the game loads the page's atlas
+ * (the player's texture_prefetch). */
+static void remap_prefetch(remap_page* p, int always) {
     unsigned k;
+    if (p->prefetched && !always) return;
+    p->prefetched = 1;
     for (k = 0; k < p->count; k++) {
         unsigned t = rm_boxes[p->first + k].target;
-        int id;
-        if (t >= rm_target_count || rm_plat[t] >= 0) continue;
-        id = rm_plat[t] = new_plat();
-        if (id < 0) return;
-        ch360_plat_texture_file(id, rm_strings + rm_names[t]);
-        ch360_plat_texture_prefetch(id);
+        if (t >= rm_target_count) continue;
+        if (rm_plat[t] < 0) {
+            int id = rm_plat[t] = new_plat();
+            if (id < 0) return;
+            ch360_plat_texture_file(id, rm_strings + rm_names[t]);
+        }
+        ch360_plat_texture_prefetch(rm_plat[t]);
     }
 }
+
+/* Moves an item drawn from an atlas page onto its sprite's full-size page. */
 
 static void remap_item(ch360_item* it) {
     remap_page* p;
@@ -405,7 +412,7 @@ static void remap_item(ch360_item* it) {
                 id = rm_plat[b->target] = new_plat();
                 if (id >= 0) {
                     ch360_plat_texture_file(id, rm_strings + rm_names[b->target]);
-                    remap_prefetch(p);
+                    remap_prefetch(p, 0);
                 }
             }
             if (id < 0) return;
@@ -440,6 +447,19 @@ static void draw_item_done(ch360_item* it) {
     if (it->count == 0) {
         draw_item_count--; /* clipped away */
         return;
+    }
+    if (it->mode == 0 && it->stencil != 1 && it->stencil != 2) {
+        /* A sprite wholly transparent draws nothing (premultiplied: the shader's
+         * alpha is the vertex's times the blend's): the loading screen's
+         * hourglass stays at alpha 0 all game long and kept its 3.6 MB page. */
+        const ch360_vertex* v = draw_verts + it->first;
+        unsigned k;
+        for (k = 0; k < it->count && (v[k].color[3] == 0 || v[k].blend[3] == 0); k++) {}
+        if (k == it->count) {
+            draw_vert_count = it->first;
+            draw_item_count--;
+            return;
+        }
     }
     remap_item(it);
     draw_item_box(it);
@@ -701,6 +721,17 @@ void i5_ch36012_textureX5Ffile(wasmModuleInstance* inst, U32 id, U32 key, U32 le
     }
 }
 
+/* An atlas the game loaded: its pages (their sprite pages) read ahead. */
+void i5_ch36016_textureX5Fprefetch(wasmModuleInstance* inst, U32 id) {
+    int p, page;
+    (void)inst;
+    p = plat_id((int)id);
+    if (p < 0) return;
+    page = page_of_plat[p] - 1;
+    if (page >= 0 && rm_pages[page].count > 0) remap_prefetch(&rm_pages[page], 1);
+    else ch360_plat_texture_prefetch(p);
+}
+
 void i5_ch36014_textureX5Fpixels(wasmModuleInstance* inst, U32 id, U32 w, U32 h, U32 bgra) {
     (void)inst;
     if (w == 0 || h == 0 || w > 8192 || h > 8192 || !srt_mem_ok(bgra, w * h * 4)) return;
@@ -748,9 +779,14 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
      * lower (round 19). A 1 MB gen0 budget (2026-11-05, with assets
      * unloaded): the console route of nine scene loads (host_native) ran 476
      * gen0 GCs against 1,809 and paused 5.4 s against 5.9 (the map's visits
-     * 160-259 ms against 168-337); 4 MB added gen2 work to the loads. */
-    static const char* const env[5] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCConserveMemory=0",
-                                        "CH360_TREE_BUDGET_MB=4", "DOTNET_GCgen0size=100000" };
+     * 160-259 ms against 168-337); 4 MB added gen2 work to the loads. The
+     * large object heap compacted in full collections (GCLOHCompact: the
+     * converted files' bytes are large objects, loaded and let go each scene):
+     * the long route's linear memory peaked at 184 MB against 200, pauses as
+     * before; smaller segments (GCSegmentSize 4-12 MB) saved 16-40 MB more but
+     * doubled the gen2s and their pause (2026-11-05). */
+    static const char* const env[6] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCConserveMemory=0",
+                                        "CH360_TREE_BUDGET_MB=4", "DOTNET_GCgen0size=100000", "DOTNET_GCLOHCompact=1" };
     srt_config cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.root_dir = root_dir;

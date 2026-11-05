@@ -186,7 +186,52 @@ def stage_c(a):
             text = re.sub(r"(?ms)^\w[^\n]*\bi5_ch360\w*\([^)]*\) \{.*?^\}\r?\n", "", text)
             with open(stubs, "wb") as f:
                 f.write(text.encode("utf-8"))
+    compress_data_segments(os.path.join(cdir, "player.c"))
     print(len([f for f in os.listdir(cdir) if f.endswith(".c")]), "C files in", cdir)
+
+
+def compress_data_segments(path):
+    """The module's data segments (20 MB) as LZ4 blocks, decoded into the linear memory at start
+    (ch360_lz4_decode, console/ch360_pack.c): the XEX image is resident on the console, and its copy
+    of the segments was only read once, at start (10 MB of memory back)."""
+    import lz4.block
+    with open(path, "rb") as f:
+        text = f.read().decode("utf-8")
+    sizes = {}
+    for m in re.finditer(r"LOAD_DATA\(\(\*i->m0\), (\d+)U, (m6_playerData\d+), (\d+)\);", text):
+        sizes[m.group(2)] = (int(m.group(1)), int(m.group(3)))
+    out, at, before, after = [], 0, 0, 0
+    for name, (offset, size) in sizes.items():
+        if size < 65536:
+            continue
+        head = "const U8 %s[]={" % name
+        start = text.index(head, at)
+        end = text.index("};", start)
+        data = bytes(int(v, 0) for v in text[start + len(head):end].split(",") if v.strip())   # w2c2 writes 7 or 0x45
+        if len(data) != size:
+            sys.exit("data segment %s: %d bytes, LOAD_DATA says %d" % (name, len(data), size))
+        packed = lz4.block.compress(data, mode="high_compression", compression=12, store_size=False)
+        lines = [",".join(str(b) for b in packed[k:k + 32]) for k in range(0, len(packed), 32)]
+        out.append(text[at:start])
+        out.append(head + "\n" + ",\n".join(lines) + "\n")
+        at = end
+        sizes[name] = (offset, size, len(packed))
+        before += size
+        after += len(packed)
+    out.append(text[at:])
+    text = "".join(out)
+    for name, v in sizes.items():
+        if len(v) != 3:
+            continue
+        offset, size, packed = v
+        call = "LOAD_DATA((*i->m0), %dU, %s, %d);" % (offset, name, size)
+        text = text.replace(call, "wasmMemoryCheckRange(i->m0, %dU, %d);\nif (ch360_lz4_decode(%s, %d, i->m0->data + %dU, %d) != %d) abort();"
+                            % (offset, size, name, packed, offset, size, size))
+    decl = "int ch360_lz4_decode(const unsigned char* src, unsigned srclen, unsigned char* dst, unsigned dstlen);\n"
+    text = text.replace("static void m6_playerInitDataSegments(", decl + "static void m6_playerInitDataSegments(", 1)
+    with open(path, "wb") as f:
+        f.write(text.encode("utf-8"))
+    print("data segments: %d KB as %d KB of LZ4" % (before // 1024, after // 1024))
 
 
 def main():

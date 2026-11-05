@@ -89,7 +89,9 @@ def stage_native(a):
 def stage_xsdk(a):
     script = os.path.join(ROOT, "console", "xsdk", "build.sh")
     wsl_root = "/mnt/" + ROOT[0].lower() + ROOT[2:].replace("\\", "/")
-    env = dict(os.environ, MSYS_NO_PATHCONV="1")
+    # --jobs reaches build.sh's JOBS (compilers at once) through WSLENV
+    env = dict(os.environ, MSYS_NO_PATHCONV="1", JOBS=str(a.jobs))
+    env["WSLENV"] = ":".join(v for v in (os.environ.get("WSLENV", ""), "JOBS/u") if v)
     run(["wsl.exe", "-d", a.distro, "--", "bash", wsl_root + "/console/xsdk/build.sh"], env=env)
     dst = os.path.join(OUT, "xsdk")
     os.makedirs(dst, exist_ok=True)

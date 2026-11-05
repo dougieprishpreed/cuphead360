@@ -193,7 +193,32 @@ namespace Cuphead360.Engine
     /// <summary>The runtime constant of an AnimatorController (or an override of one).</summary>
     public sealed class ControllerData
     {
-        public sealed class Layer { public string Name = ""; public int Machine; public float DefaultWeight; public uint Binding; }
+        /// <summary>
+        /// A layer: a state machine and which of its states' motion sets it plays. A synced layer (motion set
+        /// above 0) has no states of its own: it shows its source layer's state (the layer playing set 0 of
+        /// the same machine) with the set's motion, nothing where that set has none. The player's ShootRun
+        /// layers are Run's shooting versions over the base layer; played as layers of their own they kept
+        /// the plain run over the EX, the dash and the run-shoot.
+        /// </summary>
+        public sealed class Layer
+        {
+            public string Name = "";
+            public int Machine;
+            public float DefaultWeight;
+            public uint Binding;
+            public int MotionSet;
+            public bool SyncedTiming;   // a synced layer whose clips' lengths count in the state's (by its weight)
+            public int Source = -1;     // a synced layer's source layer
+            public bool TimedBySync;    // a source layer with a SyncedTiming layer
+        }
+        /// <summary>A state's motion in one motion set: a clip, or a 1D blend tree's parameter, thresholds and clips.</summary>
+        public sealed class Motion
+        {
+            public int Clip = -1;
+            public uint BlendParam;
+            public float[] BlendThresholds;
+            public int[] BlendClips;
+        }
         public sealed class Condition { public int Mode; public uint Param; public float Threshold; }
         public sealed class Transition
         {
@@ -208,12 +233,10 @@ namespace Cuphead360.Engine
             public uint NameId, PathId, FullPathId, TagId, SpeedParam;
             public float Speed = 1f, CycleOffset;
             public bool Loop, WriteDefaults = true;
-            public int Clip = -1;
             public Transition[] Transitions = new Transition[0];
-            /// <summary>A 1D blend tree: its parameter, the children's thresholds and clips (null otherwise).</summary>
-            public uint BlendParam;
-            public float[] BlendThresholds;
-            public int[] BlendClips;
+            /// <summary>The motion of each motion set (null: none in that set).</summary>
+            public Motion[] Sets = new Motion[0];
+            public Motion MotionOf(int set) => set >= 0 && set < Sets.Length ? Sets[set] : null;
         }
         public sealed class Selector { public Transition[] Transitions = new Transition[0]; public bool IsEntry; public uint FullPath; }
         public sealed class Machine
@@ -233,6 +256,8 @@ namespace Cuphead360.Engine
         public readonly Dictionary<uint, string> Names = new Dictionary<uint, string>();
 
         static readonly Dictionary<ChobObject, ControllerData> cache = new Dictionary<ChobObject, ControllerData>();
+        /// <summary>CH360_NO_SYNCED=1 (a PC check): synced layers played as layers of their own with the base motions, as before.</summary>
+        static readonly bool NoSynced = Environment.GetEnvironmentVariable("CH360_NO_SYNCED") == "1";
 
         /// <summary>AssetUnload: only the controllers live animators use stay cached (their clips with them).</summary>
         public static void Retain(HashSet<ControllerData> keep)
@@ -280,6 +305,36 @@ namespace Cuphead360.Engine
             };
         }
 
+        static Motion ReadMotion(object bt, ChobObject co)
+        {
+            var nodes = Tree.List(Tree.Get(bt, "data"), "m_NodeArray");
+            if (nodes.Count == 0) return null;
+            var mo = new Motion();
+            var root = Tree.Get(nodes[0], "data");
+            long clipId = Tree.Int(root, "m_ClipID", -1);
+            if (clipId >= 0 && clipId < 0xFFFFFFFFL) mo.Clip = (int)clipId;
+            var kids = Tree.List(root, "m_ChildIndices");
+            var thresholds = Tree.List(Tree.Get(Tree.Get(root, "m_Blend1dData"), "data"), "m_ChildThresholdArray");
+            if (nodes.Count > 1 && Tree.Int(root, "m_BlendType") == 0 && kids.Count > 0 && thresholds.Count == kids.Count)
+            {
+                // A 1D blend tree of clips (Werner Werman's saw blade, six by a float): the
+                // child weighing most plays (what a sprite animation shows of a blend).
+                mo.BlendParam = (uint)Tree.Int(root, "m_BlendEventID");
+                mo.BlendThresholds = new float[kids.Count];
+                mo.BlendClips = new int[kids.Count];
+                for (int k = 0; k < kids.Count; k++)
+                {
+                    int node = (int)Convert.ToInt64(kids[k]);
+                    long cid = node >= 0 && node < nodes.Count ? Tree.Int(Tree.Get(nodes[node], "data"), "m_ClipID", -1) : -1;
+                    mo.BlendClips[k] = cid >= 0 && cid < 0xFFFFFFFFL ? (int)cid : -1;
+                    mo.BlendThresholds[k] = Convert.ToSingle(thresholds[k]);
+                }
+                if (mo.Clip < 0) mo.Clip = mo.BlendClips[0];
+            }
+            else if (nodes.Count > 1) AssetDb.Problem("blend tree with " + nodes.Count + " nodes in " + co.File.Name + " " + co.PathId + " (first clip only)");
+            return mo;
+        }
+
         void Read(ChobObject co)
         {
             var t = co.Tree;
@@ -295,11 +350,25 @@ namespace Cuphead360.Engine
             foreach (var l in Tree.List(ctl, "m_LayerArray"))
             {
                 var d = Tree.Get(l, "data");
-                var layer = new Layer { Machine = (int)Tree.Int(d, "m_StateMachineIndex"), DefaultWeight = Tree.Float(d, "m_DefaultWeight"), Binding = (uint)Tree.Int(d, "m_Binding") };
+                var layer = new Layer
+                {
+                    Machine = (int)Tree.Int(d, "m_StateMachineIndex"), DefaultWeight = Tree.Float(d, "m_DefaultWeight"), Binding = (uint)Tree.Int(d, "m_Binding"),
+                    MotionSet = (int)Tree.Int(d, "m_StateMachineMotionSetIndex"), SyncedTiming = Tree.Bool(d, "m_SyncedLayerAffectsTiming"),
+                };
                 layer.Name = Names.TryGetValue(layer.Binding, out var n) ? n : "";
                 layers.Add(layer);
             }
             Layers = layers.ToArray();
+            if (NoSynced) foreach (var l in Layers) l.MotionSet = 0;
+            for (int i = 0; i < Layers.Length; i++)
+                if (Layers[i].MotionSet > 0)
+                    for (int j = 0; j < Layers.Length; j++)
+                        if (j != i && Layers[j].Machine == Layers[i].Machine && Layers[j].MotionSet == 0)
+                        {
+                            Layers[i].Source = j;
+                            if (Layers[i].SyncedTiming) Layers[j].TimedBySync = true;
+                            break;
+                        }
             if (Layers.Length > 0) Layers[0].DefaultWeight = 1f;   // the base layer always has full weight
             var machines = new List<Machine>();
             foreach (var m in Tree.List(ctl, "m_StateMachineArray"))
@@ -320,37 +389,14 @@ namespace Cuphead360.Engine
                     var trs = new List<Transition>();
                     foreach (var x in Tree.List(sd, "m_TransitionConstantArray")) trs.Add(ReadTransition(x));
                     st.Transitions = trs.ToArray();
-                    // Motion: blend tree constant; plain states have one node with a clip id.
+                    // Motions: a blend tree constant per motion set (the index array says which, -1 none);
+                    // plain states have one node with a clip id.
                     var bts = Tree.List(sd, "m_BlendTreeConstantArray");
-                    if (bts.Count > 0)
-                    {
-                        var nodes = Tree.List(Tree.Get(bts[0], "data"), "m_NodeArray");
-                        if (nodes.Count > 0)
-                        {
-                            var root = Tree.Get(nodes[0], "data");
-                            long clipId = Tree.Int(root, "m_ClipID", -1);
-                            if (clipId >= 0 && clipId < 0xFFFFFFFFL) st.Clip = (int)clipId;
-                            var kids = Tree.List(root, "m_ChildIndices");
-                            var thresholds = Tree.List(Tree.Get(Tree.Get(root, "m_Blend1dData"), "data"), "m_ChildThresholdArray");
-                            if (nodes.Count > 1 && Tree.Int(root, "m_BlendType") == 0 && kids.Count > 0 && thresholds.Count == kids.Count)
-                            {
-                                // A 1D blend tree of clips (Werner Werman's saw blade, six by a float): the
-                                // child weighing most plays (what a sprite animation shows of a blend).
-                                st.BlendParam = (uint)Tree.Int(root, "m_BlendEventID");
-                                st.BlendThresholds = new float[kids.Count];
-                                st.BlendClips = new int[kids.Count];
-                                for (int k = 0; k < kids.Count; k++)
-                                {
-                                    int node = (int)Convert.ToInt64(kids[k]);
-                                    long cid = node >= 0 && node < nodes.Count ? Tree.Int(Tree.Get(nodes[node], "data"), "m_ClipID", -1) : -1;
-                                    st.BlendClips[k] = cid >= 0 && cid < 0xFFFFFFFFL ? (int)cid : -1;
-                                    st.BlendThresholds[k] = Convert.ToSingle(thresholds[k]);
-                                }
-                                if (st.Clip < 0) st.Clip = st.BlendClips[0];
-                            }
-                            else if (nodes.Count > 1) AssetDb.Problem("blend tree with " + nodes.Count + " nodes in " + co.File.Name + " " + co.PathId + " (first clip only)");
-                        }
-                    }
+                    var sets = Tree.Longs(sd, "m_BlendTreeConstantIndexArray");
+                    if (sets.Length == 0 && bts.Count > 0) sets = new long[] { 0 };
+                    st.Sets = new Motion[sets.Length];
+                    for (int k = 0; k < sets.Length; k++)
+                        if (sets[k] >= 0 && sets[k] < bts.Count) st.Sets[k] = ReadMotion(bts[(int)sets[k]], co);
                     states.Add(st);
                 }
                 mach.States = states.ToArray();
@@ -538,6 +584,7 @@ namespace Cuphead360.Engine
                 if (keepState && old != null && i < old.Length) { l.Current = old[i].Current; l.Weight = old[i].Weight; }
                 else { l.Current = new StatePlay { State = Entry(Data.Machines[Data.Layers[i].Machine]) }; l.EntryPending = true; }
             }
+            Mirror();
             // Every property any clip of the controller animates is under the animator's control.
             foreach (var c in Data.Clips)
                 if (c != null) foreach (var b in c.Bindings) Bind(b);
@@ -609,31 +656,77 @@ namespace Cuphead360.Engine
             return index >= 0 && index < m.States.Length ? m.States[index] : null;
         }
 
-        /// <summary>The clip a state plays now: its own, or for a 1D blend tree the child weighing most.</summary>
-        public int ClipIndex(ControllerData.State s)
+        /// <summary>The clip a state plays now on a layer (its motion set's): the clip, or for a 1D blend tree the child weighing most.</summary>
+        public int ClipIndex(int layer, ControllerData.State s)
         {
-            if (s == null) return -1;
-            var th = s.BlendThresholds;
-            if (th == null) return s.Clip;
-            int pi = ParamIndex(s.BlendParam);
+            var mo = s?.MotionOf(layer >= 0 && layer < Data.Layers.Length ? Data.Layers[layer].MotionSet : 0);
+            if (mo == null) return -1;
+            var th = mo.BlendThresholds;
+            if (th == null) return mo.Clip;
+            int pi = ParamIndex(mo.BlendParam);
             float v = pi >= 0 ? Floats[pi] : 0f;
-            if (v <= th[0]) return s.BlendClips[0];
+            if (v <= th[0]) return mo.BlendClips[0];
             for (int k = 0; k + 1 < th.Length; k++)
                 if (v < th[k + 1])
                 {
                     // between two thresholds: the nearer one carries half the weight or more
                     float w = th[k + 1] > th[k] ? (th[k + 1] - v) / (th[k + 1] - th[k]) : 1f;
-                    return w >= 0.5f ? s.BlendClips[k] : s.BlendClips[k + 1];
+                    return w >= 0.5f ? mo.BlendClips[k] : mo.BlendClips[k + 1];
                 }
-            return s.BlendClips[th.Length - 1];
+            return mo.BlendClips[th.Length - 1];
         }
 
+        ClipData ClipAt(int layer, ControllerData.State s)
+        {
+            int ci = ClipIndex(layer, s);
+            return ci >= 0 && ci < Data.Clips.Length ? Data.Clips[ci] : null;
+        }
+
+        /// <summary>
+        /// A state's length on a layer: its clip's; a synced layer keeps its source layer's timing; synced
+        /// layers that affect timing (Ms. Chalice's) pull it toward their own clip's length by their weight.
+        /// </summary>
         public float StateLength(int layer, int index)
         {
+            var dl = Data.Layers[layer];
+            if (dl.Source >= 0) { layer = dl.Source; dl = Data.Layers[layer]; }
             var s = StateAt(layer, index);
-            int ci = ClipIndex(s);
-            var c = ci >= 0 && ci < Data.Clips.Length ? Data.Clips[ci] : null;
-            return c == null ? 1f : Math.Max(c.Length, 1e-4f);
+            var c = ClipAt(layer, s);
+            float len = c == null ? 1f : Math.Max(c.Length, 1e-4f);
+            if (dl.TimedBySync && s != null)
+                for (int k = 0; k < Data.Layers.Length && k < Layers.Length; k++)
+                {
+                    var sk = Data.Layers[k];
+                    if (sk.Source != layer || !sk.SyncedTiming || Layers[k].Weight <= 0f) continue;
+                    var ck = ClipAt(k, s);
+                    if (ck != null) len += (Math.Max(ck.Length, 1e-4f) - len) * Math.Min(1f, Layers[k].Weight);
+                }
+            return len;
+        }
+
+        /// <summary>Clip seconds per state second on a layer: 1, but for a synced layer (or a state whose length its synced layers change) the clip is stretched over the state.</summary>
+        float ClipScale(int layer, int state, ClipData clip)
+        {
+            var dl = Data.Layers[layer];
+            if (dl.Source < 0 && !dl.TimedBySync) return 1f;
+            float eff = StateLength(layer, state), len = Math.Max(clip.Length, 1e-4f);
+            return Math.Abs(eff - len) <= 1e-6f * len ? 1f : len / eff;
+        }
+
+        /// <summary>Synced layers show their source layer's states: the same plays, transitions and times.</summary>
+        void Mirror()
+        {
+            if (Data == null) return;
+            for (int i = 0; i < Layers.Length && i < Data.Layers.Length; i++)
+            {
+                int src = Data.Layers[i].Source;
+                if (src < 0 || src >= Layers.Length) continue;
+                var l = Layers[i]; var s = Layers[src];
+                l.Current = s.Current; l.Next = s.Next; l.Transition = s.Transition;
+                l.TransitionTime = s.TransitionTime; l.TransitionLength = s.TransitionLength;
+                l.PendingPlay = null; l.PendingCross = null; l.EntryPending = false;
+                l.Retired.Clear();
+            }
         }
 
         float StateSpeed(int layer, int index)
@@ -696,12 +789,14 @@ namespace Cuphead360.Engine
         void UpdateNow(float dt)
         {
             int mark = consumedTriggers.Count;
-            for (int li = 0; li < Layers.Length; li++) UpdateLayer(li, dt * Speed);
+            for (int li = 0; li < Layers.Length; li++)
+                if (li >= Data.Layers.Length || Data.Layers[li].Source < 0) UpdateLayer(li, dt * Speed);
+            Mirror();
             for (int i = mark; i < consumedTriggers.Count; i++) Bools[consumedTriggers[i]] = false;
             consumedTriggers.RemoveRange(mark, consumedTriggers.Count - mark);
             if (TraceNow)
             {
-                // One line a frame: each weighted layer's state (name hash), time / length, and a transition's target.
+                // One line a frame: each weighted layer's state (name hash), its clip, time / length, and a transition's target.
                 var sb = new System.Text.StringBuilder($"TRACE anim frame {Clock.FrameCount} {GameObject.Name} dt {dt:0.0000}:");
                 for (int li = 0; li < Layers.Length; li++)
                 {
@@ -709,7 +804,7 @@ namespace Cuphead360.Engine
                     if (li > 0 && l.Weight <= 0f) continue;
                     var cs = StateAt(li, l.Current.State);
                     var ns = l.Next != null ? StateAt(li, l.Next.State) : null;
-                    sb.Append($" L{li} w{l.Weight:0.##} {cs?.NameId:X8} {l.Current.Time:0.000}/{StateLength(li, l.Current.State):0.000}");
+                    sb.Append($" L{li} w{l.Weight:0.##} {cs?.NameId:X8} {ClipAt(li, cs)?.Name ?? "-"} {l.Current.Time:0.000}/{StateLength(li, l.Current.State):0.000}");
                     if (ns != null) sb.Append($" ->{ns.NameId:X8} {l.TransitionTime:0.000}/{l.TransitionLength:0.000}");
                 }
                 Log.Line(sb.ToString());
@@ -1134,11 +1229,10 @@ namespace Cuphead360.Engine
         {
             if (p == null || weight <= 0f) return;
             var st = StateAt(li, p.State);
-            int ci = ClipIndex(st);
-            if (ci < 0 || ci >= Data.Clips.Length || Data.Clips[ci] == null) return;
-            var clip = Data.Clips[ci];
+            var clip = ClipAt(li, st);
+            if (clip == null) return;   // nothing in this layer's motion set: the layers below show
             float len = clip.Length;
-            float t = p.Time;
+            float t = p.Time * ClipScale(li, p.State, clip);
             if (len > 0f)
             {
                 if (clip.Loop || st.Loop) { t %= len; if (t < 0) t += len; }
@@ -1272,6 +1366,8 @@ namespace Cuphead360.Engine
         void FireEvents(int li)
         {
             var lr = Layers[li];
+            // A synced layer's clips fire while it has weight (its source fires the states it left).
+            if (li < Data.Layers.Length && Data.Layers[li].Source >= 0 && lr.Weight <= 0f) return;
             if (lr.Retired.Count > 0)
             {
                 // A state left this update fires its events up to the point it was left. Taken off the
@@ -1289,12 +1385,11 @@ namespace Cuphead360.Engine
         void FireEvents(int li, StatePlay p, float weight)
         {
             var st = StateAt(li, p.State);
-            int ci = ClipIndex(st);
-            if (ci < 0 || ci >= Data.Clips.Length) return;
-            var clip = Data.Clips[ci];
+            var clip = ClipAt(li, st);
             if (clip == null || clip.Events.Length == 0) return;
             float len = clip.Length;
-            float a = p.Prev, b = p.Time;
+            float scale = ClipScale(li, p.State, clip);
+            float a = p.Prev * scale, b = p.Time * scale;
             if (b < a || (b == a && !p.Fresh)) return;
             bool loop = clip.Loop || st.Loop;
             if (!loop || len <= 0f)
@@ -1457,7 +1552,7 @@ namespace Cuphead360.Engine
             info.m_SpeedMultiplier = 1f;
             if (s.SpeedParam != 0) { int pi = a.ParamIndex(s.SpeedParam); if (pi >= 0) info.m_SpeedMultiplier = a.Floats[pi]; }
             info.m_Tag = (int)s.TagId;
-            int ci = a.ClipIndex(s);
+            int ci = a.ClipIndex(layer, s);
             var c = ci >= 0 && ci < a.Data.Clips.Length ? a.Data.Clips[ci] : null;
             info.m_Loop = (s.Loop || (c?.Loop ?? false)) ? 1 : 0;
             return info;
@@ -1553,6 +1648,8 @@ namespace Cuphead360.Engine
                 st = a.FindState(layer, (uint)hash);
                 if (st < 0) { NoState(a, hash, layer); return; }
             }
+            // A synced layer's state is its source's (the same machine): played there.
+            if (layer < a.Data.Layers.Length && a.Data.Layers[layer].Source >= 0) layer = a.Data.Layers[layer].Source;
             var l = a.Layers[layer];
             if (NAnimator.WindowOnPlay != null && NAnimator.WindowsLeft > 0 && a.GameObject?.Name == NAnimator.WindowName && NAnimator.WindowOnPlay.Contains(hash))
             {
@@ -1675,7 +1772,7 @@ namespace Cuphead360.Engine
             var l = a.Layers[layerIndex];
             var p = current ? l.Current : l.Next;
             var s = p == null ? null : a.StateAt(layerIndex, p.State);
-            int ci = a.ClipIndex(s);
+            int ci = a.ClipIndex(layerIndex, s);
             if (ci < 0 || ci >= a.Data.ClipObjects.Length || a.Data.ClipObjects[ci] == null) return list;
             float w = l.Next != null && l.TransitionLength > 0 ? Math.Min(1f, l.TransitionTime / l.TransitionLength) : 0f;
             list.Add(new AnimatorClipInfo { m_ClipInstanceID = Objects.Of(a.Data.ClipObjects[ci])?.InstanceId ?? 0, m_Weight = current ? 1f - w : w });
