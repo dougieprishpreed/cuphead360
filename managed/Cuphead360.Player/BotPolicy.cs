@@ -50,6 +50,37 @@ namespace Cuphead360.Player
 
         static float GetFloat(object o, string name) => Get(o, name) switch { float v => v, int i => i, _ => float.NaN };
 
+        /// <summary>TYPE.MEMBER[.MEMBER...] as text: a game type's static member, then members of what each holds
+        /// (@TYPE: the first live object of that type, then its members; @TYPE alone: where it is).</summary>
+        static string Show(string path)
+        {
+            var parts = path.Split('.');
+            var t = GameType(parts[0].TrimStart('@'));
+            if (t != null && parts[0].StartsWith("@"))
+            {
+                var found = UnityEngine.Object.FindObjectOfType(t);
+                if (found == null) return "(none)";
+                object v = found;
+                if (parts.Length == 1 && found is Component c)
+                {
+                    string at = c.gameObject.name;
+                    for (var p = c.transform.parent; p != null; p = p.parent) at = p.gameObject.name + "/" + at;
+                    return at + (c.gameObject.activeInHierarchy ? "" : " (inactive)");
+                }
+                for (int i = 1; i < parts.Length && v != null; i++) v = Get(v, parts[i]);
+                return v?.ToString() ?? "null";
+            }
+            if (t == null || parts.Length < 2) return "(no type " + parts[0] + ")";
+            MemberInfo m = null;
+            for (var k = t; k != null && m == null; k = k.BaseType)
+                m = (MemberInfo)k.GetField(parts[1], AnyMember) ?? k.GetProperty(parts[1], AnyMember);
+            object o = m is FieldInfo fi && fi.IsStatic ? fi.GetValue(null)
+                     : m is PropertyInfo pi && pi.GetMethod != null && pi.GetMethod.IsStatic ? pi.GetValue(null) : null;
+            if (m == null) return "(no static " + parts[1] + ")";
+            for (int i = 2; i < parts.Length && o != null; i++) o = Get(o, parts[i]);
+            return o?.ToString() ?? "null";
+        }
+
         /// <summary>Synthetic, as the equip menu's result: player one's weapons, super and charm.</summary>
         static string SetLoadout(string[] s)
         {

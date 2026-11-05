@@ -280,6 +280,13 @@ namespace Cuphead360.Player
                             Next("SYNTHETIC: " + s[1] + " = " + s[2]);
                             continue;
                         }
+                    case "show":   // show TYPE.MEMBER[.MEMBER...] ...: game state in the log (a static, then what it holds), for checks
+                        {
+                            var shown = new List<string>();
+                            for (int k = 1; k < s.Length; k++) shown.Add(s[k] + " = " + Show(s[k]));
+                            Next(string.Join("; ", shown));
+                            continue;
+                        }
                     case "difficulty":
                         {
                             // Synthetic, as the map's difficulty choice: Level.SetCurrentMode for the next level.

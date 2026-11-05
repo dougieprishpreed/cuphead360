@@ -554,6 +554,7 @@ namespace Cuphead360.Engine
         {
             Animators.Register(this);
             if (on) Rebind(keepState: false);
+            else RestoreDefaults();
         }
         public override void Removed() { }
 
@@ -561,7 +562,6 @@ namespace Cuphead360.Engine
         public void Rebind(bool keepState)
         {
             if (TraceName != null && GameObject != null && GameObject.Name.Contains(TraceName)) Log.Line($"TRACE animator {GameObject.Name} Rebind(keep={keepState}) frame {Clock.FrameCount} {Environment.StackTrace}");
-            RestoreDefaults();
             targets.Clear();
             controlled.Clear();
             Data = ControllerData.Of(Controller);
@@ -1273,17 +1273,19 @@ namespace Cuphead360.Engine
             bool writeDefaults = true;
             if (Layers.Length > 0) { var s = StateAt(0, Layers[0].Current.State); if (s != null) writeDefaults = s.WriteDefaults; }
             HashSet<NBehaviour> notify = null;
-            foreach (var tg in controlled)
-            {
-                if (!tg.Written)
+            for (int pass = 0; pass < 2; pass++)
+                foreach (var tg in controlled)
                 {
-                    if (!writeDefaults) continue;
-                    Array.Copy(tg.Default, tg.Value, 4);
-                    tg.Obj = tg.DefaultObj;
+                    if (Toggles(tg) != (pass == 1)) continue;
+                    if (!tg.Written)
+                    {
+                        if (!writeDefaults) continue;
+                        Array.Copy(tg.Default, tg.Value, 4);
+                        tg.Obj = tg.DefaultObj;
+                    }
+                    Write(tg);
+                    if (tg.Notify != null) (notify ??= new HashSet<NBehaviour>()).Add(tg.Notify);
                 }
-                Write(tg);
-                if (tg.Notify != null) (notify ??= new HashSet<NBehaviour>()).Add(tg.Notify);
-            }
             // Unity tells scripts whose serialized fields the animation wrote (UGUI marks itself dirty).
             if (notify != null)
                 foreach (var nb in notify)
@@ -1292,6 +1294,16 @@ namespace Cuphead360.Engine
                     if (m != null && !nb.Destroyed) Behaviours.Send(nb, m);
                 }
         }
+
+        /// <summary>
+        /// A write that turns an object or a behaviour on or off: written after the frame's values, so
+        /// OnEnable and OnDisable see them. The map's event notification's out clips end with its camera
+        /// properties back on the player and their behaviour disabled, whose OnDisable hands them to
+        /// the map camera: written before them, the camera kept the shown values (it stopped following
+        /// the player after Mac's coins, whose dialogue then never let the player go, and after the
+        /// equip menu's tooltip: the eighteenth run).
+        /// </summary>
+        static bool Toggles(Target tg) => tg.B.TypeId == 1 || (tg.B.Attribute == EnabledHash && tg.Component is NBehaviour);
 
         void Write(Target tg)
         {
@@ -1359,7 +1371,23 @@ namespace Cuphead360.Engine
             }
         }
 
-        void RestoreDefaults() { }
+        /// <summary>
+        /// An animator disabled (or its object deactivated) writes back the values its properties had
+        /// when it was bound, as Unity's does, before its children's OnDisable (values first, then
+        /// what it turns on or off).
+        /// </summary>
+        void RestoreDefaults()
+        {
+            for (int pass = 0; pass < 2; pass++)
+                foreach (var tg in controlled)
+                {
+                    if (Toggles(tg) != (pass == 1)) continue;
+                    if ((tg.Component != null && tg.Component.Destroyed) || (tg.Transform != null && tg.Transform.Destroyed)) continue;
+                    Array.Copy(tg.Default, tg.Value, 4);
+                    tg.Obj = tg.DefaultObj;
+                    Write(tg);
+                }
+        }
 
         // ---------------------------------------------------------------- events
 

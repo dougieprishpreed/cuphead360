@@ -19,7 +19,8 @@ half a texel beyond it), is copied as DXT blocks: the same bytes the full
 page holds, nothing re-encoded. A sprite's animation is its name without
 the frame number (veggie_onion_idle_0004 -> veggie_onion_idle); each
 animation takes pages of its own (small ones share, in name order), each
-packed at the width that wastes least. Writes <data>/ctexc/<atlas>_c<N>.ctx (convert_console.py's
+packed at the width that wastes least, 4 MB at most (a sprite larger than
+that alone on a page). Writes <data>/ctexc/<atlas>_c<N>.ctx (convert_console.py's
 CTX1 format) and <data>/ctexc/ctexmap.bin, which console/ch360_imports.c
 (remap_load) reads from the texture pack:
 
@@ -47,7 +48,12 @@ import chob  # noqa: E402
 MARGIN = 2
 SMALL = 128 * 1024                # texels: an animation this small shares a page
 POOL_CAP = int(1024 * 1024 * 0.85)  # texels of small animations a shared page takes
-BIG_CAP = int(4096 * 4096 * 0.85)   # texels of one animation a page takes before the next
+# Texels of one animation a page takes before the next: at most 4 MB of DXT5. Pages of up to 16 MB
+# (4096 square) could not be made in the memory a level leaves: the console keeps 24 MB free for the
+# player and refused the run-and-gun level's 14 MB "Bravo!" page and the map's 12 MB pages with
+# 33-37 MB free (the eighteenth run), so they were drawn without their textures.
+BIG_CAP = int(2048 * 2048 * 0.85)
+MAX_WIDTH = 2048                    # page width, unless one sprite is wider
 
 
 def fnv64(key):
@@ -256,12 +262,14 @@ def main():
                 # The page width that wastes least: frames 1024-1536 px wide were half the bee
                 # level's, one to a row of a 2048 px page. Widths in 32s (the GPU's tiling).
                 widest = max(e[0][3] for e in items)
+                tallest = max(e[0][4] for e in items)
                 best = None
-                for cand in sorted({widest, 2 * widest, 3 * widest, 1024, 1536, 2048, 2560, 3072, 4096}):
+                for cand in sorted({widest, 2 * widest, 3 * widest, 1024, 1536, 2048}):
                     cw = (cand + 31) // 32 * 32
-                    if cw < widest or cw > 4096:
+                    if cw < widest or cw > max(MAX_WIDTH, (widest + 31) // 32 * 32):
                         continue
-                    pg = Page(cw, 4096)
+                    # 4 MB of texels at most (what spills goes on the next page), unless one sprite is taller
+                    pg = Page(cw, min(4096, max(tallest, 2048 * 2048 // cw)))
                     got, spill = [], []
                     for e in items:
                         at = pg.place(e[0][3], e[0][4])
@@ -344,6 +352,14 @@ def main():
     with open(os.path.join(out_dir, "ctexmap.bin.tmp"), "wb") as f:
         f.write(blob)
     os.replace(os.path.join(out_dir, "ctexmap.bin.tmp"), os.path.join(out_dir, "ctexmap.bin"))
+    # pages an earlier layout wrote that this one doesn't (stage_console.py packs every page here)
+    if not a.only:
+        keep = set(t + ".ctx" for t in targets)
+        stale = [f for f in os.listdir(out_dir) if f.endswith(".ctx") and f not in keep]
+        for f in stale:
+            os.remove(os.path.join(out_dir, f))
+        if stale:
+            print("cluster_console: %d pages of an earlier layout removed" % len(stale), flush=True)
     print("cluster_console: %d source pages -> %d sprite pages, %.1f MB (the source pages at full size: %.1f MB); "
           "%d boxes; %.0f s" % (len(pages), len(targets), written / 2**20, total_src / 2**20,
                                  sum(len(v) for v in remap.values()), time.time() - t0))

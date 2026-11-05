@@ -126,9 +126,6 @@ static float lef(const U8* p) {
     v.u = le32(p);
     return v.f;
 }
-static void set_bits(float* f, U32 bits) {
-    memcpy(f, &bits, 4);
-}
 static U8 unorm8(float f) {
     return (U8)(f <= 0.0f ? 0 : f >= 1.0f ? 255 : (int)(f * 255.0f + 0.5f));
 }
@@ -365,30 +362,22 @@ static void remap_prefetch(remap_page* p, int always) {
     }
 }
 
-/* Moves an item drawn from an atlas page onto its sprite's full-size page. */
-
-static void remap_item(ch360_item* it) {
-    remap_page* p;
-    ch360_vertex* v;
-    float u0, v0, u1, v1;
-    unsigned k, n, from, to;
+/* The item's atlas page, if its sprites have pages of their own (else NULL). */
+static remap_page* remap_page_for(const ch360_item* it) {
     int page;
     /* the light ray reads two more textures at its uvs; the Knight's glow and
      * the Bishop's darkness sample render textures */
-    if (it->texture < 0 || (unsigned)it->texture >= plat_cap || it->mode == 6 || it->mode == 8 || it->mode == 9) return;
+    if (it->texture < 0 || (unsigned)it->texture >= plat_cap || it->mode == 6 || it->mode == 8 || it->mode == 9) return NULL;
     page = page_of_plat[it->texture] - 1;
-    if (page < 0) return;
-    p = &rm_pages[page];
-    if (p->count == 0) return;
-    v = draw_verts + it->first;
-    u0 = u1 = v->u;
-    v0 = v1 = v->v;
-    for (k = 1; k < it->count; k++) {
-        if (v[k].u < u0) u0 = v[k].u;
-        if (v[k].u > u1) u1 = v[k].u;
-        if (v[k].v < v0) v0 = v[k].v;
-        if (v[k].v > v1) v1 = v[k].v;
-    }
+    if (page < 0 || rm_pages[page].count == 0) return NULL;
+    return &rm_pages[page];
+}
+
+/* Moves an item whose uvs span the box (u0, v0)-(u1, v1) onto the sprite page
+ * holding that box: the item's texture and its taps' offsets; the box found
+ * maps its uvs (NULL: none holds it, the item stays on the atlas page). */
+static const remap_box* remap_lookup(remap_page* p, ch360_item* it, float u0, float v0, float u1, float v1) {
+    unsigned n, from, to;
     if (p->grid == NULL) p->grid = remap_grid(p);
     /* the box last matched, then those of the cell holding the uv box's corner
      * (a box that holds the uv box holds that corner), or all without a grid */
@@ -415,21 +404,43 @@ static void remap_item(ch360_item* it) {
                     remap_prefetch(p, 0);
                 }
             }
-            if (id < 0) return;
-            for (k = 0; k < it->count; k++) {
-                v[k].u = v[k].u * b->su + b->ou;
-                v[k].v = v[k].v * b->sv + b->ov;
-            }
+            if (id < 0) return NULL;
             if (it->mode == 10 || it->mode == 35) { /* their taps' offsets are in the page's uvs */
                 it->params[8] *= b->su;
                 it->params[9] *= b->sv;
             }
             it->texture = id;
             p->last = bi - p->first;
-            return;
+            return b;
         }
     }
     rm_misses++;
+    return NULL;
+}
+
+/* Moves an item drawn from an atlas page onto its sprite's full-size page. */
+static void remap_item(ch360_item* it) {
+    remap_page* p = remap_page_for(it);
+    const remap_box* b;
+    ch360_vertex* v;
+    float u0, v0, u1, v1;
+    unsigned k;
+    if (p == NULL) return;
+    v = draw_verts + it->first;
+    u0 = u1 = v->u;
+    v0 = v1 = v->v;
+    for (k = 1; k < it->count; k++) {
+        if (v[k].u < u0) u0 = v[k].u;
+        if (v[k].u > u1) u1 = v[k].u;
+        if (v[k].v < v0) v0 = v[k].v;
+        if (v[k].v > v1) v1 = v[k].v;
+    }
+    b = remap_lookup(p, it, u0, v0, u1, v1);
+    if (b == NULL) return;
+    for (k = 0; k < it->count; k++) {
+        v[k].u = v[k].u * b->su + b->ou;
+        v[k].v = v[k].v * b->sv + b->ov;
+    }
 }
 
 unsigned ch360_remap_misses(void) {
@@ -509,6 +520,107 @@ static int draw_clip_edge(const draw_corner_f* in, int n, draw_corner_f* out, in
     return m;
 }
 
+/* An item's arrays as words in native order: its positions (then, mapped, the
+ * screen's), then its uvs (then the sprite page's). */
+static U32* draw_words;
+static unsigned draw_words_cap;
+
+/* An unclipped item's triangle list. Each array is swapped into words once
+ * and each vertex mapped once, and the list is written as plain words: the
+ * corner-by-corner loop moved each swapped word to the float unit through
+ * the stack, a load-hit-store stall per value, about 200 ns a corner on the
+ * console (10 ms a frame for Forest Follies' 45,000: its backgrounds' meshes
+ * have 700-1,100 triangles each). The screen box and the sprite page's uv box
+ * come from the vertices rather than the corners (a sprite's mesh uses all
+ * of them). */
+static void draw_item_unclipped(ch360_item* it, const U8* tri, U32 ntri, const U8* pos, U32 npos, const U8* uv, U32 nuv,
+                                const U8* col, U32 ncol, const float* m, const U8* blend) {
+    U32 *sp, *su, *o, i, bw;
+    float *fp, *fu, x0, y0, x1, y1;
+    remap_page* p;
+    /* the triangles index the vertices only: uvs and colours past them are never drawn */
+    if (nuv > npos) nuv = npos;
+    if (ncol > npos) ncol = npos;
+    if (it->mode == 0 && it->stencil != 1 && it->stencil != 2) {
+        /* A sprite wholly transparent draws nothing (premultiplied: the shader's
+         * alpha is the vertex's times the blend's): the loading screen's
+         * hourglass stays at alpha 0 all game long and kept its 3.6 MB page. */
+        int seen = blend[3] != 0 && ncol < npos;   /* vertices without a colour are white */
+        for (i = 0; !seen && blend[3] != 0 && i < ncol; i++) seen = col[4 * i + 3] != 0;
+        if (!seen) {
+            draw_item_count--;
+            return;
+        }
+    }
+    if (!draw_grow((void**)&draw_words, &draw_words_cap, 2 * (npos + nuv), sizeof(U32))) {
+        draw_item_count--;
+        return;
+    }
+    sp = draw_words;
+    su = draw_words + 2 * npos;
+    fp = (float*)sp;
+    fu = (float*)su;
+    for (i = 0; i < 2 * npos; i++) sp[i] = le32(pos + 4 * i);
+    for (i = 0; i < 2 * nuv; i++) su[i] = le32(uv + 4 * i);
+    x0 = y0 = 3.0e38f;
+    x1 = y1 = -3.0e38f;
+    for (i = 0; i < npos; i++) {
+        float x = fp[2 * i], y = fp[2 * i + 1];
+        if (m != NULL) {
+            float sx = m[0] * x + m[1] * y + m[2];
+            float sy = m[3] * x + m[4] * y + m[5];
+            fp[2 * i] = x = sx;
+            fp[2 * i + 1] = y = sy;
+        }
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+    }
+    p = remap_page_for(it);
+    if (p != NULL) {
+        const remap_box* b;
+        float u0 = nuv < npos ? 0.0f : 3.0e38f, v0 = u0, u1 = nuv < npos ? 0.0f : -3.0e38f, v1 = u1;
+        for (i = 0; i < nuv; i++) {
+            float u = fu[2 * i], v = fu[2 * i + 1];
+            if (u < u0) u0 = u;
+            if (u > u1) u1 = u;
+            if (v < v0) v0 = v;
+            if (v > v1) v1 = v;
+        }
+        b = remap_lookup(p, it, u0, v0, u1, v1);
+        if (b != NULL)
+            for (i = 0; i < nuv; i++) {
+                fu[2 * i] = fu[2 * i] * b->su + b->ou;
+                fu[2 * i + 1] = fu[2 * i + 1] * b->sv + b->ov;
+            }
+    }
+    memcpy(&bw, blend, 4);
+    o = (U32*)(draw_verts + draw_vert_count);
+    for (i = 0; i < ntri; i++, o += 6) {
+        U32 k = le32(tri + 4 * i), c = 0xFFFFFFFFu;
+        if (k >= npos) k = 0;
+        o[0] = sp[2 * k];
+        o[1] = sp[2 * k + 1];
+        if (k < nuv) {
+            o[2] = su[2 * k];
+            o[3] = su[2 * k + 1];
+        } else {
+            o[2] = o[3] = 0;
+        }
+        if (k < ncol) memcpy(&c, col + 4 * k, 4);
+        o[4] = c;
+        o[5] = bw;
+    }
+    draw_vert_count += ntri;
+    it->count = ntri;
+    it->x0 = x0;
+    it->y0 = y0;
+    it->x1 = x1;
+    it->y1 = y1;
+    draw_views[draw_view_count - 1].items++;
+}
+
 void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
     static const U8 white[4] = { 255, 255, 255, 255 };
     const U8 *a, *tri, *pos, *uv = NULL, *col = NULL;
@@ -560,30 +672,9 @@ void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
     for (k = 0; k < 12; k++) it->params[k] = mode == 6 ? (k < 3 ? lef(a + 112 + 4 * k) : 0.0f) : lef(a + 128 + 4 * k);
     it->stencil = le32(a + 124);
     if (!clipped) {
-        ch360_vertex* out = draw_verts + draw_vert_count;
-        for (i = 0; i < ntri; i++, out++) {
-            int ki = (int)le32(tri + 4 * i);
-            const U8* pp;
-            if (ki < 0 || (U32)ki >= npos) ki = 0;
-            pp = pos + 8 * ki;
-            if (affine) {
-                float x = lef(pp), y = lef(pp + 4);
-                out->x = m[0] * x + m[1] * y + m[2];
-                out->y = m[3] * x + m[4] * y + m[5];
-            } else {
-                set_bits(&out->x, le32(pp));
-                set_bits(&out->y, le32(pp + 4));
-            }
-            if ((U32)ki < nuv) {
-                set_bits(&out->u, le32(uv + 8 * ki));
-                set_bits(&out->v, le32(uv + 8 * ki + 4));
-            } else {
-                out->u = out->v = 0.0f;
-            }
-            memcpy(out->color, (U32)ki < ncol ? col + 4 * ki : white, 4);
-            memcpy(out->blend, blend, 4);
-        }
-        draw_vert_count += ntri;
+        draw_item_unclipped(it, tri, ntri, pos, npos, uv, nuv, col, ncol, affine ? m : NULL, blend);
+        draw_build_ms += draw_now_ms() - t0;
+        return;
     } else {
         /* Sutherland-Hodgman against the mask's rectangle, then a fan. */
         for (i = 0; i + 2 < ntri; i += 3) {

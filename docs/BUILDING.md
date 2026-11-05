@@ -129,7 +129,7 @@ python -I tools\convert_audio.py --game game --out work\GameData --bundles
 | `convert_textures` | `textures\*.tex`, 14 GB | 2 min | `0 errors` |
 | `convert_console` | `ctex\*.ctx`, halved pages, 4 GB | 30 min | `0 errors` |
 | `convert_console --max-size 4096` | `ctex4k\*.ctx`, full-size pages, 13 GB | 45 min | `0 errors` |
-| `cluster_console` | `ctexc\`, sprite pages and `ctexmap.bin`, 14 GB | 5 min | `cluster_console: ... sprite pages` |
+| `cluster_console` | `ctexc\`, sprite pages (4 MB at most) and `ctexmap.bin`, 13 GB | 5 min | `cluster_console: ... sprite pages` |
 | `convert_audio` | `audio\*.ogg`, about 4,000 clips, 390 MB | 10 min | `0 errors` |
 
 The texture steps run their workers at below-normal priority, so the PC
