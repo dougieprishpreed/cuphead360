@@ -67,7 +67,8 @@ U32 i5_ch3603_pad(wasmModuleInstance* inst, U32 index, U32 state) {
  * through the affine map, 4 clipped), f32 alpha scale, then (address, count)
  * of the triangles (i32), positions (f32 x y), uvs (f32 u v) and colours (u8
  * r g b a), f32 A00 A01 B0 A10 A11 B1, f32 clip x0 y0 x1 y1, i32 two more
- * textures, f32 three floats (mode 6, the light ray); draw_end() hands the
+ * textures, f32 three floats (mode 6, the light ray), u32 the sprite masks'
+ * stencil (ch360_item.stencil); draw_end() hands the
  * frame to the platform layer (ch360_plat_draw).
  *
  * The vertices are written in the host's byte order and the GPU's layout
@@ -444,7 +445,7 @@ void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
     ch360_item* it;
     double t0 = draw_now_ms();
     (void)inst;
-    if (draw_view_count == 0 || !srt_mem_ok(args, 31 * 4)) return;
+    if (draw_view_count == 0 || !srt_mem_ok(args, 32 * 4)) return;
     a = srt_mem_ptr(args);
     flags = le32(a + 24);
     ntri = le32(a + 36);
@@ -486,6 +487,7 @@ void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
     it->params[1] = lef(a + 116);
     it->params[2] = lef(a + 120);
     it->params[3] = 0.0f;
+    it->stencil = le32(a + 124);
     if (!clipped) {
         ch360_vertex* out = draw_verts + draw_vert_count;
         for (i = 0; i < ntri; i++, out++) {

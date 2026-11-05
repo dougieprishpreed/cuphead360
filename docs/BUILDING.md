@@ -138,6 +138,11 @@ that step another time.
 **Check:** `work\GameData` holds `objects`, `ctex`, `ctex4k`, `ctexc`
 (with `ctexmap.bin`) and `audio`.
 
+If The Delicious Last Course is installed, its asset bundles are converted
+with the rest (`work\GameData\objects\bundles\atlas_world_dlc` is there),
+and the port turns the DLC on: its island, Ms. Chalice and its shop items.
+Without them it plays as the base game.
+
 ## 6. Set up the Xbox 360 toolchain in WSL
 
 The console program is built with the open

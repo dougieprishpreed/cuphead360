@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using Cuphead360.Engine;
 using UnityEngine;
 
@@ -18,11 +19,18 @@ namespace Cuphead360.Player
     ///   waitscene NAME [TIMEOUT]    until the active scene is NAME
     ///   goto OBJECT [RADIUS] [TIMEOUT]   steer the left stick toward a GameObject named OBJECT
     ///   gotoxy X Y [RADIUS] [TIMEOUT]    steer toward a world position
-    ///   fight [TIMEOUT]             boss fight policy until the scene changes
+    ///   fight [TIMEOUT] [FLAGS]     boss fight policy until the scene changes; flags: ex (EX shots),
+    ///                               all (EX and supers, parries, weapon switches, dashes, aiming, the
+    ///                               plane and run-and-gun policies); the boss's phases are logged
+    ///   loadout PRIMARY SECONDARY SUPER CHARM   player one's equipment (Weapon/Super/Charm names)
+    ///   mugman on|off               player one plays Mugman (the slot select's swap)
+    ///   difficulty Easy|Normal|Hard the next level's mode (the map's difficulty choice)
+    ///   scene NAME [TIMEOUT]        the game's own SceneLoader.LoadScene(Scenes.NAME), then wait for it
+    ///   visit N [quiet]             N frames wandering (stick turns, A now and then; quiet: no input)
     ///   repeat N { ... }            not supported; write steps out
     /// Buttons/controls as in InputScript (A B X Y LB RB Back Start LS RS Up Down Left Right, LX LY RX RY LT RT).
     /// </summary>
-    public sealed class Bot
+    public sealed partial class Bot
     {
         readonly List<string[]> steps = new List<string[]>();
         int index = -1, stepStart, frame;
@@ -194,12 +202,75 @@ namespace Cuphead360.Player
                     case "fight":
                         {
                             int timeout = s.Length > 1 ? I(s[1]) : 36000;
-                            fightEx = s.Length > 2 && s[2] == "ex";
-                            if (t == 0) fightScene = Cuphead360.Engine.Scenes.Active?.Name;
-                            if (Cuphead360.Engine.Scenes.Active?.Name != fightScene) { Next("scene changed to " + Cuphead360.Engine.Scenes.Active?.Name); continue; }
-                            if (t > timeout) { Next("TIMEOUT"); continue; }
-                            Fight(p, t);
+                            fightAll = Array.IndexOf(s, "all", 2) >= 0;
+                            fightEx = fightAll || Array.IndexOf(s, "ex", 2) >= 0;
+                            if (t == 0) { fightScene = Cuphead360.Engine.Scenes.Active?.Name; ResetTracking(); }
+                            if (Cuphead360.Engine.Scenes.Active?.Name != fightScene) { FightSummary(); Next("scene changed to " + Cuphead360.Engine.Scenes.Active?.Name); continue; }
+                            if (t > timeout) { FightSummary(); Next("TIMEOUT"); continue; }
+                            TrackPhases();
+                            if (fightAll) FightAll(p, t);
+                            else Fight(p, t);
                             return f;
+                        }
+                    case "scene":   // scene NAME [TIMEOUT]: the game's own SceneLoader.LoadScene(Scenes.NAME, Fade, Fade), then wait for it
+                        {
+                            int timeout = s.Length > 2 ? I(s[2]) : 3600;
+                            if (t == 0)
+                            {
+                                levelFrom = Cuphead360.Engine.Scenes.Active?.Name;
+                                var scenes = GameType("Scenes"); var loader = GameType("SceneLoader");
+                                MethodInfo load = null;
+                                foreach (var m in loader?.GetMethods(BindingFlags.Public | BindingFlags.Static) ?? new MethodInfo[0])
+                                    if (m.Name == "LoadScene" && m.GetParameters().Length == 5 && m.GetParameters()[0].ParameterType == scenes) load = m;
+                                object sc = null;
+                                try { sc = scenes != null ? Enum.Parse(scenes, s[1]) : null; } catch (ArgumentException) { }
+                                if (load == null || sc == null) { Next("LoadScene or Scenes." + s[1] + " not found"); continue; }
+                                var ps = load.GetParameters();
+                                load.Invoke(null, new[] { sc, Enum.Parse(ps[1].ParameterType, "Fade"), Enum.Parse(ps[2].ParameterType, "Fade"), Enum.Parse(ps[3].ParameterType, "Hourglass"), null });
+                                return f;
+                            }
+                            var now = Cuphead360.Engine.Scenes.Active?.Name;
+                            if (now != null && now != levelFrom && now != "scene_load_helper") { Next("SYNTHETIC: SceneLoader.LoadScene(" + s[1] + ") -> " + now); continue; }
+                            if (t > timeout) { Next("TIMEOUT"); continue; }
+                            return f;
+                        }
+                    case "visit":   // visit N [quiet]: wander for N frames, logging scene changes
+                        {
+                            if (t == 0) visitScene = Cuphead360.Engine.Scenes.Active?.Name;
+                            var now = Cuphead360.Engine.Scenes.Active?.Name;
+                            if (now != visitScene && now != "scene_load_helper") { Console.WriteLine($"BOT visit: scene {now} at frame {frame}"); visitScene = now; }
+                            if (t >= I(s[1])) { Next("done in " + now); continue; }
+                            if (s.Length > 2 && s[2] == "quiet") return f;
+                            // A new stick direction every two seconds; A now and then (dialogue, prompts, entrances).
+                            int turn = t / 120;
+                            double ang = (turn * 2654435761u % 360) * Math.PI / 180;
+                            p.LX = (float)Math.Cos(ang); p.LY = (float)Math.Sin(ang);
+                            if (t % 90 < 6) p.Buttons |= PadButton.A;
+                            return f;
+                        }
+                    case "loadout":   // loadout PRIMARY SECONDARY SUPER CHARM
+                        Next(SetLoadout(s));
+                        continue;
+                    case "mugman":
+                        {
+                            // Synthetic, as the slot select's swap: player one plays Mugman.
+                            var fld = GameType("PlayerManager")?.GetField("player1IsMugman", BindingFlags.Public | BindingFlags.Static);
+                            fld?.SetValue(null, s.Length > 1 && s[1] == "on");
+                            Next(fld != null ? "SYNTHETIC: PlayerManager.player1IsMugman " + (s.Length > 1 && s[1] == "on") : "PlayerManager.player1IsMugman not found");
+                            continue;
+                        }
+                    case "difficulty":
+                        {
+                            // Synthetic, as the map's difficulty choice: Level.SetCurrentMode for the next level.
+                            var level = GameType("Level");
+                            var mode = level?.GetNestedType("Mode");
+                            var set = level?.GetMethod("SetCurrentMode", BindingFlags.Public | BindingFlags.Static);
+                            object m = null;
+                            try { m = mode != null && s.Length > 1 ? Enum.Parse(mode, s[1]) : null; } catch (ArgumentException) { }
+                            if (set == null || m == null) { Next("Level.SetCurrentMode or the mode not found"); continue; }
+                            set.Invoke(null, new[] { m });
+                            Next("SYNTHETIC: Level.SetCurrentMode(" + s[1] + ")");
+                            continue;
                         }
                     default:
                         Console.WriteLine("BOT unknown step: " + string.Join(" ", s));
@@ -294,7 +365,7 @@ namespace Cuphead360.Player
             return pts;
         }
 
-        string fightScene, levelFrom;
+        string fightScene, levelFrom, visitScene;
         bool fightEx;
         int jumpUntil, dashUntil, dashCooldown, jumpCooldown;
         readonly Dictionary<NGameObject, Vector3> lastPos = new Dictionary<NGameObject, Vector3>();

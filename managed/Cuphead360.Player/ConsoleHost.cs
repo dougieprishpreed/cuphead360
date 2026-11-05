@@ -275,7 +275,8 @@ namespace Cuphead360.Player
                 vh[0] = v.PixelRect.x; vh[1] = v.PixelRect.y; vh[2] = v.PixelRect.width; vh[3] = v.PixelRect.height;
                 var cam = v.Camera;
                 bool clear = cam != null && (cam.ClearFlags == CameraClearFlags.SolidColor || cam.ClearFlags == CameraClearFlags.Skybox);
-                ((uint*)vh)[4] = clear ? 1u : 0u;
+                // 1 the colour; 2 depth and stencil (every clear flag but Nothing; the sprite masks' stencil)
+                ((uint*)vh)[4] = (clear ? 1u : 0u) | (cam != null && cam.ClearFlags != CameraClearFlags.Nothing ? 2u : 0u);
                 var bg = cam != null ? cam.Background : default;
                 vh[5] = bg.r; vh[6] = bg.g; vh[7] = bg.b; vh[8] = 1f;
                 DrawView(vh);
@@ -296,7 +297,8 @@ namespace Cuphead360.Player
         //  7 alpha scale  8/9 triangles  10/11 positions  12/13 uvs  14/15 colours (address, count)
         //  16-21 A00 A01 B0 A10 A11 B1  22-25 clip x0 y0 x1 y1
         //  26/27 mode 6's shadow and sky glow textures  28-30 its t, textureWidth, textureSpeed
-        const int ItemSlots = 31;
+        //  31 sprite masks' stencil (RenderList.Item.SpriteStencil: 1 add, 2 remove for a mask, mode 7; 3 inside, 4 outside)
+        const int ItemSlots = 32;
         static readonly int shadowTex = ShaderProps.Id("_ShadowTex"), skyGlowTex = ShaderProps.Id("_SkyGlowTex");
         static readonly int rayT = ShaderProps.Id("t"), rayWidth = ShaderProps.Id("textureWidth"), raySpeed = ShaderProps.Id("textureSpeed");
 
@@ -316,7 +318,8 @@ namespace Cuphead360.Player
                 lastMode = ModeOf(lastState?.Shader);
             }
             var ms = lastState;
-            uint mode = lastMode;
+            // A sprite mask writes the stencil only: mode 7 (its sprite's alpha against the cutoff in the tint).
+            uint mode = it.Kind == "mask" ? 7u : lastMode;
             var tint = it.Tint;
             bool blend = mode >= 1 && mode <= 3;
             var f = (float*)a;
@@ -338,6 +341,7 @@ namespace Cuphead360.Player
             a[9] = it.Triangles.Length; a[11] = pos.Length; a[13] = it.Uv?.Length ?? 0; a[15] = it.Colors?.Length ?? 0;
             f[16] = it.A00; f[17] = it.A01; f[18] = it.B0; f[19] = it.A10; f[20] = it.A11; f[21] = it.B1;
             f[22] = clip.x; f[23] = clip.y; f[24] = clip.z; f[25] = clip.w;
+            a[31] = it.SpriteStencil;
             fixed (int* tri = it.Triangles)
             fixed (Vector2* p = pos)
             fixed (Vector2* uv = it.Uv)
@@ -408,7 +412,7 @@ namespace Cuphead360.Player
                 F32(v.PixelRect.x); F32(v.PixelRect.y); F32(v.PixelRect.width); F32(v.PixelRect.height);
                 var cam = v.Camera;
                 bool clear = cam != null && (cam.ClearFlags == CameraClearFlags.SolidColor || cam.ClearFlags == CameraClearFlags.Skybox);
-                U32(clear ? 1u : 0u);
+                U32((clear ? 1u : 0u) | (cam != null && cam.ClearFlags != CameraClearFlags.Nothing ? 2u : 0u));
                 var bg = cam != null ? cam.Background : default;
                 F32(bg.r); F32(bg.g); F32(bg.b); F32(1f);
                 int countAt = len; U32(0);
@@ -425,6 +429,7 @@ namespace Cuphead360.Player
             if (n == 0) return false;
             // A UGUI mask's own graphic only writes the stencil (no stencil here yet: its children draw unclipped).
             if (it.Stencil != null && it.Stencil[5] == 0) return false;
+            if (it.Kind == "mask") return false;
             int tex = -1;
             if (it.Texture != null && (tex = TextureId(it.Texture)) < 0) return false;   // not drawable (render textures)
             uint mode = ModeOf(MaterialState.Of(it.Material)?.Shader);

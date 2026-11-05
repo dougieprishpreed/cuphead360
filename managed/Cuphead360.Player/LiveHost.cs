@@ -406,6 +406,7 @@ void main() {
   else if (uMode == 4) { gl_FragColor = vec4(c.rgb, c.a * t.a); }
   else if (uMode == 5) { float a = smoothstep(0.45, 0.55, t.a); gl_FragColor = vec4(c.rgb, c.a * a); }
   else if (uMode == 6) { gl_FragColor = c; }
+  else if (uMode == 7) { if (t.a < uTint.a) discard; gl_FragColor = vec4(0.0); }
   else { gl_FragColor = t * c; }
 }";
 
@@ -621,6 +622,7 @@ void main() {
             else if (shader.Contains("SpriteBlendDynamic/Overlay") || shader.EndsWith("/OverlayBlend")) mode = 3;
             else if (shader.Contains("Distance Field")) mode = 5;
             if (it.Texture == null) mode = 6;
+            if (it.Kind == "mask") mode = 7;   // a sprite mask: its texels at or above the cutoff (the tint's alpha) mark the stencil
             var tint = it.Tint;
             // UI graphics: the canvas alpha fades blend-mode materials too (Unity folds it into the vertex alpha).
             if (it.Kind == "ui" && mode >= 1 && mode <= 3)
@@ -630,7 +632,26 @@ void main() {
             glUniform1i(uMode, mode);
             glBindTexture(GL_TEXTURE_2D, tex);
             var st = it.Stencil;
-            if (st != null)
+            int ss = it.SpriteStencil;
+            if (ss != 0)
+            {
+                // Sprite masks: add or take away one (no colour), or draw where the stencil is 1 or more / 0.
+                glEnable(GL_STENCIL_TEST);
+                if (ss == RenderList.Item.MaskAdd || ss == RenderList.Item.MaskRemove)
+                {
+                    glStencilFunc(0x0207u, 0, 0xFF);
+                    glStencilOp(0x1E00, 0x1E00, ss == RenderList.Item.MaskAdd ? 0x1E02u : 0x1E03u);
+                    glStencilMask(0xFF);
+                    glColorMask(false, false, false, false);
+                }
+                else
+                {
+                    glStencilFunc(ss == RenderList.Item.MaskInside ? 0x0203u : 0x0204u, 1, 0xFF);   // LEQUAL / GREATER: 1 <= s, 1 > s
+                    glStencilOp(0x1E00, 0x1E00, 0x1E00);
+                    glStencilMask(0);
+                }
+            }
+            else if (st != null)
             {
                 // ref, comp (Unity CompareFunction: Never 1 .. Always 8), op, read, write, colorMask (RGBA bits 8,4,2,1).
                 glEnable(GL_STENCIL_TEST);
@@ -647,7 +668,7 @@ void main() {
                 glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, true, 0, cp);
                 glDrawArrays(GL_TRIANGLES, 0, n);
             }
-            if (st != null) { glDisable(GL_STENCIL_TEST); glColorMask(true, true, true, true); }
+            if (st != null || ss != 0) { glDisable(GL_STENCIL_TEST); glColorMask(true, true, true, true); glStencilMask(0xFF); }
         }
     }
 }

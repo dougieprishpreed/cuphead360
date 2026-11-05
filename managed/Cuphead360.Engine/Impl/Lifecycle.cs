@@ -253,6 +253,9 @@ namespace Cuphead360.Engine
             if (typeof(AudioSource).IsAssignableFrom(t)) return new NAudioSource();
             if (typeof(AudioListener).IsAssignableFrom(t)) return new NAudioListener();
             if (typeof(SpriteRenderer).IsAssignableFrom(t)) return new NSpriteRenderer();
+            if (typeof(SpriteMask).IsAssignableFrom(t)) return new NSpriteMask();
+            if (typeof(MeshRenderer).IsAssignableFrom(t)) return new NMeshRenderer();
+            if (typeof(MeshFilter).IsAssignableFrom(t)) return new NMeshFilter();
             if (typeof(Renderer).IsAssignableFrom(t)) return new NRenderer();
             if (typeof(Animator).IsAssignableFrom(t)) return new NAnimator();
             if (typeof(Collider2D).IsAssignableFrom(t)) return new NCollider2D { Kind = NCollider2D.KindOf(t) };
@@ -275,6 +278,7 @@ namespace Cuphead360.Engine
         {
             if (src.Managed is Material sm && dst.Managed is Material dm) MaterialState.Set(dm, MaterialState.Of(sm).Clone());
             else if (src.Managed is Sprite ss && dst.Managed is Sprite ds) Sprites.Set(ds, Sprites.Of(ss));
+            else if (src.Managed is Mesh sm2 && dst.Managed is Mesh dm2) MeshData.Set(dm2, MeshData.Of(sm2).Clone());
         }
         /// <summary>Scene/prefab load: a built-in component's converted fields.</summary>
         public static void OnLoaded(NComponent c, ChobObject co, SceneBuild b) => c.Load(co, b);

@@ -258,6 +258,21 @@ namespace Cuphead360.Engine
             return meshes.GetValue(m, k => FromAsset(k) ?? new MeshData());
         }
 
+        /// <summary>Instantiate of a Mesh: the copy's own data.</summary>
+        public static void Set(Mesh m, MeshData d) { if (m != null) meshes.AddOrUpdate(m, d); }
+
+        public MeshData Clone()
+        {
+            var c = new MeshData
+            {
+                Vertices = (Vector3[])Vertices.Clone(), Normals = (Vector3[])Normals?.Clone(), Tangents = (Vector4[])Tangents?.Clone(),
+                Colors = (Color32[])Colors?.Clone(), Bounds = Bounds,
+                SubMeshes = SubMeshes.ConvertAll(t => (int[])t.Clone()), Topologies = new List<MeshTopology>(Topologies),
+            };
+            for (int i = 0; i < Uv.Length; i++) c.Uv[i] = (Vector4[])Uv[i]?.Clone();
+            return c;
+        }
+
         // Unity 2017 vertex channel formats: 0 float32, 1 float16, 2 unorm8 colour, ...
         static readonly int[] formatSize = { 4, 2, 1, 1, 1, 2, 2, 1, 1, 2, 2, 4, 4 };
 
@@ -273,7 +288,13 @@ namespace Cuphead360.Engine
             var t = src.Tree;
             var vd = Tree.Get(t, "m_VertexData");
             int count = (int)Tree.Int(vd, "m_VertexCount");
-            var data = Tree.Get(vd, "m_DataSize") as byte[];
+            var dataRaw = Tree.Get(vd, "m_DataSize");
+            var data = dataRaw as byte[];
+            if (data == null && dataRaw is List<object> dataList)
+            {
+                data = new byte[dataList.Count];
+                for (int i = 0; i < data.Length; i++) data[i] = (byte)Convert.ToInt32(dataList[i]);
+            }
             var channels = Tree.List(vd, "m_Channels");
             if (data == null || count == 0 || channels.Count == 0) return null;
             // Streams one after another (16-byte aligned); a stream's channels interleave.
@@ -316,7 +337,14 @@ namespace Cuphead360.Engine
                 md.Uv[0] = new Vector4[count];
                 for (int v = 0; v < count; v++) md.Uv[0][v] = new Vector4(Comp(3, v, 0), ud > 1 ? Comp(3, v, 1) : 0, 0, 0);
             }
-            var ib = Tree.Get(t, "m_IndexBuffer") as byte[];
+            // Bytes, or (files converted before byte data was kept as bytes: the built-in Quad) a list of numbers.
+            var ibRaw = Tree.Get(t, "m_IndexBuffer");
+            var ib = ibRaw as byte[];
+            if (ib == null && ibRaw is List<object> ibList)
+            {
+                ib = new byte[ibList.Count];
+                for (int i = 0; i < ib.Length; i++) ib[i] = (byte)Convert.ToInt32(ibList[i]);
+            }
             bool wide = Tree.Int(t, "m_IndexFormat") == 1;
             md.SubMeshes.Clear(); md.Topologies.Clear();
             foreach (var sm in Tree.List(t, "m_SubMeshes"))

@@ -54,9 +54,13 @@ def stage_native(a):
         sys.exit("no C compiler (clang or gcc)")
     exe = os.path.join(build, "host_native" + (".exe" if os.name == "nt" else ""))
 
+    # The console's own headers (ch360_host.h's records) are part of every source's input: an object
+    # older than one of them is rebuilt too (a stale host_native.o read the draw list with an old stride).
+    headers = max((os.path.getmtime(os.path.join(ROOT, "console", h)) for h in os.listdir(os.path.join(ROOT, "console")) if h.endswith(".h")), default=0)
+
     def compile_one(src):
         obj = os.path.join(objdir, os.path.splitext(os.path.basename(src))[0] + ".o")
-        if os.path.exists(obj) and os.path.getmtime(obj) > os.path.getmtime(src):
+        if os.path.exists(obj) and os.path.getmtime(obj) > max(os.path.getmtime(src), headers):
             return obj
         cmd = [cc, "-c", "-O" + a.opt, "-w", "-DW2C2_HOST_MEMORY", "-D_CRT_SECURE_NO_WARNINGS", "-fno-strict-aliasing"] + \
               ["-I" + i for i in incs] + ["-o", obj, src]

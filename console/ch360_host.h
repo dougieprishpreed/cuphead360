@@ -15,7 +15,8 @@
  * Positions are screen pixels, origin bottom-left (Unity's); uv has v = 0
  * at a texture's first stored row. Modes: 0 texel * colour, 1 screen,
  * 2 multiply, 3 overlay (blend colour = renderer colour), 5 SDF text,
- * 6 light ray (the item's extra textures and floats). */
+ * 6 light ray (the item's extra textures and floats), 7 a sprite mask's
+ * stencil write (item.stencil). */
 #ifndef CH360_HOST_H
 #define CH360_HOST_H
 
@@ -57,6 +58,10 @@ typedef struct ch360_item {
      * (-1 none) and its material's t, textureWidth, textureSpeed */
     int textures[2];
     float params[4];
+    /* sprite masks: 1 adds one to the stencil, 2 takes one away (mode 7, the
+     * mask's sprite: texel alpha at or above the blend alpha, no colour); 3
+     * draws where the stencil is 1 or more, 4 where it is 0; 0 no stencil */
+    unsigned stencil;
 } ch360_item;
 
 typedef struct ch360_view {

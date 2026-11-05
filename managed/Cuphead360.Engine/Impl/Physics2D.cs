@@ -363,14 +363,46 @@ namespace Cuphead360.Engine
             int k = 0;
             for (int i = 0; i < pts.Count; i++) { while (k >= 2 && Cross(h[k - 1] - h[k - 2], pts[i] - h[k - 2]) <= 0) k--; h[k++] = pts[i]; }
             for (int i = pts.Count - 2, t = k + 1; i >= 0; i--) { while (k >= t && Cross(h[k - 1] - h[k - 2], pts[i] - h[k - 2]) <= 0) k--; h[k++] = pts[i]; }
-            var r = new Vector2[Math.Max(1, k - 1)];
-            Array.Copy(h, r, r.Length);
+            // The callers read the hull at once and keep nothing: one array per size, reused (a new
+            // one per test was most of the physics' allocations in the run-and-gun levels).
+            int len = Math.Max(1, k - 1);
+            var r = len < hullByCount.Length ? (hullByCount[len] ??= new Vector2[len]) : new Vector2[len];
+            Array.Copy(h, r, len);
             return r;
         }
+        static readonly Vector2[][] hullByCount = new Vector2[64][];
+
+        /// <summary>An axis-aligned rectangle's bounds (four distinct corners, no rounding): most boxes and box casts.</summary>
+        static bool AxisRect(Shape s, out float x0, out float y0, out float x1, out float y1)
+        {
+            x0 = y0 = x1 = y1 = 0;
+            var p = s.Pts;
+            if (s.R > 0 || p.Length != 4) return false;
+            x0 = Math.Min(Math.Min(p[0].x, p[1].x), Math.Min(p[2].x, p[3].x)); x1 = Math.Max(Math.Max(p[0].x, p[1].x), Math.Max(p[2].x, p[3].x));
+            y0 = Math.Min(Math.Min(p[0].y, p[1].y), Math.Min(p[2].y, p[3].y)); y1 = Math.Max(Math.Max(p[0].y, p[1].y), Math.Max(p[2].y, p[3].y));
+            if (!(x1 > x0 && y1 > y0)) return false;
+            int corners = 0;
+            for (int i = 0; i < 4; i++)
+            {
+                bool lx = p[i].x == x0, hx = p[i].x == x1, ly = p[i].y == y0, hy = p[i].y == y1;
+                if (!(lx || hx) || !(ly || hy)) return false;
+                corners |= 1 << ((hx ? 1 : 0) | (hy ? 2 : 0));
+            }
+            return corners == 15;
+        }
+        static readonly Vector2[] rectSum = new Vector2[4];
 
         /// <summary>Minkowski sum of a collider shape and the (origin-centred) cast shape.</summary>
         public static Vector2[] Minkowski(Shape s, Shape cast)
         {
+            // Two axis-aligned rectangles: their sum is the rectangle of summed corners, in the order the
+            // hull below gives it (from the lowest x and y, counter-clockwise), so results are the same.
+            if (AxisRect(s, out float ax0, out float ay0, out float ax1, out float ay1) && AxisRect(cast, out float bx0, out float by0, out float bx1, out float by1))
+            {
+                rectSum[0] = new Vector2(ax0 + bx0, ay0 + by0); rectSum[1] = new Vector2(ax1 + bx1, ay0 + by0);
+                rectSum[2] = new Vector2(ax1 + bx1, ay1 + by1); rectSum[3] = new Vector2(ax0 + bx0, ay1 + by1);
+                return rectSum;
+            }
             var a = Expanded(s, scratchA); var b = Expanded(cast, scratchB);
             var sum = scratchSum;
             sum.Clear();
@@ -510,6 +542,9 @@ namespace Cuphead360.Engine
     public static class Physics
     {
         public static Vector2 Gravity = new Vector2(0, -9.81f);
+        static int[] sweepOrder = new int[0];
+        static float[] sweepMin = new float[0];
+        static readonly List<long> sweepPairs = new List<long>();
         public static bool QueriesHitTriggers = true, QueriesStartInColliders = true, AutoSimulation = true, CallbacksOnDisable = true, AutoSyncTransforms = true, ChangeStopsCallbacks;
         public static uint[] LayerMatrix = new uint[32];
         static readonly HashSet<(NCollider2D, NCollider2D)> ignored = new HashSet<(NCollider2D, NCollider2D)>();
@@ -732,10 +767,29 @@ namespace Cuphead360.Engine
             foreach (var c in cols) c.Shapes();
             var bodyOf = BodiesOf(cols);
             var now = new Dictionary<(NCollider2D, NCollider2D), Contact>();
-            for (int i = 0; i < cols.Count; i++)
+            // Sort and sweep on the boxes' x ranges: only pairs whose ranges meet are looked at (every pair,
+            // each step, was most of the run-and-gun levels' physics). The pairs found are put back in index
+            // order, so the contacts and their callbacks come in the same order as from the full loop.
+            int nc = cols.Count;
+            if (sweepOrder.Length < nc) { sweepOrder = new int[nc * 2]; sweepMin = new float[nc * 2]; }
+            for (int i = 0; i < nc; i++) { sweepOrder[i] = i; sweepMin[i] = cols[i].AABB.xMin; }
+            Array.Sort(sweepMin, sweepOrder, 0, nc);
+            sweepPairs.Clear();
+            for (int oi = 0; oi < nc; oi++)
             {
+                int i = sweepOrder[oi];
+                float maxX = cols[i].AABB.xMax;
+                for (int oj = oi + 1; oj < nc && sweepMin[oj] <= maxX; oj++)
+                {
+                    int j = sweepOrder[oj];
+                    sweepPairs.Add(i < j ? ((long)i << 32) | (uint)j : ((long)j << 32) | (uint)i);
+                }
+            }
+            sweepPairs.Sort();
+            foreach (long pair in sweepPairs)
+            {
+                int i = (int)(pair >> 32), j = (int)(pair & 0xFFFFFFFF);
                 var a = cols[i]; var ra = bodyOf[i];
-                for (int j = i + 1; j < cols.Count; j++)
                 {
                     var b = cols[j]; var rb = bodyOf[j];
                     if (ra == null && rb == null) continue;                  // two static colliders

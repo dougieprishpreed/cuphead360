@@ -354,6 +354,8 @@ namespace Cuphead360.Engine
         static readonly List<NCamera> cameras = new List<NCamera>();
         static readonly List<NBehaviour> behaviours = new List<NBehaviour>();
         static readonly List<NGameObject> gameObjects = new List<NGameObject>();
+        static readonly List<NSpriteMask> spriteMasks = new List<NSpriteMask>();
+        static readonly List<NMeshRenderer> meshRenderers = new List<NMeshRenderer>();
         static int dirty;   // bit per list holding destroyed records
 
         public static List<NCollider2D> Colliders => Clean(colliders, 1);
@@ -362,6 +364,8 @@ namespace Cuphead360.Engine
         public static List<NCamera> Cameras => Clean(cameras, 8);
         public static List<NBehaviour> Behaviours => Clean(behaviours, 16);
         public static List<NGameObject> GameObjects => Clean(gameObjects, 32);
+        public static List<NSpriteMask> SpriteMasks => Clean(spriteMasks, 64);
+        public static List<NMeshRenderer> MeshRenderers => Clean(meshRenderers, 128);
 
         static List<T> Clean<T>(List<T> list, int bit) where T : NObject
         {
@@ -383,6 +387,8 @@ namespace Cuphead360.Engine
                 case NCamera cam: cameras.Add(cam); break;
                 case NBehaviour b: behaviours.Add(b); break;
                 case NGameObject g: gameObjects.Add(g); break;
+                case NSpriteMask m: spriteMasks.Add(m); break;
+                case NMeshRenderer mr: meshRenderers.Add(mr); break;
                 // (every caller adds the record to its GameObject's components right after, with no query between)
                 case NRigidbody2D: NTransform.HierarchyVersion++; break;
             }
@@ -399,6 +405,8 @@ namespace Cuphead360.Engine
                 case NCamera: dirty |= 8; break;
                 case NBehaviour: dirty |= 16; break;
                 case NGameObject: dirty |= 32; break;
+                case NSpriteMask: dirty |= 64; break;
+                case NMeshRenderer: dirty |= 128; break;
                 case NRigidbody2D: NTransform.HierarchyVersion++; break;
             }
         }

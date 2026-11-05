@@ -37,7 +37,7 @@ mkdir -p "$SH"
 cp "$ROOT"/console/xsdk/shaders/*.vert "$ROOT"/console/xsdk/shaders/*.frag "$SH/"
 (
   cd "$SH"
-  files="ch360.vert sprite.frag screen.frag multiply.frag overlay.frag sdf.frag lightray.frag"
+  files="ch360.vert sprite.frag screen.frag multiply.frag overlay.frag sdf.frag lightray.frag mask.frag"
   stamp="$(cat $files "$VULKAN4XENON/tools/build_shaders.py" | sha256sum)"
   if [ ! -f ch360_shaders.c ] || [ "$(cat stamp 2>/dev/null)" != "$stamp" ]; then
     python3 "$VULKAN4XENON/tools/build_shaders.py" --xost "$XSDK/xenos-toolchain" --glslang "$GLSLANG" \

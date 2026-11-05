@@ -18,7 +18,7 @@ with UnityPy (BC7 etc. through texture2ddecoder), caches them as PNG under
                TextMesh Pro SDF text approximated (face + outline thresholds)
 
 Not drawn: post effects of the game's own render pipeline (film grain,
-vignette, chromatic shift), render textures, masks, particles. It is a
+vignette, chromatic shift), render textures, particles. It is a
 preview of engine state, not the console renderer.
 
 Reads the game folder only. Output frames: <out>/frame_NNNNN.png.
@@ -257,6 +257,22 @@ def render(frame, textures):
                 continue
             st = it.get("stencil")
             ui = it.get("kind") == "ui"
+            ss = it.get("spriteStencil", 0)
+            if ss in (1, 2):
+                # A sprite mask: its sprite's pixels with alpha at or above the cutoff (the tint's alpha)
+                # add one to the stencil or take one away; nothing is drawn.
+                scratch = np.zeros_like(canvas)
+                draw_group(scratch, img, pts, uvs, it["tris"], [1, 1, 1, 1], None, rect, H)
+                hit = scratch[..., 0] >= max(it["tint"][3], 1e-3) - 1e-3
+                cur = stencil[hit].astype(np.int32)
+                stencil[hit] = (np.minimum(cur + 1, 255) if ss == 1 else np.maximum(cur - 1, 0)).astype(np.uint8)
+                continue
+            if ss in (3, 4):
+                passed = stencil >= 1 if ss == 3 else stencil == 0
+                before = canvas.copy()
+                draw_group(canvas, img, pts, uvs, it["tris"], it["tint"], colors, rect, H, sdf, it.get("shader") or "", ui)
+                canvas[:] = np.where(passed[..., None], canvas, before)
+                continue
             if st is None:
                 draw_group(canvas, img, pts, uvs, it["tris"], it["tint"], colors, rect, H, sdf, it.get("shader") or "", ui)
                 continue

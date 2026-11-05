@@ -191,6 +191,10 @@ const unsigned MEMORY_FLOOR_MB = 24;
 
 
 enum { MODE_SPRITE, MODE_SCREEN, MODE_MULTIPLY, MODE_OVERLAY, MODE_SDF, MODE_LIGHTRAY, MODES };
+// Sprite masks (ch360_item.stencil): a pipeline per mode for drawing where the
+// stencil is 1 or more (inside) or 0 (outside); the masks' own two (add, remove).
+enum { STENCIL_NONE, STENCIL_INSIDE, STENCIL_OUTSIDE, STENCIL_TESTS, STENCIL_ADD = STENCIL_TESTS, STENCIL_REMOVE };
+const VkFormat DEPTH_FORMAT = VK_FORMAT_D24_UNORM_S8_UINT;
 
 struct Tex {
     VkImage image;
@@ -246,7 +250,8 @@ private:
     uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want);
     bool make_buffer(VkBuffer* buf, VkDeviceMemory* mem, void** map, VkDeviceSize size, VkBufferUsageFlags usage);
     VkShaderModule module(const uint32_t* code, unsigned bytes);
-    VkPipeline make_pipeline(VkShaderModule frag, VkPipelineLayout layout);
+    VkPipeline make_pipeline(VkShaderModule frag, VkPipelineLayout layout, int stencil);
+    VkPipeline pipeline(int mode, int stencil);
     bool make_image(Tex& t, VkFormat format, int w, int h);
     unsigned char* staging(size_t bytes, VkBuffer* buf, VkDeviceSize* off);
     void record_copy(Tex& t, VkBuffer buf, VkDeviceSize off);
@@ -279,7 +284,12 @@ private:
     VkPipelineLayout pipe_layout_;
     VkPipelineLayout ray_layout_;   // the light ray: three textures, its floats for the fragment stage
     VkShaderModule vert_;
-    VkPipeline pipes_[MODES];
+    VkShaderModule frags_[MODES], mask_frag_;
+    VkPipeline pipes_[MODES][STENCIL_TESTS];   // made on first use but STENCIL_NONE's
+    VkPipeline mask_pipes_[2];
+    VkImage depth_image_;
+    VkDeviceMemory depth_mem_;
+    VkImageView depth_view_;
     VkSampler sampler_;
     VkBuffer vbuf_;
     VkDeviceMemory vmem_;
@@ -460,9 +470,48 @@ bool Renderer::init() {
     images_.resize(count);
     vkGetSwapchainImagesKHR(dev_, swapchain_, &count, &images_[0]);
 
-    // One render pass: the swapchain image, cleared, then presented.
-    VkAttachmentDescription a;
-    memset(&a, 0, sizeof(a));
+    // The sprite masks' stencil: a D24S8 target beside the colour (vulkan4xenon
+    // keeps it in eDRAM, where both fit at 1280x720 and one sample).
+    VkImageCreateInfo dii;
+    memset(&dii, 0, sizeof(dii));
+    dii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    dii.imageType = VK_IMAGE_TYPE_2D;
+    dii.format = DEPTH_FORMAT;
+    dii.extent.width = W;
+    dii.extent.height = H;
+    dii.extent.depth = 1;
+    dii.mipLevels = 1;
+    dii.arrayLayers = 1;
+    dii.samples = VK_SAMPLE_COUNT_1_BIT;
+    dii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    dii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    dii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (!vk(vkCreateImage(dev_, &dii, NULL, &depth_image_), "vkCreateImage (stencil)")) return false;
+    VkMemoryRequirements dreq;
+    vkGetImageMemoryRequirements(dev_, depth_image_, &dreq);
+    VkMemoryAllocateInfo dai;
+    memset(&dai, 0, sizeof(dai));
+    dai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    dai.allocationSize = dreq.size;
+    dai.memoryTypeIndex = memory_type(dreq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (!vk(vkAllocateMemory(dev_, &dai, NULL, &depth_mem_), "vkAllocateMemory (stencil)")) return false;
+    vkBindImageMemory(dev_, depth_image_, depth_mem_, 0);
+    VkImageViewCreateInfo dvi;
+    memset(&dvi, 0, sizeof(dvi));
+    dvi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    dvi.image = depth_image_;
+    dvi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    dvi.format = DEPTH_FORMAT;
+    dvi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    dvi.subresourceRange.levelCount = 1;
+    dvi.subresourceRange.layerCount = 1;
+    if (!vk(vkCreateImageView(dev_, &dvi, NULL, &depth_view_), "vkCreateImageView (stencil)")) return false;
+
+    // One render pass: the swapchain image, cleared, then presented; the
+    // stencil cleared with it and not kept.
+    VkAttachmentDescription att[2];
+    memset(att, 0, sizeof(att));
+    VkAttachmentDescription& a = att[0];
     a.format = TARGET_FORMAT;
     a.samples = VK_SAMPLE_COUNT_1_BIT;
     a.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -471,17 +520,25 @@ bool Renderer::init() {
     a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     a.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     a.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    att[1].format = DEPTH_FORMAT;
+    att[1].samples = VK_SAMPLE_COUNT_1_BIT;
+    att[1].loadOp = att[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    att[1].storeOp = att[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    att[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    att[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     VkAttachmentReference ref = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+    VkAttachmentReference dref = { 1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
     VkSubpassDescription sub;
     memset(&sub, 0, sizeof(sub));
     sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     sub.colorAttachmentCount = 1;
     sub.pColorAttachments = &ref;
+    sub.pDepthStencilAttachment = &dref;
     VkRenderPassCreateInfo rpi;
     memset(&rpi, 0, sizeof(rpi));
     rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    rpi.attachmentCount = 1;
-    rpi.pAttachments = &a;
+    rpi.attachmentCount = 2;
+    rpi.pAttachments = att;
     rpi.subpassCount = 1;
     rpi.pSubpasses = &sub;
     if (!vk(vkCreateRenderPass(dev_, &rpi, NULL, &pass_), "vkCreateRenderPass")) return false;
@@ -498,12 +555,13 @@ bool Renderer::init() {
         vi.subresourceRange.levelCount = 1;
         vi.subresourceRange.layerCount = 1;
         if (!vk(vkCreateImageView(dev_, &vi, NULL, &views_[i]), "vkCreateImageView")) return false;
+        VkImageView fbv[2] = { views_[i], depth_view_ };
         VkFramebufferCreateInfo fi;
         memset(&fi, 0, sizeof(fi));
         fi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         fi.renderPass = pass_;
-        fi.attachmentCount = 1;
-        fi.pAttachments = &views_[i];
+        fi.attachmentCount = 2;
+        fi.pAttachments = fbv;
         fi.width = W;
         fi.height = H;
         fi.layers = 1;
@@ -594,17 +652,19 @@ bool Renderer::init() {
     if (!vk(vkCreateSampler(dev_, &smi, NULL, &sampler_), "vkCreateSampler")) return false;
 
     VkShaderModule vert = module(ch360_vert_spirv, CH360_VERT_SPIRV_BYTES);
-    VkShaderModule frags[MODES] = { module(sprite_frag_spirv, SPRITE_FRAG_SPIRV_BYTES),
-                                    module(screen_frag_spirv, SCREEN_FRAG_SPIRV_BYTES),
-                                    module(multiply_frag_spirv, MULTIPLY_FRAG_SPIRV_BYTES),
-                                    module(overlay_frag_spirv, OVERLAY_FRAG_SPIRV_BYTES),
-                                    module(sdf_frag_spirv, SDF_FRAG_SPIRV_BYTES),
-                                    module(lightray_frag_spirv, LIGHTRAY_FRAG_SPIRV_BYTES) };
+    frags_[MODE_SPRITE] = module(sprite_frag_spirv, SPRITE_FRAG_SPIRV_BYTES);
+    frags_[MODE_SCREEN] = module(screen_frag_spirv, SCREEN_FRAG_SPIRV_BYTES);
+    frags_[MODE_MULTIPLY] = module(multiply_frag_spirv, MULTIPLY_FRAG_SPIRV_BYTES);
+    frags_[MODE_OVERLAY] = module(overlay_frag_spirv, OVERLAY_FRAG_SPIRV_BYTES);
+    frags_[MODE_SDF] = module(sdf_frag_spirv, SDF_FRAG_SPIRV_BYTES);
+    frags_[MODE_LIGHTRAY] = module(lightray_frag_spirv, LIGHTRAY_FRAG_SPIRV_BYTES);
+    mask_frag_ = module(mask_frag_spirv, MASK_FRAG_SPIRV_BYTES);
     vert_ = vert;
-    for (int i = 0; i < MODES; ++i) {
-        pipes_[i] = make_pipeline(frags[i], i == MODE_LIGHTRAY ? ray_layout_ : pipe_layout_);
-        if (!pipes_[i]) return false;
-    }
+    memset(pipes_, 0, sizeof(pipes_));
+    for (int i = 0; i < MODES; ++i)
+        if (!pipeline(i, STENCIL_NONE)) return false;
+    for (int s = 0; s < 2; ++s)
+        if (!(mask_pipes_[s] = make_pipeline(mask_frag_, pipe_layout_, STENCIL_ADD + s))) return false;
     void* vm = NULL;
     if (!make_buffer(&vbuf_, &vmem_, &vm, VERTEX_RING * FRAMES, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) return false;
     vmap_ = (unsigned char*)vm;
@@ -622,7 +682,17 @@ bool Renderer::init() {
     return true;
 }
 
-VkPipeline Renderer::make_pipeline(VkShaderModule frag, VkPipelineLayout layout) {
+// A mode's pipeline with a stencil test, made the first time a frame asks for it.
+VkPipeline Renderer::pipeline(int mode, int stencil) {
+    if (!pipes_[mode][stencil]) pipes_[mode][stencil] = make_pipeline(frags_[mode], mode == MODE_LIGHTRAY ? ray_layout_ : pipe_layout_, stencil);
+    return pipes_[mode][stencil];
+}
+
+// stencil: STENCIL_NONE; STENCIL_INSIDE/OUTSIDE draw where the stencil is 1 or
+// more / 0 (Unity's sprite mask interaction: reference 1, LessEqual / Greater);
+// STENCIL_ADD/REMOVE add or take away one where the shader keeps the pixel,
+// writing no colour (Unity's sprite mask: IncrSat / DecrSat).
+VkPipeline Renderer::make_pipeline(VkShaderModule frag, VkPipelineLayout layout, int stencil) {
     VkPipelineShaderStageCreateInfo st[2];
     memset(st, 0, sizeof(st));
     st[0].sType = st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -678,6 +748,25 @@ VkPipeline Renderer::make_pipeline(VkShaderModule frag, VkPipelineLayout layout)
     cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     cb.attachmentCount = 1;
     cb.pAttachments = &ba;
+    if (stencil >= STENCIL_ADD) ba.colorWriteMask = 0;
+    VkPipelineDepthStencilStateCreateInfo dss;
+    memset(&dss, 0, sizeof(dss));
+    dss.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    dss.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+    if (stencil != STENCIL_NONE) {
+        VkStencilOpState so;
+        memset(&so, 0, sizeof(so));
+        so.failOp = so.depthFailOp = VK_STENCIL_OP_KEEP;
+        so.passOp = stencil == STENCIL_ADD ? VK_STENCIL_OP_INCREMENT_AND_CLAMP
+                  : stencil == STENCIL_REMOVE ? VK_STENCIL_OP_DECREMENT_AND_CLAMP : VK_STENCIL_OP_KEEP;
+        so.compareOp = stencil == STENCIL_INSIDE ? VK_COMPARE_OP_LESS_OR_EQUAL
+                     : stencil == STENCIL_OUTSIDE ? VK_COMPARE_OP_GREATER : VK_COMPARE_OP_ALWAYS;
+        so.compareMask = 0xFF;
+        so.writeMask = stencil >= STENCIL_ADD ? 0xFF : 0;
+        so.reference = 1;
+        dss.stencilTestEnable = VK_TRUE;
+        dss.front = dss.back = so;
+    }
     VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
     VkPipelineDynamicStateCreateInfo ds;
     memset(&ds, 0, sizeof(ds));
@@ -695,6 +784,7 @@ VkPipeline Renderer::make_pipeline(VkShaderModule frag, VkPipelineLayout layout)
     ci.pRasterizationState = &rs;
     ci.pMultisampleState = &ms;
     ci.pColorBlendState = &cb;
+    ci.pDepthStencilState = &dss;
     ci.pDynamicState = &ds;
     ci.layout = layout;
     ci.renderPass = pass_;
@@ -1177,9 +1267,10 @@ void Renderer::frame(const ch360_frame* f) {
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &bi);
-    VkClearValue black;
-    memset(&black, 0, sizeof(black));
-    black.color.float32[3] = 1.0f;
+    VkClearValue clears[2];
+    memset(clears, 0, sizeof(clears));
+    clears[0].color.float32[3] = 1.0f;
+    clears[1].depthStencil.depth = 1.0f;
     VkRenderPassBeginInfo rbi;
     memset(&rbi, 0, sizeof(rbi));
     rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -1187,8 +1278,8 @@ void Renderer::frame(const ch360_frame* f) {
     rbi.framebuffer = fbs_[image];
     rbi.renderArea.extent.width = W;
     rbi.renderArea.extent.height = H;
-    rbi.clearValueCount = 1;
-    rbi.pClearValues = &black;
+    rbi.clearValueCount = 2;
+    rbi.pClearValues = clears;
     vkCmdBeginRenderPass(cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
     VkViewport vp = { 0, 0, (float)W, (float)H, 0, 1 };
     vkCmdSetViewport(cmd, 0, 1, &vp);
@@ -1208,6 +1299,7 @@ void Renderer::frame(const ch360_frame* f) {
     size_t batch_start = 0, batch_count = 0;
     unsigned draws = 0;
     bool repush = false;
+    bool stencil_dirty = false;   // a mask has written the stencil since it was last cleared
     for (unsigned v = 0; v < f->view_count; ++v) {
         const ch360_view& view = f->views[v];
         if (batch_count) {
@@ -1222,7 +1314,20 @@ void Renderer::frame(const ch360_frame* f) {
         sc.extent.width = (uint32_t)(view.w < 0 ? 0 : (view.w > W ? W : view.w));
         sc.extent.height = (uint32_t)(view.h < 0 ? 0 : (view.h > H ? H : view.h));
         vkCmdSetScissor(cmd, 0, 1, &sc);
-        if (view.clear) {
+        // A camera that clears depth clears the stencil too (Unity): only needed once a mask wrote it.
+        if ((view.clear & 2) && stencil_dirty) {
+            VkClearAttachment ca;
+            memset(&ca, 0, sizeof(ca));
+            ca.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+            ca.clearValue.depthStencil.depth = 1.0f;
+            VkClearRect cr;
+            cr.rect = sc;
+            cr.baseArrayLayer = 0;
+            cr.layerCount = 1;
+            vkCmdClearAttachments(cmd, 1, &ca, 1, &cr);
+            stencil_dirty = false;
+        }
+        if (view.clear & 1) {
             VkClearAttachment ca;
             memset(&ca, 0, sizeof(ca));
             ca.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -1245,6 +1350,15 @@ void Renderer::frame(const ch360_frame* f) {
             unsigned mode = it.mode;
             int m = mode == 1 ? MODE_SCREEN : mode == 2 ? MODE_MULTIPLY : mode == 3 ? MODE_OVERLAY : mode == 5 ? MODE_SDF
                   : mode == 6 ? MODE_LIGHTRAY : MODE_SPRITE;
+            VkPipeline pipe;
+            if (mode == 7) {   // a sprite mask: the stencil alone
+                if (it.stencil != 1 && it.stencil != 2) continue;
+                pipe = mask_pipes_[it.stencil - 1];
+                stencil_dirty = true;
+            } else {
+                pipe = pipeline(m, it.stencil == 3 ? STENCIL_INSIDE : it.stencil == 4 ? STENCIL_OUTSIDE : STENCIL_NONE);
+                if (!pipe) continue;
+            }
             if (used + it.count > cap) {
                 if (!overflow_logged_) logf("vk: vertex ring full (%u vertices)", (unsigned)cap);
                 overflow_logged_ = true;
@@ -1263,7 +1377,7 @@ void Renderer::frame(const ch360_frame* f) {
                     if (!e[k] || !e[k]->image) e[k] = &white_;
                 }
                 VkDescriptorSet sets[3] = { t->set, e[0]->set, e[1]->set };
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipes_[m]);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ray_layout_, 0, 3, sets, 0, NULL);
                 vkCmdPushConstants(cmd, ray_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), pc);
                 vkCmdPushConstants(cmd, ray_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 16, sizeof(it.params), it.params);
@@ -1271,26 +1385,26 @@ void Renderer::frame(const ch360_frame* f) {
                 vkCmdDraw(cmd, it.count, 1, (uint32_t)used, 0);
                 ++draws;
                 used += it.count;
-                bound = pipes_[m];
+                bound = pipe;
                 bound_set = VK_NULL_HANDLE;
                 repush = true;
                 continue;
             }
-            if (pipes_[m] != bound || t->set != bound_set) {
+            if (pipe != bound || t->set != bound_set) {
                 if (batch_count) {
                     vkCmdDraw(cmd, (uint32_t)batch_count, 1, (uint32_t)batch_start, 0);
                     ++draws;
                 }
                 batch_start = used;
                 batch_count = 0;
-                if (pipes_[m] != bound) vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipes_[m]);
+                if (pipe != bound) vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
                 if (repush) {   // after a light ray's layout
                     vkCmdPushConstants(cmd, pipe_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), pc);
                     repush = false;
                 }
                 if (t->set != bound_set)
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe_layout_, 0, 1, &t->set, 0, NULL);
-                bound = pipes_[m];
+                bound = pipe;
                 bound_set = t->set;
             }
             g_memcpy(&ring[used], &f->vertices[it.first], it.count * sizeof(ch360_vertex));

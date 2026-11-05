@@ -89,6 +89,13 @@ namespace Cuphead360.Engine
             public int GoLayer;
             /// <summary>Stencil state from the material (UGUI masks): ref, comp, op, readMask, writeMask, colorMask; null when off.</summary>
             public int[] Stencil;
+            /// <summary>
+            /// Sprite masks: a mask item (Kind "mask", its sprite's alpha at or above Tint.a) adds one to the
+            /// stencil (MaskAdd) or takes one away (MaskRemove); a sprite item that interacts with masks draws
+            /// where the stencil is 1 or more (MaskInside) or 0 (MaskOutside).
+            /// </summary>
+            public int SpriteStencil;
+            public const int MaskAdd = 1, MaskRemove = 2, MaskInside = 3, MaskOutside = 4;
             // Arrays this item fills, kept for its next use from the pool.
             internal Vector2[] OwnScreen, OwnUv;
 
@@ -108,6 +115,8 @@ namespace Cuphead360.Engine
         static readonly List<View> views = new List<View>();
         static readonly List<NSpriteRenderer> renderers = new List<NSpriteRenderer>();
         static readonly List<NCanvas> canvases = new List<NCanvas>();
+        static readonly List<NSpriteMask> masks = new List<NSpriteMask>();
+        static readonly List<NMeshRenderer> meshRenderers = new List<NMeshRenderer>();
         static readonly List<Item> canvasOut = new List<Item>();
 
         static Item NewItem()
@@ -116,7 +125,7 @@ namespace Cuphead360.Engine
             var it = pool[pooled++];
             it.BaseName = ""; it.Suffix = null; it.SpriteName = null; it.Texture = null; it.Material = null; it.Screen = null; it.Local = null; it.Uv = null; it.Colors = null;
             it.Triangles = null; it.Tint = Color.white; it.Layer = it.Order = 0; it.Depth = 0; it.Sequence = 0; it.Kind = "sprite"; it.GoLayer = 0;
-            it.Stencil = null;
+            it.Stencil = null; it.SpriteStencil = 0;
             return it;
         }
 
@@ -190,14 +199,124 @@ namespace Cuphead360.Engine
 
         public static int DepthOf(NCanvasRenderer r) => r != null ? r.Depth : -1;
 
+        /// <summary>Behaviours with OnWillRenderObject (SpriteErrorManager: the hand-drawn error frames).</summary>
+        public static readonly List<NBehaviour> WillRender = new List<NBehaviour>();
+        static readonly List<NCamera> callbackCams = new List<NCamera>();
+
+        /// <summary>
+        /// Before a frame is drawn, each camera in depth order: Camera.onPreCull, OnWillRenderObject on the
+        /// scripts of each renderer it sees, Camera.onPreRender (TextMesh Pro rebuilds its text meshes there).
+        /// Every frame, drawn or not, so the game runs the same with and without a renderer.
+        /// </summary>
+        public static void PreRender()
+        {
+            callbackCams.Clear();
+            foreach (var c in Typed.Cameras)
+                if (c.Enabled && c.Target == null && c.GameObject != null && c.GameObject.ActiveInHierarchy) callbackCams.Add(c);
+            callbackCams.Sort((a, b) => a.Depth.CompareTo(b.Depth));
+            if (WillRender.Count > 0) WillRender.RemoveAll(b => b.Destroyed);
+            foreach (var cam in callbackCams)
+            {
+                var managed = (Camera)cam.Managed;
+                Camera.onPreCull?.Invoke(managed);
+                if (WillRender.Count > 0)
+                {
+                    var xf = CamXform.Of(cam);
+                    for (int i = 0; i < WillRender.Count; i++)
+                    {
+                        var b = WillRender[i];
+                        if (b.Destroyed || !b.Enabled || b.GameObject == null || !b.GameObject.ActiveInHierarchy || (cam.CullingMask & (1 << b.GameObject.Layer)) == 0) continue;
+                        if (!Seen(cam, xf, b.GameObject)) continue;
+                        try { b.Messages.OnWillRenderObject.Invoke(b.Managed, null); }
+                        catch (System.Reflection.TargetInvocationException e) { Exceptions.Report(e.InnerException ?? e, b, "OnWillRenderObject"); }
+                    }
+                }
+                Camera.onPreRender?.Invoke(managed);
+            }
+        }
+
+        /// <summary>After the frame: Camera.onPostRender for the same cameras.</summary>
+        public static void PostRender()
+        {
+            if (Camera.onPostRender == null) return;
+            foreach (var cam in callbackCams) if (!cam.Destroyed) Camera.onPostRender((Camera)cam.Managed);
+        }
+
+        /// <summary>Whether a camera sees the GameObject's sprite (its box through the camera, as the culling in SpriteItem).</summary>
+        static bool Seen(NCamera cam, in CamXform xf, NGameObject go)
+        {
+            NSpriteRenderer sr = null;
+            for (int i = 0; i < go.Components.Count; i++) if (go.Components[i] is NSpriteRenderer s) { sr = s; break; }
+            if (sr == null) return true;
+            return SpriteSeen(cam, xf, sr);
+        }
+
+        static int visibleFrame = -1;
+        static readonly List<(NCamera cam, CamXform xf)> visibleCams = new List<(NCamera, CamXform)>();
+
+        /// <summary>
+        /// Renderer.isVisible: a camera this frame sees it (Unity: it was drawn by a camera). The run-and-gun
+        /// levels' flying enemies switch their colliders on only while visible; every enabled renderer counted
+        /// as visible, so they could be hit, and collided, off the screen.
+        /// </summary>
+        public static bool IsVisible(NRenderer r)
+        {
+            if (r == null || !r.Enabled || r.GameObject == null || !r.GameObject.ActiveInHierarchy) return false;
+            if (!(r is NSpriteRenderer sr)) return true;   // other renderers: no bounds worked out here
+            if (sr.Sprite == null) return false;
+            if (visibleFrame != Clock.FrameCount)
+            {
+                visibleFrame = Clock.FrameCount;
+                visibleCams.Clear();
+                foreach (var c in Typed.Cameras)
+                    if (c.Enabled && c.GameObject != null && c.GameObject.ActiveInHierarchy) visibleCams.Add((c, CamXform.Of(c)));
+            }
+            int layer = 1 << r.GameObject.Layer;
+            foreach (var (cam, xf) in visibleCams)
+                if ((cam.CullingMask & layer) != 0 && SpriteSeen(cam, xf, sr)) return true;
+            return false;
+        }
+
+        static bool SpriteSeen(NCamera cam, in CamXform xf, NSpriteRenderer sr)
+        {
+            if (!sr.Enabled || sr.Sprite == null) return false;
+            var info = Sprites.Of(sr.Sprite);
+            if (info == null || info.Vertices.Length == 0) return false;
+            var t = sr.GameObject.Transform;
+            float depth = xf.Viewport(t.Position).z;
+            if (depth < cam.Near || depth > cam.Far) return false;
+            if (!xf.Ortho) return true;
+            var pvm = xf.ProjView * t.LocalToWorld;
+            float hx = 0.5f * xf.Pixel.width, hy = 0.5f * xf.Pixel.height, fx = sr.FlipX ? -1f : 1f, fy = sr.FlipY ? -1f : 1f;
+            float a00 = hx * pvm.m00 * fx, a01 = hx * pvm.m01 * fy, b0 = xf.Pixel.x + hx * (pvm.m03 + 1f);
+            float a10 = hy * pvm.m10 * fx, a11 = hy * pvm.m11 * fy, b1 = xf.Pixel.y + hy * (pvm.m13 + 1f);
+            var b = info.LocalBounds;
+            float cx = 0.5f * (b.x + b.z), cy = 0.5f * (b.y + b.w), ex = 0.5f * (b.z - b.x), ey = 0.5f * (b.w - b.y);
+            float sx = a00 * cx + a01 * cy + b0, rx = Math.Abs(a00) * ex + Math.Abs(a01) * ey + 1f;
+            float sy = a10 * cx + a11 * cy + b1, ry = Math.Abs(a10) * ex + Math.Abs(a11) * ey + 1f;
+            var px = xf.Pixel;
+            return !(sx + rx < px.x || sx - rx > px.x + px.width || sy + ry < px.y || sy - ry > px.y + px.height);
+        }
+
         public static List<View> Build()
         {
             pooled = 0; viewsUsed = 0;
-            views.Clear(); renderers.Clear(); canvases.Clear();
+            views.Clear(); renderers.Clear(); canvases.Clear(); masks.Clear(); meshRenderers.Clear();
             var cams = Icalls.LiveCameras();
             cams.Sort((a, b) => a.Depth.CompareTo(b.Depth));   // stable: creation order breaks ties
+            bool interacts = false;
             foreach (var sr in Typed.SpriteRenderers)
-                if (sr.Enabled && sr.Sprite != null && sr.GameObject != null && sr.GameObject.ActiveInHierarchy) renderers.Add(sr);
+                if (sr.Enabled && sr.Sprite != null && sr.GameObject != null && sr.GameObject.ActiveInHierarchy)
+                {
+                    renderers.Add(sr);
+                    if (sr.MaskInteraction != SpriteMaskInteraction.None) interacts = true;
+                }
+            // Masks matter only when a sprite interacts with them.
+            if (interacts)
+                foreach (var m in Typed.SpriteMasks)
+                    if (m.Enabled && m.Sprite != null && m.GameObject != null && m.GameObject.ActiveInHierarchy) masks.Add(m);
+            foreach (var mr in Typed.MeshRenderers)
+                if (mr.Enabled && mr.GameObject != null && mr.GameObject.ActiveInHierarchy) meshRenderers.Add(mr);
             foreach (var cv in Typed.Canvases)
                 if (cv.Enabled && cv.GameObject != null && cv.GameObject.ActiveInHierarchy && cv.IsRoot) canvases.Add(cv);
             if (traceUi)
@@ -206,35 +325,14 @@ namespace Cuphead360.Engine
                     var t = cv.GameObject.Transform;
                     Log.Line($"TRACE canvas {cv.GameObject.Name} mode={cv.Mode} cam={Objects.Of(cv.WorldCamera)?.Name} plane={cv.PlaneDistance} sf={cv.ScaleFactor} layer={cv.GameObject.Layer} pos={t.Position} scale={t.LossyScale} parent={t.Parent?.GameObject.Name} rect={(t as NRectTransform)?.Rect}");
                 }
+            targetCams.Clear();
+            foreach (var cam in cams) if (cam.Target != null && !targetCams.ContainsKey(cam.Target)) targetCams[cam.Target] = cam;
             foreach (var cam in cams)
             {
-                if (cam.Target != null) continue;   // render textures: not drawn by the preview yet
+                // A camera drawing into a render texture is drawn where a mesh shows that texture (MeshItems).
+                if (cam.Target != null) continue;
                 var v = NewView(cam, cam.PixelRect);
-                var xf = CamXform.Of(cam);
-                int seq = 0;
-                foreach (var sr in renderers)
-                {
-                    if ((cam.CullingMask & (1 << sr.GameObject.Layer)) == 0) continue;
-                    var it = SpriteItem(cam, xf, sr);
-                    if (it == null) continue;
-                    it.Sequence = seq++;
-                    v.Items.Add(it);
-                }
-                foreach (var cv in canvases)
-                {
-                    bool mine = cv.Mode == RenderMode.WorldSpace || (cv.Mode == RenderMode.ScreenSpaceCamera && cv.WorldCamera != null && Objects.Of(cv.WorldCamera) == cam)
-                        || (cv.Mode == RenderMode.ScreenSpaceCamera && cv.WorldCamera == null && false);
-                    if (!mine || (cam.CullingMask & (1 << cv.GameObject.Layer)) == 0) continue;
-                    foreach (var it in CanvasItems(cam, xf, cv)) { it.Sequence = seq++; v.Items.Add(it); }
-                }
-                v.Items.Sort((a, b) =>
-                {
-                    int c = a.Layer.CompareTo(b.Layer); if (c != 0) return c;
-                    c = a.Order.CompareTo(b.Order); if (c != 0) return c;
-                    if (a.Kind == "ui" && b.Kind == "ui") return a.Sequence.CompareTo(b.Sequence);
-                    c = b.Depth.CompareTo(a.Depth); if (c != 0) return c;   // farther first
-                    return a.Sequence.CompareTo(b.Sequence);
-                });
+                ViewItems(cam, CamXform.Of(cam), v.Items, 0);
                 views.Add(v);
             }
             // Screen-space overlay canvases draw last, over every camera.
@@ -246,6 +344,62 @@ namespace Cuphead360.Engine
                     foreach (var it in CanvasItems(null, default, cv)) { it.Sequence = oseq++; overlay.Items.Add(it); }
             if (overlay.Items.Count > 0) views.Add(overlay);
             return views;
+        }
+
+        /// <summary>Render textures' cameras this frame, by texture.</summary>
+        static readonly Dictionary<RenderTexture, NCamera> targetCams = new Dictionary<RenderTexture, NCamera>(ReferenceEqualityComparer.Instance as IEqualityComparer<RenderTexture>);
+
+        static readonly Comparison<Item> drawOrder = (a, b) =>
+        {
+            int c = a.Layer.CompareTo(b.Layer); if (c != 0) return c;
+            c = a.Order.CompareTo(b.Order); if (c != 0) return c;
+            if (a.Kind == "ui" && b.Kind == "ui") return a.Sequence.CompareTo(b.Sequence);
+            c = b.Depth.CompareTo(a.Depth); if (c != 0) return c;   // farther first
+            return a.Sequence.CompareTo(b.Sequence);
+        };
+
+        /// <summary>A camera's items in draw order; nest > 0 for a render texture's camera drawn inside another's.</summary>
+        static void ViewItems(NCamera cam, CamXform xf, List<Item> into, int nest)
+        {
+                var v = into;
+                int seq = 0;
+                foreach (var sr in renderers)
+                {
+                    if ((cam.CullingMask & (1 << sr.GameObject.Layer)) == 0) continue;
+                    var it = SpriteItem(cam, xf, sr);
+                    if (it == null) continue;
+                    it.Sequence = seq++;
+                    v.Add(it);
+                }
+                // A mask adds to the stencil after the sprites at its back point and takes it away after those
+                // at its front point (Depth -infinity sorts it after everything at its layer and order), so the
+                // sprites between see it; without a custom range it adds before anything the camera draws.
+                foreach (var m in masks)
+                {
+                    if ((cam.CullingMask & (1 << m.GameObject.Layer)) == 0) continue;
+                    if (m.CustomRange)
+                    {
+                        var add = MaskItem(cam, xf, m, m.BackLayer, m.BackOrder, Item.MaskAdd);
+                        if (add == null) continue;
+                        add.Sequence = seq++; v.Add(add);
+                        var remove = MaskItem(cam, xf, m, m.FrontLayer, m.FrontOrder, Item.MaskRemove);
+                        remove.Sequence = seq++; v.Add(remove);
+                    }
+                    else if (MaskItem(cam, xf, m, int.MinValue, int.MinValue, Item.MaskAdd) is Item all) { all.Sequence = seq++; v.Add(all); }
+                }
+                foreach (var mr in meshRenderers)
+                {
+                    if ((cam.CullingMask & (1 << mr.GameObject.Layer)) == 0) continue;
+                    foreach (var it in MeshItems(cam, xf, mr, nest)) { it.Sequence = seq++; v.Add(it); }
+                }
+                foreach (var cv in canvases)
+                {
+                    bool mine = cv.Mode == RenderMode.WorldSpace || (cv.Mode == RenderMode.ScreenSpaceCamera && cv.WorldCamera != null && Objects.Of(cv.WorldCamera) == cam)
+                        || (cv.Mode == RenderMode.ScreenSpaceCamera && cv.WorldCamera == null && false);
+                    if (!mine || (cam.CullingMask & (1 << cv.GameObject.Layer)) == 0) continue;
+                    foreach (var it in CanvasItems(cam, xf, cv)) { it.Sequence = seq++; v.Add(it); }
+                }
+                v.Sort(drawOrder);
         }
 
         static Vector2 ToScreen(in CamXform xf, Vector3 world)
@@ -309,8 +463,152 @@ namespace Cuphead360.Engine
             it.Uv = uv; it.Triangles = info.Triangles32; it.Tint = sr.Color;
             it.Layer = SortingLayers.Index(sr.SortingLayerID); it.Order = sr.SortingOrder;
             it.Depth = depth; it.GoLayer = sr.GameObject.Layer;
+            it.SpriteStencil = sr.MaskInteraction == SpriteMaskInteraction.VisibleInsideMask ? Item.MaskInside
+                : sr.MaskInteraction == SpriteMaskInteraction.VisibleOutsideMask ? Item.MaskOutside : 0;
             return it;
         }
+
+        /// <summary>A sprite mask's stencil write at a sorting point: its sprite like a sprite's, its cutoff as the tint's alpha.</summary>
+        static Item MaskItem(NCamera cam, in CamXform xf, NSpriteMask m, int layer, int order, int op)
+        {
+            var info = Sprites.Of(m.Sprite);
+            if (info == null || info.Vertices.Length == 0 || info.Triangles.Length == 0) return null;
+            var mtx = m.GameObject.Transform.LocalToWorld;
+            if (!Sprites.Binding(m.Sprite, out var tex, out _, out _)) tex = null;
+            var it = NewItem();
+            if (HostTransforms && xf.Ortho)
+            {
+                var pvm = xf.ProjView * mtx;
+                float hx = 0.5f * xf.Pixel.width, hy = 0.5f * xf.Pixel.height;
+                it.A00 = hx * pvm.m00; it.A01 = hx * pvm.m01; it.B0 = xf.Pixel.x + hx * (pvm.m03 + 1f);
+                it.A10 = hy * pvm.m10; it.A11 = hy * pvm.m11; it.B1 = xf.Pixel.y + hy * (pvm.m13 + 1f);
+                it.Local = info.Vertices;
+            }
+            else
+            {
+                var screen = it.ScreenOf(info.Vertices.Length);
+                for (int i = 0; i < screen.Length; i++) screen[i] = ToScreen(xf, mtx.MultiplyPoint3x4(new Vector3(info.Vertices[i].x, info.Vertices[i].y, 0)));
+                it.Screen = screen;
+            }
+            it.BaseName = m.GameObject.Name; it.Suffix = op == Item.MaskAdd ? " (mask)" : " (mask end)"; it.Texture = tex;
+            it.Uv = Sprites.RenderUvs(m.Sprite); it.Triangles = info.Triangles32; it.Tint = new Color(1f, 1f, 1f, m.AlphaCutoff);
+            it.Layer = layer; it.Order = order; it.Depth = float.NegativeInfinity; it.Kind = "mask"; it.GoLayer = m.GameObject.Layer;
+            it.SpriteStencil = op;
+            return it;
+        }
+
+        static readonly List<Item> meshOut = new List<Item>();
+        static readonly int MainTexId = ShaderProps.Id("_MainTex");
+
+        /// <summary>A MeshRenderer's items: its MeshFilter's mesh through its transform, a submesh per material.</summary>
+        static List<Item> MeshItems(NCamera cam, in CamXform xf, NMeshRenderer mr, int nest)
+        {
+            meshOut.Clear();
+            NMeshFilter filter = null;
+            var comps = mr.GameObject.Components;
+            for (int i = 0; i < comps.Count; i++) if (comps[i] is NMeshFilter f && !f.Destroyed) { filter = f; break; }
+            var mesh = MeshData.Of(filter?.Mesh);
+            if (traceUi && Clock.FrameCount % 300 == 0)
+                Log.Line($"TRACE mesh {mr.GameObject.Name}: filter {filter != null}, mesh {(filter?.Mesh == null ? "null" : filter.Mesh.name)}, vertices {mesh?.Vertices.Length}, submeshes {mesh?.SubMeshes.Count}, materials {mr.Materials.Length}, layer {mr.SortingLayerID}/{mr.SortingOrder}");
+            if (mesh == null || mesh.Vertices.Length == 0 || mr.Materials.Length == 0) return meshOut;
+            var t = mr.GameObject.Transform;
+            float depth = xf.Viewport(t.Position).z;
+            if (depth < cam.Near || depth > cam.Far) return meshOut;
+            var mtx = t.LocalToWorld;
+            // A quad showing a render texture: its camera's items, drawn into the quad (once; not nested).
+            if (nest == 0 && MainTexture(mr.Materials[0]) is RenderTexture rtex && targetCams.TryGetValue(rtex, out var rtCam))
+                return TargetItems(cam, xf, mr, mesh, mtx, depth, rtCam);
+            var owner = NewItem();
+            var screen = owner.ScreenOf(mesh.Vertices.Length);
+            for (int i = 0; i < screen.Length; i++) screen[i] = ToScreen(xf, mtx.MultiplyPoint3x4(mesh.Vertices[i]));
+            var uv0 = mesh.Uv[0];
+            bool ownerUsed = false;
+            int layer = SortingLayers.Index(mr.SortingLayerID);
+            for (int sm = 0; sm < mesh.SubMeshes.Count && sm < mr.Materials.Length; sm++)
+            {
+                var tris = mesh.SubMeshes[sm];
+                if (tris.Length == 0 || mesh.Topologies[sm] != MeshTopology.Triangles) continue;
+                var mat = mr.Materials[sm];
+                var ms = MaterialState.Of(mat);
+                if (ms == null) continue;
+                var it = ownerUsed ? NewItem() : owner;
+                ownerUsed = true;
+                // The material's main texture scale and offset (scrolling textures).
+                var st = ms.TexST.TryGetValue(MainTexId, out var v) ? v : new Vector4(1, 1, 0, 0);
+                var uv = it == owner ? owner.UvOf(screen.Length) : it.UvOf(screen.Length);
+                for (int i = 0; i < uv.Length; i++)
+                    uv[i] = uv0 != null && i < uv0.Length ? new Vector2(uv0[i].x * st.x + st.z, uv0[i].y * st.y + st.w) : Vector2.zero;
+                it.BaseName = mr.GameObject.Name; it.Texture = MainTexture(mat); it.Material = mat; it.Screen = screen; it.Uv = uv;
+                it.Colors = mesh.Colors != null && mesh.Colors.Length == screen.Length ? mesh.Colors : null;
+                it.Triangles = tris; it.Tint = ms.Vectors.TryGetValue(ColorId, out var c) ? new Color(c.x, c.y, c.z, c.w) : Color.white;
+                it.Layer = layer; it.Order = mr.SortingOrder; it.Depth = depth; it.Kind = "mesh"; it.GoLayer = mr.GameObject.Layer;
+                meshOut.Add(it);
+            }
+            return meshOut;
+        }
+        static readonly int ColorId = ShaderProps.Id("_Color");
+        static readonly List<Item> targetOut = new List<Item>();
+        static readonly HashSet<Vector2[]> moved = new HashSet<Vector2[]>(ReferenceEqualityComparer.Instance as IEqualityComparer<Vector2[]>);
+
+        /// <summary>
+        /// What a render texture's camera sees, drawn where a mesh shows the texture, instead of the
+        /// texture: the camera's items in its own order, mapped from its pixels through the mesh's
+        /// texture coordinates onto this camera's pixels, at the mesh's sorting place, tinted by its
+        /// material's colour. Cuphead's render textures are layer 31 drawn by a second camera and
+        /// shown on a quad (Glumstone's geese, Saltbaker's reflection and blur, Howling Aces' and the
+        /// Bishop's backgrounds, the Knight's glow); their own shaders' effects (glow, darkness, blur)
+        /// aren't drawn.
+        /// </summary>
+        static List<Item> TargetItems(NCamera cam, in CamXform xf, NMeshRenderer mr, MeshData mesh, Matrix4x4 mtx, float depth, NCamera rtCam)
+        {
+            targetOut.Clear();
+            var uv0 = mesh.Uv[0];
+            if (uv0 == null || uv0.Length != mesh.Vertices.Length) return targetOut;
+            // The mesh corners nearest uv (0,0), (1,0) and (0,1) give the map (a quad: exact).
+            int Nearest(float u, float v)
+            {
+                int best = 0; float bd = float.MaxValue;
+                for (int i = 0; i < uv0.Length; i++) { float du = uv0[i].x - u, dv = uv0[i].y - v, d = du * du + dv * dv; if (d < bd) { bd = d; best = i; } }
+                return best;
+            }
+            int i00 = Nearest(0, 0), i10 = Nearest(1, 0), i01 = Nearest(0, 1);
+            var u00 = uv0[i00]; float du10 = uv0[i10].x - u00.x, dv01 = uv0[i01].y - u00.y;
+            if (Math.Abs(du10) < 1e-6f || Math.Abs(dv01) < 1e-6f) return targetOut;
+            Vector2 p00 = ToScreen(xf, mtx.MultiplyPoint3x4(mesh.Vertices[i00])), p10 = ToScreen(xf, mtx.MultiplyPoint3x4(mesh.Vertices[i10])), p01 = ToScreen(xf, mtx.MultiplyPoint3x4(mesh.Vertices[i01]));
+            var rp = rtCam.PixelRect;
+            if (rp.width <= 0 || rp.height <= 0) return targetOut;
+            // Texture pixel (x, y) -> uv (x / w, y / h) -> screen; corrected for corners not exactly at 0 and 1.
+            float sx = 1f / (rp.width * du10), sy = 1f / (rp.height * dv01);
+            float m00 = (p10.x - p00.x) * sx, m01 = (p01.x - p00.x) * sy, m10 = (p10.y - p00.y) * sx, m11 = (p01.y - p00.y) * sy;
+            float b0 = p00.x - m00 * u00.x * rp.width - m01 * u00.y * rp.height, b1 = p00.y - m10 * u00.x * rp.width - m11 * u00.y * rp.height;
+            var items = targetScratch; items.Clear();
+            ViewItems(rtCam, CamXform.Of(rtCam), items, 1);
+            var ms = MaterialState.Of(mr.Materials[0]);
+            var tint = ms != null && ms.Vectors.TryGetValue(ColorId, out var c) ? new Color(c.x, c.y, c.z, c.w) : Color.white;
+            int layer = SortingLayers.Index(mr.SortingLayerID);
+            moved.Clear();
+            foreach (var it in items)
+            {
+                if (it.Screen == null)
+                {
+                    // Sprites under the console's host transforms: compose the maps.
+                    float a00 = m00 * it.A00 + m01 * it.A10, a01 = m00 * it.A01 + m01 * it.A11, nb0 = m00 * it.B0 + m01 * it.B1 + b0;
+                    float a10 = m10 * it.A00 + m11 * it.A10, a11 = m10 * it.A01 + m11 * it.A11, nb1 = m10 * it.B0 + m11 * it.B1 + b1;
+                    it.A00 = a00; it.A01 = a01; it.B0 = nb0; it.A10 = a10; it.A11 = a11; it.B1 = nb1;
+                }
+                else if (moved.Add(it.Screen))
+                    for (int k = 0; k < it.Screen.Length; k++)
+                    {
+                        var q = it.Screen[k];
+                        it.Screen[k] = new Vector2(m00 * q.x + m01 * q.y + b0, m10 * q.x + m11 * q.y + b1);
+                    }
+                it.Tint = new Color(it.Tint.r * tint.r, it.Tint.g * tint.g, it.Tint.b * tint.b, it.Tint.a * tint.a);
+                it.Layer = layer; it.Order = mr.SortingOrder; it.Depth = depth;
+                targetOut.Add(it);
+            }
+            return targetOut;
+        }
+        static readonly List<Item> targetScratch = new List<Item>();
 
         static List<Item> CanvasItems(NCamera cam, CamXform xf, NCanvas root)
         {
@@ -473,6 +771,7 @@ namespace Cuphead360.Engine
                         sb.Append('}');
                     }
                     if (it.Stencil != null) sb.Append(",\"stencil\":[").Append(string.Join(",", it.Stencil)).Append(']');
+                    if (it.SpriteStencil != 0) sb.Append(",\"spriteStencil\":").Append(it.SpriteStencil);
                     sb.Append(",\"tint\":[").Append(F(it.Tint.r)).Append(',').Append(F(it.Tint.g)).Append(',').Append(F(it.Tint.b)).Append(',').Append(F(it.Tint.a)).Append(']')
                       .Append(",\"layer\":").Append(it.Layer).Append(",\"order\":").Append(it.Order).Append(",\"depth\":").Append(F(it.Depth));
                     sb.Append(",\"xy\":[");

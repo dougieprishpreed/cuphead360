@@ -40,10 +40,23 @@ namespace Cuphead360.Engine
             return null;
         }
 
+        /// <summary>
+        /// Active for the component queries: in a scene, active in the hierarchy; a prefab asset by its own
+        /// active flags (Unity answers GetComponentInChildren on a prefab: the Funhouse run-and-gun level reads
+        /// its duck prefabs' sprite sizes so).
+        /// </summary>
+        static bool Active(NGameObject g)
+        {
+            if (g.ActiveInHierarchy) return true;
+            if (!g.IsAsset) return false;
+            for (var t = g.Transform; t != null; t = t.Parent) if (!t.GameObject.ActiveSelf) return false;
+            return true;
+        }
+
         public static Component InChildren(NGameObject go, Type type, bool includeInactive)
         {
             if (go == null || type == null) return null;
-            if (go.ActiveInHierarchy || includeInactive)
+            if (includeInactive || Active(go))
             {
                 var c = Component(go, type);
                 if (c != null) return c;
@@ -60,7 +73,7 @@ namespace Cuphead360.Engine
         {
             for (var t = go?.Transform; t != null; t = t.Parent)
             {
-                if (!t.GameObject.ActiveInHierarchy) continue;
+                if (!Active(t.GameObject)) continue;
                 var c = Component(t.GameObject, type);
                 if (c != null) return c;
             }
@@ -72,12 +85,12 @@ namespace Cuphead360.Engine
             var found = new List<Component>();
             void Collect(NGameObject g, bool top)
             {
-                if (top || includeInactive || g.ActiveInHierarchy)
+                if (top || includeInactive || Active(g))
                     foreach (var c in g.Components)
                         if (type == null || type.IsInstanceOfType(c.Managed)) found.Add((Component)c.Managed);
                 if (!recursive) return;
                 foreach (var child in g.Transform.Children)
-                    if (includeInactive || child.GameObject.ActiveInHierarchy) Collect(child.GameObject, false);
+                    if (includeInactive || Active(child.GameObject)) Collect(child.GameObject, false);
             }
             if (go != null)
             {
@@ -85,7 +98,7 @@ namespace Cuphead360.Engine
                 {
                     // GetComponentsInParent: this object then its ancestors.
                     for (var t = go.Transform; t != null; t = t.Parent)
-                        if (includeInactive || t.GameObject.ActiveInHierarchy)
+                        if (includeInactive || Active(t.GameObject))
                             foreach (var c in t.GameObject.Components)
                                 if (type == null || type.IsInstanceOfType(c.Managed)) found.Add((Component)c.Managed);
                 }

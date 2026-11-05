@@ -33,6 +33,7 @@ namespace Cuphead360.Engine
         public string Name;           // StartCoroutine(string)
         public bool Done, FixedWait, EndOfFrameWait;
         public int YieldFrame, YieldFixedStep;   // when it last yielded
+        public long YieldSeq;                    // the order of its last yield among all coroutines' (Unity resumes in that order)
         public bool YieldInFixed;
         public long ProfTicks;        // its steps' time since the last PlayerLoop.TopReport
         public readonly List<CoroutineState> Waiters = new List<CoroutineState>();
@@ -142,8 +143,10 @@ namespace Cuphead360.Engine
             ForEach(b => b.Messages.LateUpdate, null);
             P(6); UI.WillRender();
             Atlases.Flush();
-            P(7); if (Capture.Wanted(Clock.FrameCount)) Capture.Write(Clock.FrameCount, RenderList.Build());
+            P(7); RenderList.PreRender();
+            if (Capture.Wanted(Clock.FrameCount)) Capture.Write(Clock.FrameCount, RenderList.Build());
             RenderFrame?.Invoke();
+            RenderList.PostRender();
             ResumeCoroutines(fixedPhase: false, endOfFrame: true);
             ProcessDestroys();
             P(8); Audio.Step(AudioDelta >= 0 ? AudioDelta : realDelta);   // audio runs in unscaled time
@@ -288,34 +291,56 @@ namespace Cuphead360.Engine
             }
         }
 
+        static readonly List<CoroutineState> due = new List<CoroutineState>();
+        static readonly Comparison<CoroutineState> byYield = (a, b) => a.YieldSeq.CompareTo(b.YieldSeq);
+
+        /// <summary>
+        /// The coroutines whose wait is over, in the order they last yielded across every behaviour,
+        /// as Unity's scheduler runs them (each yield queues the coroutine at the end). In start order
+        /// per behaviour, Sally Stageplay's phase 2 never came: her level starts a jump coroutine every
+        /// other frame, all waiting for her to be idle with the coroutine that starts phase 2, and the
+        /// older jumps always took the idle frame first.
+        /// </summary>
+        static bool IsDue(CoroutineState c, bool fixedPhase, bool endOfFrame)
+        {
+            if (c.Done || c.WaitOn != null) return false;
+            if (fixedPhase != c.FixedWait || endOfFrame != c.EndOfFrameWait) return false;
+            // Nothing resumes in the frame (or fixed step) it yielded in, except
+            // WaitForEndOfFrame and a WaitForFixedUpdate yielded inside FixedUpdate.
+            if (c.FixedWait) { if (Clock.FixedStepCount == c.YieldFixedStep && !c.YieldInFixed) return false; }
+            else if (!c.EndOfFrameWait && Clock.FrameCount == c.YieldFrame) return false;
+            if (c.Waiting is WaitForSeconds && Clock.Time < c.WakeTime) return false;
+            if (c.Waiting is CustomYieldInstruction cy && cy.keepWaiting) return false;
+            if (c.Waiting is AsyncOperation op && !Scenes.IsDone(op)) return false;
+            return true;
+        }
+
         static void ResumeCoroutines(bool fixedPhase, bool endOfFrame)
         {
+            due.Clear();
             int n = tracked.Count;
             for (int i = 0; i < n; i++)
             {
-                var b = tracked[i];
-                if (b.Coroutines.Count == 0) continue;
-                int count = b.Coroutines.Count;
-                var routines = System.Buffers.ArrayPool<CoroutineState>.Shared.Rent(count);
-                b.Coroutines.CopyTo(routines);
-                for (int k = 0; k < count; k++)
-                {
-                    var c = routines[k];
-                    if (c.Done || c.WaitOn != null) continue;
-                    if (fixedPhase != c.FixedWait || endOfFrame != c.EndOfFrameWait) continue;
-                    // Nothing resumes in the frame (or fixed step) it yielded in, except
-                    // WaitForEndOfFrame and a WaitForFixedUpdate yielded inside FixedUpdate.
-                    if (c.FixedWait) { if (Clock.FixedStepCount == c.YieldFixedStep && !c.YieldInFixed) continue; }
-                    else if (!c.EndOfFrameWait && Clock.FrameCount == c.YieldFrame) continue;
-                    if (c.Waiting is WaitForSeconds && Clock.Time < c.WakeTime) continue;
-                    if (c.Waiting is CustomYieldInstruction cy && cy.keepWaiting) continue;
-                    if (c.Waiting is AsyncOperation op && !Scenes.IsDone(op)) continue;
-                    Coroutines.Step(c);
-                }
-                System.Buffers.ArrayPool<CoroutineState>.Shared.Return(routines, true);
-                b.Coroutines.RemoveAll(x => x.Done);
+                var cs = tracked[i].Coroutines;
+                for (int k = 0; k < cs.Count; k++) if (IsDue(cs[k], fixedPhase, endOfFrame)) due.Add(cs[k]);
+            }
+            if (due.Count > 1) due.Sort(byYield);
+            // A coroutine stopped, or its wait changed, by one that ran before it this pass is looked at again.
+            long upTo = yieldSeqNow;
+            for (int i = 0; i < due.Count; i++)
+            {
+                var c = due[i];
+                if (c.YieldSeq > upTo || !IsDue(c, fixedPhase, endOfFrame)) continue;
+                Coroutines.Step(c);
+            }
+            due.Clear();
+            for (int i = 0; i < n; i++)
+            {
+                var cs = tracked[i].Coroutines;
+                if (cs.Count > 0) cs.RemoveAll(x => x.Done);
             }
         }
+        static long yieldSeqNow => Coroutines.YieldSeqNow;
 
         static void ProcessDestroys()
         {
@@ -367,6 +392,9 @@ namespace Cuphead360.Engine
 
         public static CoroutineState Of(Coroutine h) => h != null && handles.TryGetValue(h, out var c) ? c : null;
 
+        static long yieldSeq;
+        public static long YieldSeqNow => yieldSeq;
+
         /// <summary>Runs the routine to its next yield and records what it waits for.</summary>
         public static void Step(CoroutineState c)
         {
@@ -380,6 +408,7 @@ namespace Cuphead360.Engine
             object y = c.Routine.Current;
             c.Waiting = y; c.FixedWait = false; c.EndOfFrameWait = false; c.WaitOn = null;
             c.YieldFrame = Clock.FrameCount; c.YieldFixedStep = Clock.FixedStepCount; c.YieldInFixed = Clock.InFixedTimeStep;
+            c.YieldSeq = ++yieldSeq;
             switch (y)
             {
                 case null: break;

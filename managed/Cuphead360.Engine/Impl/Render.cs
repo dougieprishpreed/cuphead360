@@ -50,7 +50,9 @@ namespace Cuphead360.Engine
         {
             get
             {
-                float w = Icalls.ScreenWidth, h = Icalls.ScreenHeight;
+                // A camera drawing into a render texture: that texture's pixels.
+                float w = Target != null ? Icalls.UnityEngine_RenderTexture__Internal_GetWidth(Target) : Icalls.ScreenWidth;
+                float h = Target != null ? Icalls.UnityEngine_RenderTexture__Internal_GetHeight(Target) : Icalls.ScreenHeight;
                 float x0 = Mathf.Clamp01(Rect.xMin), y0 = Mathf.Clamp01(Rect.yMin), x1 = Mathf.Clamp01(Rect.xMax), y1 = Mathf.Clamp01(Rect.yMax);
                 return new Rect(x0 * w, y0 * h, (x1 - x0) * w, (y1 - y0) * h);
             }
@@ -184,6 +186,58 @@ namespace Cuphead360.Engine
             Sprite = s.Sprite; Color = s.Color; FlipX = s.FlipX; FlipY = s.FlipY; DrawMode = s.DrawMode; Size = s.Size;
             MaskInteraction = s.MaskInteraction; TileMode = s.TileMode; AdaptiveThreshold = s.AdaptiveThreshold;
         }
+    }
+
+    /// <summary>
+    /// A SpriteMask: its sprite's pixels at or above the alpha cutoff mark the
+    /// stencil for sprites that interact with masks. With a custom range it
+    /// applies to sprites sorted after its back point and up to its front
+    /// point (layers kept as list indexes; Unity serializes their values,
+    /// Default 0); without one, to every sprite the camera draws.
+    /// </summary>
+    public sealed class NSpriteMask : NRenderer
+    {
+        public Sprite Sprite;
+        public float AlphaCutoff = 0.2f;
+        public bool CustomRange;
+        public int FrontLayer, BackLayer, FrontOrder, BackOrder;
+
+        public override void Load(ChobObject co, SceneBuild b)
+        {
+            base.Load(co, b);
+            var t = co.Tree;
+            Sprite = b.Resolve(Tree.Ptr(t, "m_Sprite")) as Sprite;
+            AlphaCutoff = Tree.Float(t, "m_MaskAlphaCutoff", 0.2f);
+            CustomRange = Tree.Bool(t, "m_IsCustomRangeActive");
+            int def = SortingLayers.Index(0);
+            FrontLayer = (int)Tree.Int(t, "m_FrontSortingLayer") + def; BackLayer = (int)Tree.Int(t, "m_BackSortingLayer") + def;
+            FrontOrder = (int)Tree.Int(t, "m_FrontSortingOrder"); BackOrder = (int)Tree.Int(t, "m_BackSortingOrder");
+            if (Sprite != null) Atlases.Touch(Sprite);
+        }
+
+        public override void Activated(bool on) { if (on && Sprite != null) Atlases.Touch(Sprite); }
+
+        public override void CopyFrom(NComponent src, Dictionary<NObject, NObject> map)
+        {
+            base.CopyFrom(src, map);
+            var s = (NSpriteMask)src;
+            Sprite = s.Sprite; AlphaCutoff = s.AlphaCutoff; CustomRange = s.CustomRange;
+            FrontLayer = s.FrontLayer; BackLayer = s.BackLayer; FrontOrder = s.FrontOrder; BackOrder = s.BackOrder;
+        }
+    }
+
+    /// <summary>A MeshRenderer: draws its MeshFilter's mesh with its materials (TextMesh Pro text, textured quads).</summary>
+    public sealed class NMeshRenderer : NRenderer { }
+
+    public sealed class NMeshFilter : NComponent
+    {
+        public Mesh Mesh;
+        /// <summary>Mesh is this filter's own copy (MeshFilter.mesh made it, or it was set through mesh).</summary>
+        public bool Owned;
+
+        public override void Load(ChobObject co, SceneBuild b) => Mesh = b.Resolve(Tree.Ptr(co.Tree, "m_Mesh")) as Mesh;
+
+        public override void CopyFrom(NComponent src, Dictionary<NObject, NObject> map) { Mesh = ((NMeshFilter)src).Mesh; Owned = false; }
     }
 
     /// <summary>Geometry and texture binding of Sprite assets.</summary>
@@ -729,6 +783,7 @@ namespace Cuphead360.Engine
         }
 
         /// <summary>Enabled cameras in active GameObjects, in creation order (Unity's list).</summary>
+        /// <summary>The enabled cameras on active GameObjects, in creation order (a list of its own: callers keep or sort it).</summary>
         public static List<NCamera> LiveCameras()
         {
             var list = new List<NCamera>();
@@ -739,7 +794,9 @@ namespace Cuphead360.Engine
 
         public static Camera UnityEngine_Camera__get_main()
         {
-            foreach (var c in LiveCameras()) if (c.GameObject.Tag == "MainCamera") return (Camera)c.Managed;
+            // No list: game code asks for Camera.main many times a frame.
+            foreach (var c in Typed.Cameras)
+                if (c.Enabled && c.GameObject != null && c.GameObject.ActiveInHierarchy && c.GameObject.Tag == "MainCamera") return (Camera)c.Managed;
             return null;
         }
         public static Camera UnityEngine_Camera__get_current() => RenderList.Current;
@@ -765,11 +822,7 @@ namespace Cuphead360.Engine
 
         public static bool UnityEngine_Renderer__get_enabled(Renderer self) => Objects.Comp(self)?.Enabled ?? false;
         public static void UnityEngine_Renderer__set_enabled(Renderer self, bool value) { var c = Objects.Comp(self); if (c != null) c.Enabled = value; }
-        public static bool UnityEngine_Renderer__get_isVisible(Renderer self)
-        {
-            var r = Rend(self);
-            return r != null && r.Enabled && r.GameObject.ActiveInHierarchy;
-        }
+        public static bool UnityEngine_Renderer__get_isVisible(Renderer self) => RenderList.IsVisible(Rend(self));
         public static int UnityEngine_Renderer__get_sortingOrder(Renderer self) => Rend(self)?.SortingOrder ?? 0;
         public static void UnityEngine_Renderer__set_sortingOrder(Renderer self, int value) { var r = Rend(self); if (r != null) r.SortingOrder = (short)value; }
         public static int UnityEngine_Renderer__get_sortingLayerID(Renderer self) => Rend(self)?.SortingLayerID ?? 0;
@@ -886,6 +939,53 @@ namespace Cuphead360.Engine
         public static bool UnityEngine_SpriteRenderer__get_shouldSupportTiling(SpriteRenderer self) => (SR(self)?.DrawMode ?? 0) != SpriteDrawMode.Simple;
         public static void UnityEngine_SpriteRenderer__INTERNAL_CALL_GetSpriteBounds(SpriteRenderer self, out Bounds value)
             => value = Sprites.LocalBounds(Sprites.Of(SR(self)?.Sprite));
+
+        // ------------------------------------------------------------ SpriteMask
+
+        static NSpriteMask SM(SpriteMask m) => Objects.Of(m) as NSpriteMask;
+        static int LayerId(int index) => index >= 0 && index < SortingLayers.Layers.Count ? SortingLayers.Layers[index].id : 0;
+
+        public static Sprite UnityEngine_SpriteMask__get_sprite(SpriteMask self) => SM(self)?.Sprite;
+        public static void UnityEngine_SpriteMask__set_sprite(SpriteMask self, Sprite value)
+        {
+            var m = SM(self);
+            if (m == null) return;
+            m.Sprite = value;
+            if (value != null) Atlases.Touch(value);
+        }
+        public static float UnityEngine_SpriteMask__get_alphaCutoff(SpriteMask self) => SM(self)?.AlphaCutoff ?? 0.2f;
+        public static void UnityEngine_SpriteMask__set_alphaCutoff(SpriteMask self, float value) { var m = SM(self); if (m != null) m.AlphaCutoff = value; }
+        public static bool UnityEngine_SpriteMask__get_isCustomRangeActive(SpriteMask self) => SM(self)?.CustomRange ?? false;
+        public static void UnityEngine_SpriteMask__set_isCustomRangeActive(SpriteMask self, bool value) { var m = SM(self); if (m != null) m.CustomRange = value; }
+        public static int UnityEngine_SpriteMask__get_frontSortingLayerID(SpriteMask self) => LayerId(SM(self)?.FrontLayer ?? -1);
+        public static void UnityEngine_SpriteMask__set_frontSortingLayerID(SpriteMask self, int value) { var m = SM(self); if (m != null) m.FrontLayer = SortingLayers.Index(value); }
+        public static int UnityEngine_SpriteMask__get_frontSortingOrder(SpriteMask self) => SM(self)?.FrontOrder ?? 0;
+        public static void UnityEngine_SpriteMask__set_frontSortingOrder(SpriteMask self, int value) { var m = SM(self); if (m != null) m.FrontOrder = value; }
+        public static int UnityEngine_SpriteMask__get_backSortingLayerID(SpriteMask self) => LayerId(SM(self)?.BackLayer ?? -1);
+        public static void UnityEngine_SpriteMask__set_backSortingLayerID(SpriteMask self, int value) { var m = SM(self); if (m != null) m.BackLayer = SortingLayers.Index(value); }
+        public static int UnityEngine_SpriteMask__get_backSortingOrder(SpriteMask self) => SM(self)?.BackOrder ?? 0;
+        public static void UnityEngine_SpriteMask__set_backSortingOrder(SpriteMask self, int value) { var m = SM(self); if (m != null) m.BackOrder = value; }
+        public static void UnityEngine_SpriteMask__INTERNAL_CALL_GetSpriteBounds(SpriteMask self, out Bounds value)
+            => value = Sprites.LocalBounds(Sprites.Of(SM(self)?.Sprite));
+
+        // ------------------------------------------------------------ MeshFilter
+
+        static NMeshFilter MF(MeshFilter f) => Objects.Of(f) as NMeshFilter;
+
+        public static Mesh UnityEngine_MeshFilter__get_sharedMesh(MeshFilter self) => MF(self)?.Mesh;
+        public static void UnityEngine_MeshFilter__set_sharedMesh(MeshFilter self, Mesh value) { var f = MF(self); if (f != null) { f.Mesh = value; f.Owned = false; } }
+        /// <summary>Unity: the filter's own copy of its mesh, made on first use (a new mesh when it has none).</summary>
+        public static Mesh UnityEngine_MeshFilter__get_mesh(MeshFilter self)
+        {
+            var f = MF(self);
+            if (f == null) return null;
+            if (f.Owned && f.Mesh != null) return f.Mesh;
+            if (f.Mesh == null) { f.Mesh = Lifecycle.NewManaged<Mesh>(); Objects.Register(f.Mesh, new NObject(), ""); }
+            else { var src = f.Mesh; f.Mesh = (Mesh)Clone.Instantiate(src, null, false, null, null); f.Mesh.name = src.name + " Instance"; }
+            f.Owned = true;
+            return f.Mesh;
+        }
+        public static void UnityEngine_MeshFilter__set_mesh(MeshFilter self, Mesh value) { var f = MF(self); if (f != null) { f.Mesh = value; f.Owned = value != null; } }
 
         // ------------------------------------------------------------ Sprite
 

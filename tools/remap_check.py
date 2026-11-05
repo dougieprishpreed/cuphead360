@@ -55,7 +55,7 @@ def texels(path):
 
 
 VIEW = np.dtype([('xywh', '<f4', 4), ('clear', '<u4'), ('rgb', '<f4', 3), ('first', '<u4'), ('items', '<u4')])
-ITEM = np.dtype([('tex', '<i4'), ('mode', '<u4'), ('first', '<u4'), ('count', '<u4'), ('box', '<f4', 4), ('textures', '<i4', 2), ('params', '<f4', 4)])
+ITEM = np.dtype([('tex', '<i4'), ('mode', '<u4'), ('first', '<u4'), ('count', '<u4'), ('box', '<f4', 4), ('textures', '<i4', 2), ('params', '<f4', 4), ('stencil', '<u4')])
 VERT = np.dtype([('xyuv', '<f4', 4), ('color', 'u1', 4), ('blend', 'u1', 4)])
 d = open(dump, 'rb').read()
 p = 0

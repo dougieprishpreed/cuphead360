@@ -667,10 +667,28 @@ namespace Cuphead360.Engine
             (TraceName != null && GameObject.Name.Contains(TraceName) && Clock.FrameCount >= traceFrames.from && Clock.FrameCount <= traceFrames.to)
             || (WindowName != null && Clock.FrameCount <= WindowUntil && GameObject.Name == WindowName));
 
+        int updateDepth;
+
         public void Update(float dt)
         {
             if (!Initialized) { Rebind(false); if (!Initialized) return; }
+            // Animator.Update from an animation event re-enters here (Moonshine Mob's anteater updates its
+            // hands at once after a Play): allowed, but not without end.
+            if (updateDepth >= 4) return;
+            updateDepth++;
+            try { UpdateNow(dt); }
+            finally { updateDepth--; }
+        }
+
+        readonly List<int> consumedTriggers = new List<int>();
+        static readonly List<int> triggerScratch = new List<int>();
+
+        void UpdateNow(float dt)
+        {
+            int mark = consumedTriggers.Count;
             for (int li = 0; li < Layers.Length; li++) UpdateLayer(li, dt * Speed);
+            for (int i = mark; i < consumedTriggers.Count; i++) Bools[consumedTriggers[i]] = false;
+            consumedTriggers.RemoveRange(mark, consumedTriggers.Count - mark);
             if (TraceNow)
             {
                 // One line a frame: each weighted layer's state (name hash), time / length, and a transition's target.
@@ -746,7 +764,9 @@ namespace Cuphead360.Engine
             if (cur == null) return;
             float n0 = l.Current.Prev / StateLength(li, l.Current.State), n1 = Normalized(li, l.Current);
             ControllerData.Transition fire = null;
-            var triggers = new List<int>();
+            // One list for every layer of every animator (nothing here calls game code): a new one per layer
+            // per update was an allocation for each animator every frame.
+            var triggers = triggerScratch;
             foreach (var tr in m.AnyState)
             {
                 triggers.Clear();
@@ -760,7 +780,9 @@ namespace Cuphead360.Engine
                     if (Passes(tr, n0, n1, cur.Loop, triggers)) { fire = tr; break; }
                 }
             if (fire == null) return;
-            foreach (int ti in triggers) Bools[ti] = false;   // a trigger is consumed by the transition it fires
+            // A trigger is consumed by the transition it fires, once every layer has had this update: the
+            // other layers listening for it take it too (Beppi's helium clown: "Continue" moves layers 1 and 3).
+            consumedTriggers.AddRange(triggers);
             int dest = fire.Destination;
             if (dest >= 30000)
             {
@@ -1014,6 +1036,17 @@ namespace Cuphead360.Engine
                         else tg.Unbound = "SpriteRenderer attribute " + b.Attribute;
                         break;
                     }
+                case 331:
+                    {
+                        // SpriteMask: its sprite (the DLC's animated masks: Glumstone's ruffles) and enabled.
+                        var sm = go.Components.Find(c => c is NSpriteMask) as NSpriteMask;
+                        tg.Component = sm;
+                        if (sm == null) { tg.Unbound = "no SpriteMask"; break; }
+                        if (b.IsPPtr) tg.DefaultObj = sm.Sprite;
+                        else if (b.Attribute == EnabledHash) tg.Default[0] = sm.Enabled ? 1 : 0;
+                        else tg.Unbound = "SpriteMask attribute " + b.Attribute;
+                        break;
+                    }
                 case 114:
                     {
                         var comp = b.Script == null ? null : go.Components.Find(c => c is NBehaviour nb && b.Script.IsInstanceOfType(nb.Managed));
@@ -1039,6 +1072,7 @@ namespace Cuphead360.Engine
                         if (col == null) { tg.Unbound = "no collider " + b.TypeId; break; }
                         if (b.Attribute == EnabledHash) { tg.Default[0] = col.Enabled ? 1 : 0; break; }
                         if (b.Attribute == Icalls.Crc32("m_IsTrigger")) { tg.Default[0] = col.IsTrigger ? 1 : 0; tg.Set = v => col.IsTrigger = v > 0.5f; break; }
+                        if (b.Attribute == Icalls.Crc32("m_UsedByEffector")) { tg.Default[0] = col.UsedByEffector ? 1 : 0; tg.Set = v => { col.UsedByEffector = v > 0.5f; col.Version++; }; break; }
                         if (b.Attribute == Icalls.Crc32("m_Radius")) { tg.Default[0] = col.Radius; tg.Set = v => { col.Radius = v; col.Version++; }; break; }
                         bool bound = false;
                         foreach (var (fname, k) in new[] { ("m_Size", 0), ("m_Size", 1), ("m_Offset", 0), ("m_Offset", 1) })
@@ -1189,6 +1223,13 @@ namespace Cuphead360.Engine
                         }
                         break;
                     }
+                case 331:
+                    {
+                        var sm = (NSpriteMask)tg.Component;
+                        if (b.IsPPtr) { if (tg.Obj is Sprite s || tg.Obj == null) { sm.Sprite = tg.Obj as Sprite; if (sm.Sprite != null) Atlases.Touch(sm.Sprite); } }
+                        else if (b.Attribute == EnabledHash) sm.Enabled = v[0] > 0.5f;
+                        break;
+                    }
                 default:
                     if (tg.Field != null)
                     {
@@ -1218,9 +1259,11 @@ namespace Cuphead360.Engine
             var lr = Layers[li];
             if (lr.Retired.Count > 0)
             {
-                // A state left this update fires its events up to the point it was left.
-                foreach (var old in lr.Retired) { old.Fresh = false; FireEvents(li, old, 1f); }
+                // A state left this update fires its events up to the point it was left. Taken off the
+                // list first: an event that updates the animator again must not fire them again.
+                var retired = lr.Retired.ToArray();
                 lr.Retired.Clear();
+                foreach (var old in retired) { old.Fresh = false; FireEvents(li, old, 1f); }
             }
             var l = Layers[li];
             float w = l.Next != null && l.TransitionLength > 0f ? Math.Min(1f, l.TransitionTime / l.TransitionLength) : 0f;
@@ -1350,6 +1393,7 @@ namespace Cuphead360.Engine
             [typeof(SpriteRenderer)] = 212, [typeof(MonoBehaviour)] = 114, [typeof(BoxCollider2D)] = 61, [typeof(CircleCollider2D)] = 58,
             [typeof(PolygonCollider2D)] = 60, [typeof(Rigidbody2D)] = 50, [typeof(MeshRenderer)] = 23, [typeof(ParticleSystem)] = 198,
             [typeof(EdgeCollider2D)] = 68, [typeof(CapsuleCollider2D)] = 70, [typeof(RectTransform)] = 224, [typeof(CanvasGroup)] = 225,
+            [typeof(SpriteMask)] = 331, [typeof(MeshFilter)] = 33,
         };
 
         public static int ClassId(Type t)
@@ -1446,18 +1490,39 @@ namespace Cuphead360.Engine
         }
         public static bool UnityEngine_Animator__HasState(Animator self, int layerIndex, int stateID) => Ready(self)?.FindState(layerIndex, (uint)stateID) >= 0;
 
+        /// <summary>Unity's warning, once per controller, state and layer, naming them (as names when the controller knows them).</summary>
+        static void NoState(NAnimator a, int hash, int layer)
+        {
+            if (!warnedParams.Add((a.Data, hash ^ (layer << 24)))) return;
+            string n = a.Data.NameOf((uint)hash);
+            Log.Line($"UNITY Warning: Animator.GotoState: State could not be found ({a.GameObject?.Name}, {(string.IsNullOrEmpty(n) ? "hash " + hash : n)}, layer {layer})");
+        }
+
         static void PlayRequest(Animator self, int hash, int layer, float normalizedTime, float? cross, float offset, bool fixedTime)
         {
             var a = Ready(self);
             if (a?.Data == null) return;
-            if (layer < 0)
+            int st;
+            if (hash == 0)
             {
-                for (int i = 0; i < a.Layers.Length; i++) if (a.FindState(i, (uint)hash) >= 0) { layer = i; break; }
-                if (layer < 0) { Log.Line("UNITY Warning: Animator.GotoState: State could not be found"); return; }
+                // Unity: a state hash of 0 is the layer's current state (Esther Winchester's projectiles start
+                // their loop at a random point with Play(0, 0, t)).
+                if (layer < 0) layer = 0;
+                if (layer >= a.Layers.Length) return;
+                var cur = a.Layers[layer];
+                st = cur.PendingPlay is (int ps, float _) ? ps : cur.Current.State;
             }
-            if (layer >= a.Layers.Length) return;
-            int st = a.FindState(layer, (uint)hash);
-            if (st < 0) { Log.Line("UNITY Warning: Animator.GotoState: State could not be found"); return; }
+            else
+            {
+                if (layer < 0)
+                {
+                    for (int i = 0; i < a.Layers.Length; i++) if (a.FindState(i, (uint)hash) >= 0) { layer = i; break; }
+                    if (layer < 0) { NoState(a, hash, layer); return; }
+                }
+                if (layer >= a.Layers.Length) return;
+                st = a.FindState(layer, (uint)hash);
+                if (st < 0) { NoState(a, hash, layer); return; }
+            }
             var l = a.Layers[layer];
             if (NAnimator.WindowOnPlay != null && NAnimator.WindowsLeft > 0 && a.GameObject?.Name == NAnimator.WindowName && NAnimator.WindowOnPlay.Contains(hash))
             {
@@ -1505,12 +1570,25 @@ namespace Cuphead360.Engine
             a.Rebind(false);
         }
 
+        // Playback mode replays what StartRecording recorded; nothing records here, so there is nothing to play
+        // back and the animator keeps running as before (Saltbaker stops playback on its animators).
+        public static void UnityEngine_Animator__StartPlayback(Animator self) { }
+        public static void UnityEngine_Animator__StopPlayback(Animator self) { }
+
         static int Param(NAnimator a, int id, AnimatorControllerParameterType? want, string what)
         {
             int i = a?.ParamIndex((uint)id) ?? -1;
-            if (i < 0) { if (a?.Data != null) Log.Line("UNITY Warning: Parameter '" + (a.Data.NameOf((uint)id) is string n && n.Length > 0 ? n : "Hash " + id) + "' does not exist."); return -1; }
+            if (i < 0)
+            {
+                // Once per controller and parameter: projectiles set "Parry" on animators without one
+                // hundreds of times a fight, and each log line costs on the console.
+                if (a?.Data != null && warnedParams.Add((a.Data, id)))
+                    Log.Line("UNITY Warning: Parameter '" + (a.Data.NameOf((uint)id) is string n && n.Length > 0 ? n : "Hash " + id) + "' does not exist.");
+                return -1;
+            }
             return i;
         }
+        static readonly HashSet<(object, int)> warnedParams = new HashSet<(object, int)>();
         public static void UnityEngine_Animator__SetFloatID(Animator self, int id, float value) { var a = Ready(self); int i = Param(a, id, null, "SetFloat"); if (i >= 0) a.Floats[i] = value; }
         public static void UnityEngine_Animator__SetFloatString(Animator self, string name, float value) => UnityEngine_Animator__SetFloatID(self, (int)Crc32(name ?? ""), value);
         public static void UnityEngine_Animator__SetFloatIDDamp(Animator self, int id, float value, float dampTime, float deltaTime)
