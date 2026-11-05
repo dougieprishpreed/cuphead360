@@ -22,6 +22,59 @@ namespace Cuphead360.Engine
         public long ProfTicks;
         /// <summary>Messages without arguments, bound to this behaviour (reflection's Invoke is slow and allocates).</summary>
         public Dictionary<MethodInfo, Action> Calls;
+        /// <summary>
+        /// The messages sent to it, each with its bound delegate (an Action, or an Action of Collider2D
+        /// or Collision2D for the physics messages; null when it must go through reflection), found by
+        /// reference: two dictionary lookups a message (a MethodInfo key hashes slowly) were about 3%
+        /// of the first run-and-gun level's PC samples.
+        /// </summary>
+        internal MethodInfo[] SentKeys;
+        internal Delegate[] SentCalls;
+        internal int SentCount;
+        /// <summary>Its class's script execution order (ScriptOrder).</summary>
+        public int ExecOrder;
+    }
+
+    /// <summary>
+    /// Unity's script execution order (Project Settings), from each MonoScript's m_ExecutionOrder in
+    /// the build; a class takes its nearest base class's, which is where Cuphead sets most of them
+    /// (Level -90, the player's controller and components, the camera; ParallaxLayer 50,
+    /// LevelPlayerWeaponManager 100, ObjectPool 200). It orders Awake and OnEnable within an
+    /// activation, Start, and each update pass. Without it the Devil's giant head woke before the
+    /// level and found no Level.Current.
+    /// </summary>
+    public static class ScriptOrder
+    {
+        static Dictionary<string, int> byName;
+        static readonly Dictionary<Type, int> byType = new Dictionary<Type, int>();
+
+        public static int Of(Type t)
+        {
+            if (t == null) return 0;
+            if (byType.TryGetValue(t, out int o)) return o;
+            byName ??= Load();
+            o = 0;
+            for (var c = t; c != null && c != typeof(MonoBehaviour); c = c.BaseType)
+                if (byName.TryGetValue(c.FullName ?? c.Name, out int v)) { o = v; break; }
+            byType[t] = o;
+            return o;
+        }
+
+        static Dictionary<string, int> Load()
+        {
+            var d = new Dictionary<string, int>();
+            var f = AssetDb.File("globalgamemanagers.assets");
+            if (f == null) return d;
+            foreach (var co in f.Ordered)
+            {
+                if (co.Type != "MonoScript") continue;
+                int v = (int)Tree.Int(co.Tree, "m_ExecutionOrder");
+                if (v == 0) continue;
+                string ns = Tree.Str(co.Tree, "m_Namespace"), cls = Tree.Str(co.Tree, "m_ClassName");
+                d[string.IsNullOrEmpty(ns) ? cls : ns + "." + cls] = v;
+            }
+            return d;
+        }
     }
 
     public sealed class MessageSet
@@ -103,6 +156,7 @@ namespace Cuphead360.Engine
             rec.GameObject = go;
             rec.Messages = MessageSet.For(mb.GetType());
             rec.Order = ++order;
+            rec.ExecOrder = ScriptOrder.Of(mb.GetType());
             go.Components.Add(rec);
             PlayerLoop.Track(rec);
             return rec;
@@ -117,15 +171,19 @@ namespace Cuphead360.Engine
             long t0 = PlayerLoop.Profile ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             try
             {
+                var bound = Bound(b, m);
+                if (bound is Action call && arg == null) { call(); return null; }
+                if (bound is Action<Collider2D> onCollider && (arg == null || arg is Collider2D)) { onCollider((Collider2D)arg); return null; }
+                if (bound is Action<Collision2D> onCollision && (arg == null || arg is Collision2D)) { onCollision((Collision2D)arg); return null; }
                 if (arg == null && MessageSet.NoArgVoid(m))
                 {
                     var calls = b.Calls ??= new Dictionary<MethodInfo, Action>();
-                    if (!calls.TryGetValue(m, out var call))
+                    if (!calls.TryGetValue(m, out var call2))
                     {
-                        try { call = (Action)m.CreateDelegate(typeof(Action), b.Managed); } catch (Exception) { call = null; }
-                        calls[m] = call;
+                        try { call2 = (Action)m.CreateDelegate(typeof(Action), b.Managed); } catch (Exception) { call2 = null; }
+                        calls[m] = call2;
                     }
-                    if (call != null) { call(); return null; }
+                    if (call2 != null) { call2(); return null; }
                 }
                 return m.Invoke(b.Managed, arg == null && MessageSet.Params(m) == 0 ? null : new[] { arg });
             }
@@ -133,6 +191,33 @@ namespace Cuphead360.Engine
             catch (Exception e) { Exceptions.Report(e, b, m.Name); }
             finally { if (t0 != 0) b.ProfTicks += PlayerLoop.SlowCall(t0, b.Managed, m); }
             return null;
+        }
+
+        /// <summary>The delegate bound for this message on this behaviour (made the first time), or null.</summary>
+        static Delegate Bound(NBehaviour b, MethodInfo m)
+        {
+            var keys = b.SentKeys;
+            int n = b.SentCount;
+            for (int i = 0; i < n; i++) if ((object)keys[i] == m) return b.SentCalls[i];
+            if (n == 16) return null;   // sent by name with many methods: the dictionary path
+            Delegate d = null;
+            try
+            {
+                if (m.ReturnType == typeof(void))
+                {
+                    var ps = m.GetParameters();
+                    if (ps.Length == 0) d = m.CreateDelegate(typeof(Action), b.Managed);
+                    else if (ps.Length == 1 && ps[0].ParameterType == typeof(Collider2D)) d = m.CreateDelegate(typeof(Action<Collider2D>), b.Managed);
+                    else if (ps.Length == 1 && ps[0].ParameterType == typeof(Collision2D)) d = m.CreateDelegate(typeof(Action<Collision2D>), b.Managed);
+                }
+            }
+            catch (Exception) { d = null; }
+            if (keys == null) { b.SentKeys = keys = new MethodInfo[4]; b.SentCalls = new Delegate[4]; }
+            else if (n == keys.Length) { Array.Resize(ref b.SentKeys, n * 2); Array.Resize(ref b.SentCalls, n * 2); keys = b.SentKeys; }
+            keys[n] = m;
+            b.SentCalls[n] = d;
+            b.SentCount = n + 1;
+            return d;
         }
 
         /// <summary>Awake once, then OnEnable, for a behaviour whose GameObject is active.</summary>

@@ -255,7 +255,85 @@ namespace Cuphead360.Engine
         public static MeshData Of(Mesh m)
         {
             if (m == null) return null;
-            return meshes.GetValue(m, _ => new MeshData());
+            return meshes.GetValue(m, k => FromAsset(k) ?? new MeshData());
+        }
+
+        // Unity 2017 vertex channel formats: 0 float32, 1 float16, 2 unorm8 colour, ...
+        static readonly int[] formatSize = { 4, 2, 1, 1, 1, 2, 2, 1, 1, 2, 2, 4, 4 };
+
+        /// <summary>
+        /// A mesh asset's positions, colours, first uvs and triangles from its converted tree. A
+        /// MeshFilter's mesh read empty (only meshes made at run time had data): Saltbaker's table
+        /// skews its vertices every frame and threw on the empty array.
+        /// </summary>
+        static MeshData FromAsset(Mesh m)
+        {
+            var src = (Objects.Of(m) as NAsset)?.Source;
+            if (src == null || src.Type != "Mesh") return null;
+            var t = src.Tree;
+            var vd = Tree.Get(t, "m_VertexData");
+            int count = (int)Tree.Int(vd, "m_VertexCount");
+            var data = Tree.Get(vd, "m_DataSize") as byte[];
+            var channels = Tree.List(vd, "m_Channels");
+            if (data == null || count == 0 || channels.Count == 0) return null;
+            // Streams one after another (16-byte aligned); a stream's channels interleave.
+            int streams = 0;
+            foreach (var c in channels) if ((Tree.Int(c, "dimension") & 0xF) > 0) streams = Math.Max(streams, (int)Tree.Int(c, "stream") + 1);
+            var stride = new int[streams];
+            foreach (var c in channels)
+            {
+                int dim = (int)(Tree.Int(c, "dimension") & 0xF);
+                if (dim == 0) continue;
+                int s = (int)Tree.Int(c, "stream");
+                stride[s] = Math.Max(stride[s], (int)Tree.Int(c, "offset") + dim * formatSize[Math.Min(12, (int)Tree.Int(c, "format"))]);
+            }
+            var start = new int[streams];
+            for (int s = 1; s < streams; s++) start[s] = (start[s - 1] + stride[s - 1] * count + 15) & ~15;
+            var md = new MeshData { Vertices = new Vector3[count] };
+            // (channel, float components wanted): 0 position, 2 colour, 3 the first uvs
+            float Comp(int ch, int v, int k)
+            {
+                var c = channels[ch];
+                int s = (int)Tree.Int(c, "stream"), fmt = (int)Tree.Int(c, "format");
+                int at = start[s] + v * stride[s] + (int)Tree.Int(c, "offset") + k * formatSize[Math.Min(12, fmt)];
+                if (fmt == 0) return at + 4 <= data.Length ? BitConverter.ToSingle(data, at) : 0f;
+                if (fmt == 1) return at + 2 <= data.Length ? (float)BitConverter.ToHalf(data, at) : 0f;
+                return at < data.Length ? data[at] / 255f : 0f;
+            }
+            int Dim(int ch) => ch < channels.Count ? (int)(Tree.Int(channels[ch], "dimension") & 0xF) : 0;
+            int pd = Dim(0);
+            for (int v = 0; v < count; v++)
+                md.Vertices[v] = new Vector3(pd > 0 ? Comp(0, v, 0) : 0, pd > 1 ? Comp(0, v, 1) : 0, pd > 2 ? Comp(0, v, 2) : 0);
+            if (Dim(2) >= 4)
+            {
+                md.Colors = new Color32[count];
+                for (int v = 0; v < count; v++)
+                    md.Colors[v] = new Color(Comp(2, v, 0), Comp(2, v, 1), Comp(2, v, 2), Comp(2, v, 3));
+            }
+            int ud = Dim(3);
+            if (ud > 0)
+            {
+                md.Uv[0] = new Vector4[count];
+                for (int v = 0; v < count; v++) md.Uv[0][v] = new Vector4(Comp(3, v, 0), ud > 1 ? Comp(3, v, 1) : 0, 0, 0);
+            }
+            var ib = Tree.Get(t, "m_IndexBuffer") as byte[];
+            bool wide = Tree.Int(t, "m_IndexFormat") == 1;
+            md.SubMeshes.Clear(); md.Topologies.Clear();
+            foreach (var sm in Tree.List(t, "m_SubMeshes"))
+            {
+                int first = (int)Tree.Int(sm, "firstByte"), n = (int)Tree.Int(sm, "indexCount");
+                var idx = new int[ib == null ? 0 : n];
+                for (int i = 0; i < idx.Length; i++)
+                {
+                    int at = first + i * (wide ? 4 : 2);
+                    idx[i] = at + (wide ? 4 : 2) > ib.Length ? 0 : wide ? BitConverter.ToInt32(ib, at) : BitConverter.ToUInt16(ib, at);
+                }
+                md.SubMeshes.Add(idx);
+                md.Topologies.Add((MeshTopology)(int)Tree.Int(sm, "topology"));
+            }
+            if (md.SubMeshes.Count == 0) { md.SubMeshes.Add(new int[0]); md.Topologies.Add(MeshTopology.Triangles); }
+            md.RecalculateBounds();
+            return md;
         }
 
         /// <summary>A copy in dst's arrays where their sizes match (UGUI hands every graphic the same worker mesh).</summary>

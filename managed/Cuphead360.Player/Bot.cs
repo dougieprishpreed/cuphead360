@@ -169,6 +169,28 @@ namespace Cuphead360.Player
                             Next(fld != null ? "SYNTHETIC: DamageReceiver.DEBUG_DO_MEGA_DAMAGE on (player damage x10)" : "DamageReceiver.DEBUG_DO_MEGA_DAMAGE not found");
                             continue;
                         }
+                    case "level":   // level NAME [TIMEOUT]: the game's own SceneLoader.LoadLevel(Levels.NAME), then wait for it
+                        {
+                            int timeout = s.Length > 2 ? I(s[2]) : 3600;
+                            if (t == 0)
+                            {
+                                // Synthetic, as the game's debug level select: any level from wherever the bot is.
+                                levelFrom = Cuphead360.Engine.Scenes.Active?.Name;
+                                Type levels = null, loader = null;
+                                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies()) { levels ??= asm.GetType("Levels"); loader ??= asm.GetType("SceneLoader"); }
+                                var load = loader?.GetMethod("LoadLevel", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                                var ps = load?.GetParameters();
+                                object lv = null;
+                                try { lv = levels != null ? Enum.Parse(levels, s[1]) : null; } catch (ArgumentException) { }
+                                if (load == null || ps.Length != 4 || lv == null) { Next("LoadLevel or Levels." + s[1] + " not found"); continue; }
+                                load.Invoke(null, new[] { lv, Enum.Parse(ps[1].ParameterType, "Fade"), Enum.Parse(ps[2].ParameterType, "Hourglass"), null });
+                                return f;
+                            }
+                            var now = Cuphead360.Engine.Scenes.Active?.Name;
+                            if (now != null && now != levelFrom && now != "scene_load_helper") { Next("SYNTHETIC: SceneLoader.LoadLevel(" + s[1] + ") -> " + now); continue; }
+                            if (t > timeout) { Next("TIMEOUT"); continue; }
+                            return f;
+                        }
                     case "fight":
                         {
                             int timeout = s.Length > 1 ? I(s[1]) : 36000;
@@ -272,7 +294,7 @@ namespace Cuphead360.Player
             return pts;
         }
 
-        string fightScene;
+        string fightScene, levelFrom;
         bool fightEx;
         int jumpUntil, dashUntil, dashCooldown, jumpCooldown;
         readonly Dictionary<NGameObject, Vector3> lastPos = new Dictionary<NGameObject, Vector3>();

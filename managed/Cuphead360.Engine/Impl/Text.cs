@@ -520,7 +520,14 @@ namespace Cuphead360.Engine
     /// <summary>TextGenerator's native state: the generated vertices, characters and lines.</summary>
     public sealed class TextGenState
     {
-        public readonly List<UIVertex> Verts = new List<UIVertex>();
+        // The vertices are made when asked for (Unity's managed TextGenerator reads them to draw),
+        // not by every layout: Text.preferredWidth lays text out for its extents only, and the
+        // equip screens' leader dots ask it once per two dots trimmed, which made a quad of
+        // vertices per character each time (the map's and the levels' equip UI Awake, 0.4-1.6 s on
+        // the console, most of it GC).
+        readonly List<UIVertex> verts = new List<UIVertex>();
+        bool vertsMade = true;
+        public List<UIVertex> Verts { get { if (!vertsMade) MakeVerts(); return verts; } }
         public readonly List<UICharInfo> Chars = new List<UICharInfo>();
         public readonly List<UILineInfo> Lines = new List<UILineInfo>();
         public Rect Extents;
@@ -531,7 +538,7 @@ namespace Cuphead360.Engine
 
         struct Run { public int Start, End; public float Width; }
 
-        sealed class Glyph
+        struct Glyph
         {
             public char C;
             public bool Visible;   // a printable character (not a tag, not a newline)
@@ -540,12 +547,21 @@ namespace Cuphead360.Engine
             public FontStyle Style;
             public CharacterInfo Info;
             public float Advance;
+            public bool Placed;    // in a line (a wrapped line's break character isn't)
+            public float X, Baseline;
         }
+
+        // Kept from layout to layout (and for MakeVerts): glyphs, lines and the tag stacks.
+        Glyph[] glyphs = new Glyph[64];
+        int glyphCount;
+        float glyphScale;
+        readonly List<Run> lines = new List<Run>();
+        Stack<Color32> colors; Stack<int> sizes; Stack<FontStyle> styles;
 
         public bool Populate(string str, Font font, Color color, int fontSize, float scaleFactor, float lineSpacing, FontStyle style, bool richText,
             bool bestFit, int minSize, int maxSize, int vOverflow, int hOverflow, TextAnchor anchor, float extX, float extY, float pivotX, float pivotY)
         {
-            Verts.Clear(); Chars.Clear(); Lines.Clear();
+            verts.Clear(); vertsMade = true; Chars.Clear(); Lines.Clear();
             str = str ?? "";
             var fs = FontState.Of(font);
             if (fs == null) return false;
@@ -574,19 +590,21 @@ namespace Cuphead360.Engine
             out float totalHeight, out bool fitsWidth, bool measureOnly, TextAnchor anchor = TextAnchor.UpperLeft, float extY = 0, float pivotX = 0.5f, float pivotY = 0.5f, int vOverflow = 1)
         {
             // Parse into glyphs (rich text tags become invisible zero-width entries).
-            var glyphs = new List<Glyph>(str.Length);
-            var colors = new Stack<Color32>(); var sizes = new Stack<int>(); var styles = new Stack<FontStyle>();
+            if (glyphs.Length < str.Length) glyphs = new Glyph[Math.Max(str.Length, glyphs.Length * 2)];
+            int n = 0;
+            colors?.Clear(); sizes?.Clear(); styles?.Clear();
             Color32 col = color; int sz = size; FontStyle st = style;
             for (int i = 0; i < str.Length; i++)
             {
                 char c = str[i];
                 if (rich && c == '<' && TryTag(str, i, out int tagEnd, out string tag, out string val, out bool closing))
                 {
+                    colors ??= new Stack<Color32>(); sizes ??= new Stack<int>(); styles ??= new Stack<FontStyle>();
                     if (tag == "color") { if (closing) { if (colors.Count > 0) col = colors.Pop(); } else { colors.Push(col); col = ParseColor(val, col); } }
                     else if (tag == "size") { if (closing) { if (sizes.Count > 0) sz = sizes.Pop(); } else { sizes.Push(sz); if (int.TryParse(val, out int nsz)) sz = nsz; } }
                     else if (tag == "b") { if (closing) { if (styles.Count > 0) st = styles.Pop(); } else { styles.Push(st); st |= FontStyle.Bold; } }
                     else if (tag == "i") { if (closing) { if (styles.Count > 0) st = styles.Pop(); } else { styles.Push(st); st |= FontStyle.Italic; } }
-                    for (int k = i; k <= tagEnd; k++) glyphs.Add(new Glyph { C = str[k], Visible = false, Color = col, Size = sz, Style = st });
+                    for (int k = i; k <= tagEnd; k++) glyphs[n++] = new Glyph { C = str[k], Visible = false, Color = col, Size = sz, Style = st };
                     i = tagEnd;
                     continue;
                 }
@@ -597,16 +615,18 @@ namespace Cuphead360.Engine
                     g.Info = fs.Get(c, px, FontStyle.Normal);
                     g.Advance = g.Info.width / scale;
                 }
-                glyphs.Add(g);
+                glyphs[n++] = g;
             }
+            glyphCount = n;
+            glyphScale = scale;
             // Lines, wrapping at spaces when the rect is too narrow.
             float lineH = fs.LineHeight(size) * lineSpacing;
-            var lines = new List<Run>();
+            lines.Clear();
             int ls = 0; float w = 0; int lastSpace = -1; float wAtSpace = 0;
             fitsWidth = true;
-            for (int i = 0; i < glyphs.Count; i++)
+            for (int i = 0; i < n; i++)
             {
-                var g = glyphs[i];
+                ref var g = ref glyphs[i];
                 if (g.C == '\n') { lines.Add(new Run { Start = ls, End = i, Width = w }); ls = i + 1; w = 0; lastSpace = -1; continue; }
                 if (!g.Visible) continue;
                 if (g.C == ' ') { lastSpace = i; wAtSpace = w; }
@@ -618,20 +638,22 @@ namespace Cuphead360.Engine
                 }
                 w += g.Advance;
             }
-            lines.Add(new Run { Start = ls, End = glyphs.Count, Width = w });
+            lines.Add(new Run { Start = ls, End = n, Width = w });
             foreach (var r in lines) if (r.Width > extX + 0.01f) fitsWidth = hOverflow == 1;
             totalHeight = lines.Count * lineH;
             if (measureOnly) return true;
 
-            // Placement inside the rect (origin at the pivot).
+            // Placement inside the rect (origin at the pivot): characters and lines now, the
+            // vertices from the glyphs' places when asked for (MakeVerts).
             float left = -pivotX * extX, top = (1 - pivotY) * extY;
             int ah = (int)anchor % 3, av = (int)anchor / 3;
             float blockTop = av == 0 ? top : av == 1 ? top - (extY - totalHeight) / 2 : top - (extY - totalHeight);
             float ascent = fs.Ascent(size);
             float lineGap = lineH - fs.LineHeight(size);
-            var verts = new UIVertex[(glyphs.Count + 1) * 4];
-            var chars = new UICharInfo[glyphs.Count + 1];
-            int li = 0;
+            System.Runtime.InteropServices.CollectionsMarshal.SetCount(Chars, n + 1);
+            var chars = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(Chars);
+            chars.Clear();
+            for (int i = 0; i < n; i++) glyphs[i].Placed = false;
             float cursorY = blockTop;
             float minX = float.MaxValue, maxX = float.MinValue;
             foreach (var r in lines)
@@ -644,34 +666,49 @@ namespace Cuphead360.Engine
                 Lines.Add(new UILineInfo { startCharIdx = r.Start, height = (int)Math.Round(lineH), topY = cursorY, leading = lineGap });
                 for (int i = r.Start; i < r.End; i++)
                 {
-                    var g = glyphs[i];
+                    ref var g = ref glyphs[i];
                     chars[i] = new UICharInfo { cursorPos = new Vector2(x, cursorY), charWidth = g.Visible ? g.Advance : 0 };
-                    if (g.Visible && g.Info.uv.width != 0)
-                    {
-                        var ci = g.Info;
-                        float x0 = x + ci.vert.x / scale, y0 = baseline + ci.vert.y / scale;
-                        float x1 = x0 + ci.vert.width / scale, y1 = y0 + ci.vert.height / scale;
-                        var uv = ci.uv;
-                        verts[i * 4 + 0] = V(x0, y0, uv.xMin, uv.yMin, g.Color);
-                        verts[i * 4 + 1] = V(x1, y0, uv.xMax, uv.yMin, g.Color);
-                        verts[i * 4 + 2] = V(x1, y1, uv.xMax, uv.yMax, g.Color);
-                        verts[i * 4 + 3] = V(x0, y1, uv.xMin, uv.yMax, g.Color);
-                    }
-                    else for (int k = 0; k < 4; k++) verts[i * 4 + k] = V(x, baseline, 0, 0, new Color32(0, 0, 0, 0));
+                    g.Placed = true; g.X = x; g.Baseline = baseline;
                     if (g.Visible) x += g.Advance;
                 }
                 // The break character (space/newline) ending a wrapped line.
-                if (r.End < glyphs.Count && chars[r.End].charWidth == 0) chars[r.End] = new UICharInfo { cursorPos = new Vector2(x, cursorY) };
+                if (r.End < n && chars[r.End].charWidth == 0) chars[r.End] = new UICharInfo { cursorPos = new Vector2(x, cursorY) };
                 cursorY -= lineH;
-                li++;
             }
-            for (int k = 0; k < 4; k++) verts[glyphs.Count * 4 + k] = V(0, 0, 0, 0, new Color32(0, 0, 0, 0));
-            chars[glyphs.Count] = new UICharInfo { cursorPos = new Vector2(left, cursorY) };
-            Verts.AddRange(verts);
-            Chars.AddRange(chars);
+            chars[n] = new UICharInfo { cursorPos = new Vector2(left, cursorY) };
+            vertsMade = false;
             if (minX > maxX) { minX = maxX = left; }
             Extents = new Rect(minX, blockTop - totalHeight, maxX - minX, totalHeight);
             return true;
+        }
+
+        /// <summary>The last layout's vertices: a quad per glyph in a line, zeros for the others, four at the end.</summary>
+        void MakeVerts()
+        {
+            vertsMade = true;
+            int n = glyphCount;
+            float scale = glyphScale;
+            System.Runtime.InteropServices.CollectionsMarshal.SetCount(verts, (n + 1) * 4);
+            var v = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(verts);
+            v.Clear();
+            for (int i = 0; i < n; i++)
+            {
+                ref var g = ref glyphs[i];
+                if (!g.Placed) continue;
+                if (g.Visible && g.Info.uv.width != 0)
+                {
+                    var ci = g.Info;
+                    float x0 = g.X + ci.vert.x / scale, y0 = g.Baseline + ci.vert.y / scale;
+                    float x1 = x0 + ci.vert.width / scale, y1 = y0 + ci.vert.height / scale;
+                    var uv = ci.uv;
+                    v[i * 4 + 0] = V(x0, y0, uv.xMin, uv.yMin, g.Color);
+                    v[i * 4 + 1] = V(x1, y0, uv.xMax, uv.yMin, g.Color);
+                    v[i * 4 + 2] = V(x1, y1, uv.xMax, uv.yMax, g.Color);
+                    v[i * 4 + 3] = V(x0, y1, uv.xMin, uv.yMax, g.Color);
+                }
+                else for (int k = 0; k < 4; k++) v[i * 4 + k] = V(g.X, g.Baseline, 0, 0, new Color32(0, 0, 0, 0));
+            }
+            for (int k = 0; k < 4; k++) v[n * 4 + k] = V(0, 0, 0, 0, new Color32(0, 0, 0, 0));
         }
 
         static UIVertex V(float x, float y, float u, float v, Color32 c)

@@ -31,10 +31,90 @@ typedef struct ch360_ogg {
     int channels;
     int file;            /* its pack entry (file -1: a loose file) */
     unsigned offset;
+    float* ring;         /* frames decoded ahead (long clips), AHEAD_FRAMES of them */
+    unsigned head, count;
+    int ended;           /* the decoder has reached the end */
 } ch360_ogg;
 
 static ch360_ogg oggs[OGG_MAX];
 static const char* ogg_root = ".";
+
+/* Decoding ahead. A streamed clip's Vorbis decoding ran on the game's thread
+ * inside ogg_read: 4.8 ms of each run-and-gun frame and 2-3 ms of the map's
+ * on the console (the fourteenth run). A thread on another core (hardware
+ * thread 2; the game runs on 0) keeps each long clip's ring of decoded frames
+ * full, and ogg_read copies from it, decoding whatever the ring lacks itself.
+ * Each clip's decoder is used in the same order either way, so the samples are
+ * the same. Short clips are decoded whole when first played, as before. */
+enum { AHEAD_FRAMES = 16384, AHEAD_CHUNK = 1024, AHEAD_MIN_LENGTH = 65536, AHEAD_HW_THREAD = 2 };
+static srt_mutex* ogg_locks[OGG_MAX];   /* a clip's decoder and ring */
+static srt_mutex* wake_lock;
+static srt_cond* wake_cond;
+static int wake_pending, ahead_state;   /* 0 not started, 1 running, -1 failed */
+
+static void ahead_wake(void) {
+    if (ahead_state <= 0) return;
+    srt_mutex_lock(wake_lock);
+    wake_pending = 1;
+    srt_cond_broadcast(wake_cond);
+    srt_mutex_unlock(wake_lock);
+}
+
+/* One chunk into the clip's ring if it has room (its lock held): 1 if it decoded. */
+static int ahead_fill(ch360_ogg* o) {
+    unsigned w, room;
+    int got;
+    if (o->v == NULL || o->ring == NULL || o->ended || o->count + AHEAD_CHUNK > AHEAD_FRAMES) return 0;
+    w = (o->head + o->count) % AHEAD_FRAMES;
+    room = AHEAD_FRAMES - w;   /* to the ring's end: the next chunk wraps */
+    if (room > AHEAD_CHUNK) room = AHEAD_CHUNK;
+    got = stb_vorbis_get_samples_float_interleaved(o->v, o->channels, o->ring + (size_t)w * o->channels,
+                                                   (int)room * o->channels);
+    if (got <= 0) {
+        o->ended = 1;
+        return 0;
+    }
+    o->count += (unsigned)got;
+    return 1;
+}
+
+static void ahead_main(void* arg) {
+    (void)arg;
+    for (;;) {
+        int h, busy = 0;
+        for (h = 0; h < OGG_MAX; h++) {
+            srt_mutex_lock(ogg_locks[h]);
+            busy |= ahead_fill(&oggs[h]);
+            srt_mutex_unlock(ogg_locks[h]);
+        }
+        if (!busy) {
+            srt_mutex_lock(wake_lock);
+            while (!wake_pending) srt_cond_wait(wake_cond, wake_lock);
+            wake_pending = 0;
+            srt_mutex_unlock(wake_lock);
+        }
+    }
+}
+
+static void ahead_start(void) {
+    int h;
+    if (ahead_state != 0) return;
+    ahead_state = -1;
+    for (h = 0; h < OGG_MAX; h++)
+        if ((ogg_locks[h] = srt_mutex_create()) == NULL) return;
+    wake_lock = srt_mutex_create();
+    wake_cond = srt_cond_create();
+    if (wake_lock == NULL || wake_cond == NULL) return;
+    /* stb_vorbis decodes with alloca'd scratch: a generous stack */
+    if (srt_thread_start(ahead_main, NULL, 256 * 1024, AHEAD_HW_THREAD) != NULL) ahead_state = 1;
+}
+
+static void ogg_lock(U32 h) {
+    if (ahead_state > 0) srt_mutex_lock(ogg_locks[h]);
+}
+static void ogg_unlock(U32 h) {
+    if (ahead_state > 0) srt_mutex_unlock(ogg_locks[h]);
+}
 
 /* Clips from the audio pack (ch360_pack.c) when there is one. The bytes of
  * clips closed lately are kept (CACHE_BYTES) for their next play: a clip
@@ -161,6 +241,7 @@ U32 i5_ch3608_oggX5Fopen(wasmModuleInstance* inst, U32 path, U32 len, U32 info) 
     size_t root = strlen(ogg_root);
     unsigned char* data;
     int size = 0, err = 0, h;
+    unsigned length;
     stb_vorbis* v;
     stb_vorbis_info vi;
     (void)inst;
@@ -199,13 +280,22 @@ opened:
         return (U32)-1;
     }
     vi = stb_vorbis_get_info(v);
+    length = stb_vorbis_stream_length_in_samples(v);
+    if (length >= AHEAD_MIN_LENGTH) ahead_start();
+    ogg_lock((U32)h);
     oggs[h].v = v;
     oggs[h].data = data;
     oggs[h].size = size;
     oggs[h].channels = vi.channels;
+    oggs[h].head = oggs[h].count = 0;
+    oggs[h].ended = 0;
+    oggs[h].ring = length >= AHEAD_MIN_LENGTH && ahead_state > 0
+                       ? (float*)malloc((size_t)AHEAD_FRAMES * vi.channels * sizeof(float)) : NULL;
+    ogg_unlock((U32)h);
+    if (oggs[h].ring != NULL) ahead_wake();
     put_u32(srt_mem_ptr(info), (U32)vi.channels);
     put_u32(srt_mem_ptr(info) + 4, (U32)vi.sample_rate);
-    put_u32(srt_mem_ptr(info) + 8, (U32)stb_vorbis_stream_length_in_samples(v));
+    put_u32(srt_mem_ptr(info) + 8, (U32)length);
     return (U32)h;
 }
 
@@ -220,11 +310,31 @@ U32 i5_ch3608_oggX5Fread(wasmModuleInstance* inst, U32 h, U32 samples, U32 frame
     o = &oggs[h];
     if (frames == 0 || frames > 1u << 20 || !srt_mem_ok(samples, frames * (U32)o->channels * 4)) return 0;
     dst = srt_mem_ptr(samples);
-    while (done < frames) {
+    ogg_lock(h);
+    /* what the thread decoded ahead, then the rest here */
+    while (done < frames && o->count > 0) {
+        unsigned n = o->count, i;
+        const float* src = o->ring + (size_t)o->head * o->channels;
+        if (n > frames - done) n = frames - done;
+        if (n > AHEAD_FRAMES - o->head) n = AHEAD_FRAMES - o->head;
+        for (i = 0; i < n * (unsigned)o->channels; i++) {
+            union { float f; U32 u; } s;
+            s.f = src[i];
+            put_u32(dst, s.u);
+            dst += 4;
+        }
+        o->head = (o->head + n) % AHEAD_FRAMES;
+        o->count -= n;
+        done += n;
+    }
+    while (done < frames && !o->ended) {
         int want = (int)(frames - done), n, i;
         if (want > 4096 / o->channels) want = 4096 / o->channels;
         n = stb_vorbis_get_samples_float_interleaved(o->v, o->channels, tmp, want * o->channels);
-        if (n <= 0) break;
+        if (n <= 0) {
+            o->ended = 1;
+            break;
+        }
         for (i = 0; i < n * o->channels; i++) {
             union { float f; U32 u; } s;
             s.f = tmp[i];
@@ -233,21 +343,34 @@ U32 i5_ch3608_oggX5Fread(wasmModuleInstance* inst, U32 h, U32 samples, U32 frame
         }
         done += (U32)n;
     }
+    ogg_unlock(h);
+    if (o->ring != NULL) ahead_wake();
     return done;
 }
 
 /* ogg_seek(handle, frame): 1 if the next read starts there. */
 U32 i5_ch3608_oggX5Fseek(wasmModuleInstance* inst, U32 h, U32 frame) {
+    U32 ok;
     (void)inst;
     if (h >= OGG_MAX || oggs[h].v == NULL) return 0;
-    return frame == 0 ? (U32)stb_vorbis_seek_start(oggs[h].v) : (U32)stb_vorbis_seek(oggs[h].v, frame);
+    ogg_lock(h);
+    ok = frame == 0 ? (U32)stb_vorbis_seek_start(oggs[h].v) : (U32)stb_vorbis_seek(oggs[h].v, frame);
+    oggs[h].head = oggs[h].count = 0;
+    oggs[h].ended = 0;
+    ogg_unlock(h);
+    if (oggs[h].ring != NULL) ahead_wake();
+    return ok;
 }
 
 void i5_ch3609_oggX5Fclose(wasmModuleInstance* inst, U32 h) {
     (void)inst;
     if (h >= OGG_MAX || oggs[h].v == NULL) return;
+    ogg_lock(h);
     stb_vorbis_close(oggs[h].v);
     cache_put(oggs[h].data, oggs[h].size, oggs[h].file, oggs[h].offset);
+    free(oggs[h].ring);
+    oggs[h].ring = NULL;
     oggs[h].v = NULL;
     oggs[h].data = NULL;
+    ogg_unlock(h);
 }

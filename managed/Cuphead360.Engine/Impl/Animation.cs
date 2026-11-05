@@ -208,6 +208,10 @@ namespace Cuphead360.Engine
             public bool Loop, WriteDefaults = true;
             public int Clip = -1;
             public Transition[] Transitions = new Transition[0];
+            /// <summary>A 1D blend tree: its parameter, the children's thresholds and clips (null otherwise).</summary>
+            public uint BlendParam;
+            public float[] BlendThresholds;
+            public int[] BlendClips;
         }
         public sealed class Selector { public Transition[] Transitions = new Transition[0]; public bool IsEntry; public uint FullPath; }
         public sealed class Machine
@@ -313,9 +317,28 @@ namespace Cuphead360.Engine
                         var nodes = Tree.List(Tree.Get(bts[0], "data"), "m_NodeArray");
                         if (nodes.Count > 0)
                         {
-                            long clipId = Tree.Int(Tree.Get(nodes[0], "data"), "m_ClipID", -1);
+                            var root = Tree.Get(nodes[0], "data");
+                            long clipId = Tree.Int(root, "m_ClipID", -1);
                             if (clipId >= 0 && clipId < 0xFFFFFFFFL) st.Clip = (int)clipId;
-                            if (nodes.Count > 1) AssetDb.Problem("blend tree with " + nodes.Count + " nodes in " + co.File.Name + " " + co.PathId + " (first clip only)");
+                            var kids = Tree.List(root, "m_ChildIndices");
+                            var thresholds = Tree.List(Tree.Get(Tree.Get(root, "m_Blend1dData"), "data"), "m_ChildThresholdArray");
+                            if (nodes.Count > 1 && Tree.Int(root, "m_BlendType") == 0 && kids.Count > 0 && thresholds.Count == kids.Count)
+                            {
+                                // A 1D blend tree of clips (Werner Werman's saw blade, six by a float): the
+                                // child weighing most plays (what a sprite animation shows of a blend).
+                                st.BlendParam = (uint)Tree.Int(root, "m_BlendEventID");
+                                st.BlendThresholds = new float[kids.Count];
+                                st.BlendClips = new int[kids.Count];
+                                for (int k = 0; k < kids.Count; k++)
+                                {
+                                    int node = (int)Convert.ToInt64(kids[k]);
+                                    long cid = node >= 0 && node < nodes.Count ? Tree.Int(Tree.Get(nodes[node], "data"), "m_ClipID", -1) : -1;
+                                    st.BlendClips[k] = cid >= 0 && cid < 0xFFFFFFFFL ? (int)cid : -1;
+                                    st.BlendThresholds[k] = Convert.ToSingle(thresholds[k]);
+                                }
+                                if (st.Clip < 0) st.Clip = st.BlendClips[0];
+                            }
+                            else if (nodes.Count > 1) AssetDb.Problem("blend tree with " + nodes.Count + " nodes in " + co.File.Name + " " + co.PathId + " (first clip only)");
                         }
                     }
                     states.Add(st);
@@ -451,6 +474,8 @@ namespace Cuphead360.Engine
             public float TransitionTime, TransitionLength;
             public (int state, float normalizedTime)? PendingPlay;
             public (int state, float duration, float offset, bool fixedDuration)? PendingCross;
+            /// <summary>Entered at Rebind: the entry's conditions are looked at again on the first update.</summary>
+            public bool EntryPending;
         }
 
         public override void Load(ChobObject co, SceneBuild b)
@@ -486,19 +511,22 @@ namespace Cuphead360.Engine
             Data = ControllerData.Of(Controller);
             Initialized = Data != null;
             if (Data == null) { Layers = new LayerState[0]; return; }
+            // The parameters before the entries: an entry transition's conditions read them (a new
+            // animator's empty arrays threw there, and its object's activation stopped: the plane's
+            // Peashooter bullets).
+            if (!keepState || Floats.Length != Data.Params.Length)
+            {
+                int n = Data.Params.Length;
+                Floats = new float[n]; Ints = new int[n]; Bools = new bool[n];
+                for (int i = 0; i < n; i++) { var p = Data.Params[i]; Floats[i] = p.DefaultFloat; Ints[i] = p.DefaultInt; Bools[i] = p.DefaultBool; }
+            }
             var old = Layers;
             Layers = new LayerState[Data.Layers.Length];
             for (int i = 0; i < Layers.Length; i++)
             {
                 var l = Layers[i] = new LayerState { Weight = Data.Layers[i].DefaultWeight };
                 if (keepState && old != null && i < old.Length) { l.Current = old[i].Current; l.Weight = old[i].Weight; }
-                else l.Current = new StatePlay { State = Entry(Data.Machines[Data.Layers[i].Machine]) };
-            }
-            if (!keepState || Floats.Length != Data.Params.Length)
-            {
-                int n = Data.Params.Length;
-                Floats = new float[n]; Ints = new int[n]; Bools = new bool[n];
-                for (int i = 0; i < n; i++) { var p = Data.Params[i]; Floats[i] = p.DefaultFloat; Ints[i] = p.DefaultInt; Bools[i] = p.DefaultBool; }
+                else { l.Current = new StatePlay { State = Entry(Data.Machines[Data.Layers[i].Machine]) }; l.EntryPending = true; }
             }
             // Every property any clip of the controller animates is under the animator's control.
             foreach (var c in Data.Clips)
@@ -571,10 +599,30 @@ namespace Cuphead360.Engine
             return index >= 0 && index < m.States.Length ? m.States[index] : null;
         }
 
+        /// <summary>The clip a state plays now: its own, or for a 1D blend tree the child weighing most.</summary>
+        public int ClipIndex(ControllerData.State s)
+        {
+            if (s == null) return -1;
+            var th = s.BlendThresholds;
+            if (th == null) return s.Clip;
+            int pi = ParamIndex(s.BlendParam);
+            float v = pi >= 0 ? Floats[pi] : 0f;
+            if (v <= th[0]) return s.BlendClips[0];
+            for (int k = 0; k + 1 < th.Length; k++)
+                if (v < th[k + 1])
+                {
+                    // between two thresholds: the nearer one carries half the weight or more
+                    float w = th[k + 1] > th[k] ? (th[k + 1] - v) / (th[k + 1] - th[k]) : 1f;
+                    return w >= 0.5f ? s.BlendClips[k] : s.BlendClips[k + 1];
+                }
+            return s.BlendClips[th.Length - 1];
+        }
+
         public float StateLength(int layer, int index)
         {
             var s = StateAt(layer, index);
-            var c = s != null && s.Clip >= 0 && s.Clip < Data.Clips.Length ? Data.Clips[s.Clip] : null;
+            int ci = ClipIndex(s);
+            var c = ci >= 0 && ci < Data.Clips.Length ? Data.Clips[ci] : null;
             return c == null ? 1f : Math.Max(c.Length, 1e-4f);
         }
 
@@ -650,6 +698,17 @@ namespace Cuphead360.Engine
         void UpdateLayer(int li, float dt)
         {
             var l = Layers[li];
+            if (l.EntryPending)
+            {
+                // Unity takes the entry's transitions at the animator's first update, so parameters
+                // set since it was enabled (Awake, OnEnable, Start: a bullet's variant) choose the state.
+                l.EntryPending = false;
+                if (l.PendingPlay == null && l.PendingCross == null && l.Next == null && l.Current.Time == 0f)
+                {
+                    int e = Entry(Data.Machines[Data.Layers[li].Machine]);
+                    if (e != l.Current.State) l.Current.State = e;
+                }
+            }
             l.Current.Prev = l.Current.Time;
             if (l.Next != null) l.Next.Prev = l.Next.Time;
             if (l.PendingPlay is (int ps, float pn))
@@ -1026,8 +1085,9 @@ namespace Cuphead360.Engine
         {
             if (p == null || weight <= 0f) return;
             var st = StateAt(li, p.State);
-            if (st == null || st.Clip < 0 || st.Clip >= Data.Clips.Length || Data.Clips[st.Clip] == null) return;
-            var clip = Data.Clips[st.Clip];
+            int ci = ClipIndex(st);
+            if (ci < 0 || ci >= Data.Clips.Length || Data.Clips[ci] == null) return;
+            var clip = Data.Clips[ci];
             float len = clip.Length;
             float t = p.Time;
             if (len > 0f)
@@ -1171,8 +1231,9 @@ namespace Cuphead360.Engine
         void FireEvents(int li, StatePlay p, float weight)
         {
             var st = StateAt(li, p.State);
-            if (st == null || st.Clip < 0 || st.Clip >= Data.Clips.Length) return;
-            var clip = Data.Clips[st.Clip];
+            int ci = ClipIndex(st);
+            if (ci < 0 || ci >= Data.Clips.Length) return;
+            var clip = Data.Clips[ci];
             if (clip == null || clip.Events.Length == 0) return;
             float len = clip.Length;
             float a = p.Prev, b = p.Time;
@@ -1322,7 +1383,8 @@ namespace Cuphead360.Engine
             info.m_SpeedMultiplier = 1f;
             if (s.SpeedParam != 0) { int pi = a.ParamIndex(s.SpeedParam); if (pi >= 0) info.m_SpeedMultiplier = a.Floats[pi]; }
             info.m_Tag = (int)s.TagId;
-            var c = s.Clip >= 0 && s.Clip < a.Data.Clips.Length ? a.Data.Clips[s.Clip] : null;
+            int ci = a.ClipIndex(s);
+            var c = ci >= 0 && ci < a.Data.Clips.Length ? a.Data.Clips[ci] : null;
             info.m_Loop = (s.Loop || (c?.Loop ?? false)) ? 1 : 0;
             return info;
         }
@@ -1505,9 +1567,10 @@ namespace Cuphead360.Engine
             var l = a.Layers[layerIndex];
             var p = current ? l.Current : l.Next;
             var s = p == null ? null : a.StateAt(layerIndex, p.State);
-            if (s == null || s.Clip < 0 || s.Clip >= a.Data.ClipObjects.Length || a.Data.ClipObjects[s.Clip] == null) return list;
+            int ci = a.ClipIndex(s);
+            if (ci < 0 || ci >= a.Data.ClipObjects.Length || a.Data.ClipObjects[ci] == null) return list;
             float w = l.Next != null && l.TransitionLength > 0 ? Math.Min(1f, l.TransitionTime / l.TransitionLength) : 0f;
-            list.Add(new AnimatorClipInfo { m_ClipInstanceID = Objects.Of(a.Data.ClipObjects[s.Clip])?.InstanceId ?? 0, m_Weight = current ? 1f - w : w });
+            list.Add(new AnimatorClipInfo { m_ClipInstanceID = Objects.Of(a.Data.ClipObjects[ci])?.InstanceId ?? 0, m_Weight = current ? 1f - w : w });
             return list;
         }
         public static AnimatorClipInfo[] UnityEngine_Animator__GetCurrentAnimatorClipInfo(Animator self, int layerIndex) => ClipInfos(self, layerIndex, true).ToArray();

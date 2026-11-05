@@ -34,12 +34,16 @@ namespace Cuphead360.Engine
         }
         public static bool UnityEngine_Object__DoesObjectWithInstanceIDExist(int instanceID) => Objects.ByInstanceId(instanceID) != null;
 
+        static readonly string traceDestroy = Environment.GetEnvironmentVariable("CH360_TRACE_RELEASE");
+
         public static void UnityEngine_Object__Destroy(UObject obj, float t)
         {
             var o = Objects.Of(obj);
             if (o == null) return;
             if (o is NComponent c && !(o is NTransform) && t <= 0f && c is NBehaviour b0) { /* deferred like everything else */ }
             if (o is NTransform) { Log.Line("Destroying a Transform is not allowed: " + o.Name); return; }
+            if (traceDestroy != null && o.Name != null && o.Name.Contains(traceDestroy))
+                Log.Line($"TRACE Destroy({o.Name}, {t}) frame {Clock.FrameCount}\n{Environment.StackTrace}");
             PlayerLoop.QueueDestroy(o, t);
         }
         public static void UnityEngine_Object__DestroyObject(UObject obj, float t) => UnityEngine_Object__Destroy(obj, t);
@@ -404,6 +408,97 @@ namespace Cuphead360.Engine
         public static void UnityEngine_Quaternion__INTERNAL_CALL_Inverse(ref Quaternion rotation, out Quaternion value) => value = MathX.Inverse(rotation);
         public static void UnityEngine_Quaternion__INTERNAL_CALL_AngleAxis(float angle, ref Vector3 axis, out Quaternion value) => value = MathX.AngleAxisRad(angle * Mathf.Deg2Rad, axis);
         public static void UnityEngine_Quaternion__INTERNAL_CALL_AxisAngle(ref Vector3 axis, float angle, out Quaternion value) => value = MathX.AngleAxisRad(angle, axis);
+
+        /// <summary>
+        /// Unity's native Vector3.RotateTowards: the direction turned toward the target's by at most
+        /// maxRadiansDelta, the length moved toward its by at most maxMagnitudeDelta (missing until
+        /// round 19: Cagney Carnation's level asked it 220 times in a fight and got zero).
+        /// </summary>
+        public static void UnityEngine_Vector3__INTERNAL_CALL_RotateTowards(ref Vector3 current, ref Vector3 target, float maxRadiansDelta, float maxMagnitudeDelta, out Vector3 value)
+        {
+            const float eps = 0.00001f;
+            float lm = current.magnitude, rm = target.magnitude;
+            if (lm > eps && rm > eps)
+            {
+                Vector3 ln = current / lm, rn = target / rm;
+                float dot = Vector3.Dot(ln, rn);
+                if (dot > 1f - eps) { value = Vector3.MoveTowards(current, target, maxMagnitudeDelta); return; }
+                Vector3 axis;
+                float angle;
+                if (dot < -1f + eps) { axis = OrthoNormalFast(ln); angle = maxRadiansDelta; }
+                else { axis = Vector3.Cross(ln, rn).normalized; angle = Math.Min(maxRadiansDelta, (float)Math.Acos(dot)); }
+                var rotated = MathX.AngleAxisRad(angle, axis) * ln;
+                float d = rm - lm;
+                value = rotated * (d > 0f ? lm + Math.Min(d, maxMagnitudeDelta) : lm - Math.Min(-d, maxMagnitudeDelta));
+                return;
+            }
+            value = Vector3.MoveTowards(current, target, maxMagnitudeDelta);
+        }
+
+        /// <summary>A unit vector at right angles to n (Unity's OrthoNormalVectorFast).</summary>
+        static Vector3 OrthoNormalFast(Vector3 n)
+        {
+            if (Math.Abs(n.z) > 0.70710678f)
+            {
+                float k = 1f / (float)Math.Sqrt(n.y * n.y + n.z * n.z);
+                return new Vector3(0f, -n.z * k, n.y * k);
+            }
+            float k2 = 1f / (float)Math.Sqrt(n.x * n.x + n.y * n.y);
+            return new Vector3(-n.y * k2, n.x * k2, 0f);
+        }
+
+        /// <summary>Bounds.Contains: the point inside the box, faces included (Unity's AABB::IsInside).</summary>
+        public static bool UnityEngine_Bounds__INTERNAL_CALL_Internal_Contains(ref Bounds m, ref Vector3 point)
+        {
+            Vector3 c = m.center, e = m.extents;
+            return !(point.x < c.x - e.x || point.x > c.x + e.x || point.y < c.y - e.y || point.y > c.y + e.y || point.z < c.z - e.z || point.z > c.z + e.z);
+        }
+
+        /// <summary>ColorUtility.TryParseHtmlString's native half: #RGB, #RGBA, #RRGGBB, #RRGGBBAA or a colour name.</summary>
+        public static bool UnityEngine_ColorUtility__DoTryParseHtmlColor(string htmlString, out Color32 color)
+        {
+            color = new Color32(0, 0, 0, 255);
+            if (string.IsNullOrEmpty(htmlString)) return false;
+            string s = htmlString.Trim();
+            if (s[0] == '#')
+            {
+                string h = s.Substring(1);
+                if (!uint.TryParse(h, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out uint v)) return false;
+                byte N(uint x) => (byte)(x * 17);   // one hex digit spread over a byte
+                switch (h.Length)
+                {
+                    case 3: color = new Color32(N(v >> 8 & 15), N(v >> 4 & 15), N(v & 15), 255); return true;
+                    case 4: color = new Color32(N(v >> 12 & 15), N(v >> 8 & 15), N(v >> 4 & 15), N(v & 15)); return true;
+                    case 6: color = new Color32((byte)(v >> 16), (byte)(v >> 8), (byte)v, 255); return true;
+                    case 8: color = new Color32((byte)(v >> 24), (byte)(v >> 16), (byte)(v >> 8), (byte)v); return true;
+                    default: return false;
+                }
+            }
+            switch (s.ToLowerInvariant())
+            {
+                case "red": color = new Color32(255, 0, 0, 255); return true;
+                case "cyan": case "aqua": color = new Color32(0, 255, 255, 255); return true;
+                case "blue": color = new Color32(0, 0, 255, 255); return true;
+                case "darkblue": color = new Color32(0, 0, 160, 255); return true;
+                case "lightblue": color = new Color32(173, 216, 230, 255); return true;
+                case "purple": color = new Color32(128, 0, 128, 255); return true;
+                case "yellow": color = new Color32(255, 255, 0, 255); return true;
+                case "lime": color = new Color32(0, 255, 0, 255); return true;
+                case "fuchsia": case "magenta": color = new Color32(255, 0, 255, 255); return true;
+                case "white": color = new Color32(255, 255, 255, 255); return true;
+                case "silver": color = new Color32(192, 192, 192, 255); return true;
+                case "grey": case "gray": color = new Color32(128, 128, 128, 255); return true;
+                case "black": color = new Color32(0, 0, 0, 255); return true;
+                case "orange": color = new Color32(255, 165, 0, 255); return true;
+                case "brown": color = new Color32(165, 42, 42, 255); return true;
+                case "maroon": color = new Color32(128, 0, 0, 255); return true;
+                case "green": color = new Color32(0, 128, 0, 255); return true;
+                case "olive": color = new Color32(128, 128, 0, 255); return true;
+                case "navy": color = new Color32(0, 0, 128, 255); return true;
+                case "teal": color = new Color32(0, 128, 128, 255); return true;
+                default: return false;
+            }
+        }
         public static void UnityEngine_Quaternion__INTERNAL_CALL_Slerp(ref Quaternion a, ref Quaternion b, float t, out Quaternion value) => value = MathX.Slerp(a, b, Mathf.Clamp01(t));
         public static void UnityEngine_Quaternion__INTERNAL_CALL_SlerpUnclamped(ref Quaternion a, ref Quaternion b, float t, out Quaternion value) => value = MathX.Slerp(a, b, t);
         public static void UnityEngine_Quaternion__INTERNAL_CALL_Lerp(ref Quaternion a, ref Quaternion b, float t, out Quaternion value) => value = MathX.Lerp(a, b, Mathf.Clamp01(t));

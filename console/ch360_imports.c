@@ -683,19 +683,24 @@ void ch360_staged_name(const char* key, size_t len, char* out) {
 }
 
 int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsigned memory_mb) {
-    /* The GC keeps its own small gen0 budget (frequent, cheap gen0 GCs) and
-     * conserve-memory mode, so the linear memory, which never shrinks, stays
-     * close to the live heap. An 8 MB gen0 budget (DOTNET_GCgen0size=800000;
-     * hex, no 0x) made every GC a gen1 and half of them gen2: 16.4 s of pauses
-     * over the native bot run against 3.4 s (round 10). */
-    static const char* const env[3] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCConserveMemory=7" };
+    /* The GC keeps its own small gen0 budget (frequent, cheap gen0 GCs): an
+     * 8 MB gen0 budget (DOTNET_GCgen0size=800000; hex, no 0x) made every GC a
+     * gen1 and half of them gen2: 16.4 s of pauses over the native bot run
+     * against 3.4 s (round 10). The parsed-tree cache is small (4 MB
+     * estimated): its boxed values were most of the heap's objects, which
+     * every gen2 marks and moves. With that, conserve-memory mode (7 until
+     * round 19) only added gen2s: off, the Forest Follies run had 10 gen2s
+     * against 20, a third less pause, and its linear memory peaked 16 MB
+     * lower (round 19). */
+    static const char* const env[4] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCConserveMemory=0",
+                                        "CH360_TREE_BUDGET_MB=4" };
     srt_config cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.root_dir = root_dir;
     ch360_ogg_root(root_dir);
     cfg.argc = argc;
     cfg.argv = argv;
-    cfg.envc = 3;
+    cfg.envc = (int)(sizeof(env) / sizeof(env[0]));
     cfg.envp = env;
 #ifndef __XSDK__
     {

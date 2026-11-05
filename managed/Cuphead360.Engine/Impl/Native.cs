@@ -23,6 +23,8 @@ namespace Cuphead360.Engine
         public HideFlags Flags;
         public IntPtr Block;
         public bool Destroyed;
+        /// <summary>Object.Destroy was called on it this frame (it goes at the frame's end).</summary>
+        public bool PendingDestroy;
         /// <summary>Loaded from game data (an asset or a scene object), not created at run time.</summary>
         public bool Persistent;
     }
@@ -33,22 +35,35 @@ namespace Cuphead360.Engine
         public NTransform Transform;
         public int Layer;
         public string Tag = "Untagged";
-        public bool ActiveSelf = true;
+        bool activeSelf = true, isAsset, building;
+        public bool ActiveSelf { get => activeSelf; set { if (activeSelf != value) { activeSelf = value; ActiveVersion++; } } }
         /// <summary>Scene handle; 0 after DontDestroyOnLoad.</summary>
         public int Scene;
         public bool DontDestroy;
         /// <summary>Part of a prefab asset: never awake, updated or found as a scene object.</summary>
-        public bool IsAsset;
+        public bool IsAsset { get => isAsset; set { if (isAsset != value) { isAsset = value; ActiveVersion++; } } }
         /// <summary>Part of a scene still being built over frames (SceneBuild.Building): inactive until it activates.</summary>
-        public bool Building;
+        public bool Building { get => building; set { if (building != value) { building = value; ActiveVersion++; } } }
+
+        /// <summary>Changes when any GameObject's ActiveSelf, IsAsset or Building changes.</summary>
+        public static int ActiveVersion;
+        // ActiveInHierarchy's answer while no flag above and no parent changed (it walked up the
+        // hierarchy at every ask: per sprite drawn, behaviour updated and collider queried).
+        bool activeCached;
+        int activeAt = -1, activeHierarchyAt = -1;
+
         public bool ActiveInHierarchy
         {
             get
             {
-                if (IsAsset || Building) return false;
-                for (var t = Transform; t != null; t = t.Parent)
-                    if (!t.GameObject.ActiveSelf) return false;
-                return true;
+                if (activeAt == ActiveVersion && activeHierarchyAt == NTransform.HierarchyVersion) return activeCached;
+                bool on = !isAsset && !building;
+                for (var t = Transform; on && t != null; t = t.Parent)
+                    if (!t.GameObject.activeSelf) on = false;
+                activeCached = on;
+                activeAt = ActiveVersion;
+                activeHierarchyAt = NTransform.HierarchyVersion;
+                return on;
             }
         }
     }
@@ -76,18 +91,28 @@ namespace Cuphead360.Engine
         public Vector3 LocalPosition;
         public Quaternion LocalRotation = Quaternion.identity;
         public Vector3 LocalScale = Vector3.one;
-        public NTransform Parent;
+        NTransform parent;
+        public NTransform Parent { get => parent; set { parent = value; HierarchyVersion++; } }
+        /// <summary>
+        /// Changes when any transform's parent changes or a rigidbody is added or released:
+        /// colliders keep the body they found (NCollider2D.Rigidbody) while it holds.
+        /// </summary>
+        public static int HierarchyVersion;
         public readonly List<NTransform> Children = new List<NTransform>();
         public bool HasChanged = true;
         // Cached local-to-world matrix; invalidated down the hierarchy.
         Matrix4x4 world;
         bool worldValid;
 
+        /// <summary>Changes each time the cached world matrix is let go (colliders keep their shapes while it holds).</summary>
+        public int WorldVersion;
+
         public void Invalidate()
         {
             HasChanged = true;
             if (!worldValid) return;
             worldValid = false;
+            WorldVersion++;
             for (int i = 0; i < Children.Count; i++) Children[i].Invalidate();
         }
 
@@ -161,9 +186,16 @@ namespace Cuphead360.Engine
         public static NObject ByInstanceId(int id) => byId.TryGetValue(id, out var r) ? r : null;
 
         /// <summary>Final release: Unity's managed object becomes "fake null".</summary>
+        static readonly string traceRelease = Environment.GetEnvironmentVariable("CH360_TRACE_RELEASE");
+        /// <summary>Counts releases (the player loop drops destroyed behaviours only when it moved).</summary>
+        public static int Releases;
+
         public static void Release(NObject rec)
         {
             if (rec.Destroyed) return;
+            Releases++;
+            if (traceRelease != null && rec.Name != null && rec.Name.Contains(traceRelease))
+                Log.Line($"TRACE release {rec.Name} ({rec.GetType().Name}) frame {Clock.FrameCount}\n{Environment.StackTrace}");
             rec.Destroyed = true;
             rec.Managed.m_CachedPtr = IntPtr.Zero;
             NativeMemory.Free((void*)rec.Block);
@@ -351,6 +383,8 @@ namespace Cuphead360.Engine
                 case NCamera cam: cameras.Add(cam); break;
                 case NBehaviour b: behaviours.Add(b); break;
                 case NGameObject g: gameObjects.Add(g); break;
+                // (every caller adds the record to its GameObject's components right after, with no query between)
+                case NRigidbody2D: NTransform.HierarchyVersion++; break;
             }
         }
 
@@ -365,6 +399,7 @@ namespace Cuphead360.Engine
                 case NCamera: dirty |= 8; break;
                 case NBehaviour: dirty |= 16; break;
                 case NGameObject: dirty |= 32; break;
+                case NRigidbody2D: NTransform.HierarchyVersion++; break;
             }
         }
     }

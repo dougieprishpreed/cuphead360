@@ -1000,6 +1000,38 @@ namespace Cuphead360.Engine
             int w = TextureWidth(self), h = TextureHeight(self);
             value = new Vector2(w > 0 ? 1f / w : 0f, h > 0 ? 1f / h : 0f);
         }
+        /// <summary>A run-time texture's pixel: kept as RGBA, top row first (RuntimePixels), shown after Apply.</summary>
+        public static void UnityEngine_Texture2D__INTERNAL_CALL_SetPixel(Texture2D self, int x, int y, ref Color color)
+        {
+            int w = TextureWidth(self), h = TextureHeight(self);
+            if (w <= 0 || h <= 0) return;
+            x = ((x % w) + w) % w; y = ((y % h) + h) % h;   // Unity wraps out-of-range coordinates
+            var e = RuntimePixels.Get(self);
+            if (e == null || e.Data == null || e.W != w || e.H != h || e.Channels != 4)
+            {
+                RuntimePixels.Set(self, new byte[w * h * 4], w, h, 4, e?.Version ?? 0);
+                e = RuntimePixels.Get(self);
+            }
+            Color32 c = color;
+            int i = ((h - 1 - y) * w + x) * 4;
+            e.Data[i] = c.r; e.Data[i + 1] = c.g; e.Data[i + 2] = c.b; e.Data[i + 3] = c.a;
+        }
+        public static void UnityEngine_Texture2D__Apply(Texture2D self, bool updateMipmaps, bool makeNoLongerReadable)
+        {
+            var e = RuntimePixels.Get(self);
+            if (e != null) e.Version++;
+        }
+
+        // Render textures aren't drawn into yet; their size is kept for the scripts that ask it.
+        public static int UnityEngine_RenderTexture__Internal_GetWidth(RenderTexture mono)
+            => Props.TryGet<int>(mono, "rt.width", out int w) ? w : (int)Tree.Int((Objects.Of(mono) as NAsset)?.Source?.Tree, "m_Width", ScreenWidth);
+        public static int UnityEngine_RenderTexture__Internal_GetHeight(RenderTexture mono)
+            => Props.TryGet<int>(mono, "rt.height", out int h) ? h : (int)Tree.Int((Objects.Of(mono) as NAsset)?.Source?.Tree, "m_Height", ScreenHeight);
+        public static void UnityEngine_RenderTexture__Internal_SetWidth(RenderTexture mono, int width) => Props.Set(mono, "rt.width", width, "engine RenderTexture.width");
+        public static void UnityEngine_RenderTexture__Internal_SetHeight(RenderTexture mono, int width) => Props.Set(mono, "rt.height", width, "engine RenderTexture.height");
+
+        public static int UnityEngine_SortingLayer__NameToID(string name) => SortingLayers.TryId(name, out int id) ? id : 0;
+
         public static TextureFormat UnityEngine_Texture2D__get_format(Texture2D self)
             => runtimeTextures.TryGetValue(self, out var d) ? (TextureFormat)d[2] : (TextureFormat)Tree.Int((Objects.Of(self) as NAsset)?.Source?.Tree, "m_TextureFormat", 4);
         public static int UnityEngine_Texture2D__get_mipmapCount(Texture2D self) => (int)Tree.Int((Objects.Of(self) as NAsset)?.Source?.Tree, "m_MipCount", 1);

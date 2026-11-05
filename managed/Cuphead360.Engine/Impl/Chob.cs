@@ -81,29 +81,36 @@ namespace Cuphead360.Engine
                         ParseStats.TryGetValue(Type, out var st);
                         ParseStats[Type] = (st.n + 1, st.bytes + Length);
                     }
-                    if (File?.SourcePath != null && TreeBudget != long.MaxValue)
+                    bool budgeted = File?.SourcePath != null && TreeBudget != long.MaxValue;
+                    if (budgeted)
                     {
                         table = Strings;
                         cost = 64 + Length * 6L;   // boxed trees run ~6x their encoded size
                         treeBytes += cost;
                         cached.Add(this);
-                        if (treeBytes > TreeBudget) Trim();
                     }
                     Data = null; Strings = null; DiskPath = null;
+                    if (budgeted && treeBytes > TreeBudget) Trim(this);
                 }
                 return tree;
             }
             set { tree = value; Data = null; Strings = null; DiskPath = null; table = null; }
         }
 
-        /// <summary>Lets go of the least recently used parsed trees down to 3/4 of the budget.</summary>
-        static void Trim()
+        /// <summary>
+        /// Lets go of the least recently used parsed trees down to 3/4 of the budget, never the
+        /// one being handed out: a tree over 3/4 of the budget let itself go, the getter returned
+        /// null and cleared its strings for good (the localization table's elements came out null).
+        /// </summary>
+        static void Trim(ChobObject keep)
         {
             cached.Sort((a, b) => a.lastUse.CompareTo(b.lastUse));
             int i = 0;
+            bool kept = false;
             for (; i < cached.Count && treeBytes > TreeBudget * 3 / 4; i++)
             {
                 var o = cached[i];
+                if (o == keep) { kept = true; continue; }
                 if (o.table == null || o.tree == null) { treeBytes -= o.cost; continue; }
                 o.tree = null;
                 o.Strings = o.table;
@@ -113,6 +120,7 @@ namespace Cuphead360.Engine
                 TreesDropped++;
             }
             cached.RemoveRange(0, i);
+            if (kept) cached.Add(keep);
         }
         public Dictionary<string, object> Map => Tree as Dictionary<string, object>;
         public object this[string key] => Map != null && Map.TryGetValue(key, out var v) ? v : null;

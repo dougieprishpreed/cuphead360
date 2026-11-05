@@ -92,17 +92,55 @@ namespace Cuphead360.Engine
             if (nowActive) ActivateTree(go.Transform); else DeactivateTree(go.Transform, true);
         }
 
-        /// <summary>Awake/OnEnable for a freshly built active hierarchy (Instantiate, scene load).</summary>
+        /// <summary>Awake/OnEnable for a freshly built active hierarchy (Instantiate).</summary>
         public static void ActivateTreeNew(NTransform t) => ActivateTree(t);
 
+        /// <summary>Awake/OnEnable for a scene's active roots, as one batch (scene load).</summary>
+        public static void ActivateTreesNew(List<NTransform> roots)
+        {
+            var behaviours = new List<NBehaviour>();
+            foreach (var r in roots) Collect(r, behaviours);
+            Wake(behaviours);
+        }
+
+        /// <summary>
+        /// A hierarchy that became active: its built-in components first, in hierarchy order, then its
+        /// behaviours' Awake and OnEnable in script execution order (hierarchy order among equals), as
+        /// Unity wakes what it activates together.
+        /// </summary>
         static void ActivateTree(NTransform t)
+        {
+            var behaviours = new List<NBehaviour>();
+            Collect(t, behaviours);
+            Wake(behaviours);
+        }
+
+        static void Collect(NTransform t, List<NBehaviour> behaviours)
         {
             var go = t.GameObject;
             if (!go.ActiveSelf) return;
             foreach (var c in go.Components.ToArray())
-                if (c is NBehaviour b) Behaviours.Activate(b);
+                if (c is NBehaviour b) behaviours.Add(b);
                 else Builtins.OnActivated(c, true);
-            foreach (var child in t.Children.ToArray()) ActivateTree(child);
+            foreach (var child in t.Children.ToArray()) Collect(child, behaviours);
+        }
+
+        static void Wake(List<NBehaviour> behaviours)
+        {
+            bool ordered = true;
+            for (int i = 1; i < behaviours.Count && ordered; i++) ordered = behaviours[i - 1].ExecOrder <= behaviours[i].ExecOrder;
+            if (!ordered)
+            {
+                // stable insertion: equal orders keep hierarchy order (the few ordered classes move)
+                for (int i = 1; i < behaviours.Count; i++)
+                {
+                    var b = behaviours[i];
+                    int j = i - 1;
+                    while (j >= 0 && behaviours[j].ExecOrder > b.ExecOrder) { behaviours[j + 1] = behaviours[j]; j--; }
+                    behaviours[j + 1] = b;
+                }
+            }
+            foreach (var b in behaviours) Behaviours.Activate(b);
         }
 
         /// <summary>OnDisable for a hierarchy that just went inactive (top: the object whose state changed).</summary>

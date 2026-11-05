@@ -535,8 +535,11 @@ namespace Cuphead360.Engine
         public void Activate()
         {
             foreach (var go in GameObjects) go.Building = false;
+            // one batch: Awake in script execution order across the scene's roots
+            var roots = new List<NTransform>();
             foreach (var go in GameObjects)
-                if (go.Transform.Parent == null && go.ActiveInHierarchy) Lifecycle.ActivateTreeNew(go.Transform);
+                if (go.Transform.Parent == null && go.ActiveInHierarchy) roots.Add(go.Transform);
+            Lifecycle.ActivateTreesNew(roots);
         }
     }
 }

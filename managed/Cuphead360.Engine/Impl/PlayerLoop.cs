@@ -53,9 +53,24 @@ namespace Cuphead360.Engine
         public static Action RenderFrame;
         public static Action InputUpdate;
 
+        // The update passes' order: script execution order, then creation. Behaviours made during a
+        // pass join after it (they wait for the next frame, as before).
+        static readonly List<NBehaviour> ordered = new List<NBehaviour>();
+        static readonly List<NBehaviour> orderPending = new List<NBehaviour>();
+        static int orderWalks;
+
         public static void Track(NBehaviour b)
         {
-            if (trackedSet.Add(b)) tracked.Add(b);
+            if (!trackedSet.Add(b)) return;
+            tracked.Add(b);
+            if (orderWalks > 0) orderPending.Add(b); else InsertOrdered(b);
+        }
+
+        static void InsertOrdered(NBehaviour b)
+        {
+            int i = ordered.Count;
+            while (i > 0 && ordered[i - 1].ExecOrder > b.ExecOrder) i--;
+            ordered.Insert(i, b);
         }
 
         public static void QueueStart(NBehaviour b) => startQueue.Add(b);
@@ -63,7 +78,20 @@ namespace Cuphead360.Engine
         public static void QueueDestroy(NObject o, float delay)
         {
             if (delay > 0f) delayedDestroy.Add((o, Clock.Time + delay));
-            else if (!destroyQueue.Contains(o)) destroyQueue.Add(o);
+            else if (!destroyQueue.Contains(o)) { destroyQueue.Add(o); o.PendingDestroy = true; }
+        }
+
+        /// <summary>
+        /// The behaviour, or a GameObject above it, is to be destroyed this frame: Unity calls no Start
+        /// on it (a scene's own Player object destroys itself in Awake when the level makes the
+        /// players; its Start then threw in the Mausoleum).
+        /// </summary>
+        static bool Doomed(NBehaviour b)
+        {
+            if (b.PendingDestroy) return true;
+            for (var t = b.GameObject?.Transform; t != null; t = t.Parent)
+                if (t.GameObject.PendingDestroy) return true;
+            return false;
         }
 
         /// <summary>One frame of Unity's player loop with the given real elapsed time.</summary>
@@ -195,13 +223,25 @@ namespace Cuphead360.Engine
 
         static void ForEach(Func<NBehaviour, System.Reflection.MethodInfo> pick, object arg)
         {
-            int n = tracked.Count;   // objects created during the pass wait for the next frame
-            for (int i = 0; i < n; i++)
+            orderWalks++;
+            try
             {
-                var b = tracked[i];
-                var m = pick(b);
-                if (m == null || !b.Started || !Behaviours.ActiveAndEnabled(b)) continue;
-                Behaviours.Send(b, m, arg);
+                int n = ordered.Count;   // objects created during the pass wait for the next frame
+                for (int i = 0; i < n; i++)
+                {
+                    var b = ordered[i];
+                    var m = pick(b);
+                    if (m == null || !b.Started || !Behaviours.ActiveAndEnabled(b)) continue;
+                    Behaviours.Send(b, m, arg);
+                }
+            }
+            finally
+            {
+                if (--orderWalks == 0 && orderPending.Count > 0)
+                {
+                    foreach (var b in orderPending) InsertOrdered(b);
+                    orderPending.Clear();
+                }
             }
         }
 
@@ -214,7 +254,7 @@ namespace Cuphead360.Engine
                 foreach (var b in batch)
                 {
                     b.StartQueued = false;
-                    if (b.Started || b.Destroyed) continue;
+                    if (b.Started || b.Destroyed || Doomed(b)) continue;
                     if (!Behaviours.ActiveAndEnabled(b)) continue;   // re-queued when enabled
                     b.Started = true;
                     var r = Behaviours.Send(b, b.Messages.Start);
@@ -291,8 +331,14 @@ namespace Cuphead360.Engine
                 destroyQueue.Clear();
                 foreach (var o in batch) Lifecycle.DestroyNow(o);
             }
-            if (tracked.RemoveAll(b => b.Destroyed) > 0) trackedSet.RemoveWhere(b => b.Destroyed);
+            // a sweep of every tracked behaviour each frame, only when something was released since
+            if (Objects.Releases != releasesSeen)
+            {
+                releasesSeen = Objects.Releases;
+                if (tracked.RemoveAll(b => b.Destroyed) > 0) { trackedSet.RemoveWhere(b => b.Destroyed); ordered.RemoveAll(b => b.Destroyed); }
+            }
         }
+        static int releasesSeen = -1;
 
         public static void Untrack(NBehaviour b)
         {

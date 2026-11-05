@@ -78,26 +78,42 @@ namespace Cuphead360.Engine
 
         public bool Live => !Destroyed && Enabled && GameObject != null && GameObject.ActiveInHierarchy && (Rigidbody == null || Rigidbody.Simulated);
 
+        // The body found last, kept while no parent changed and no rigidbody came or went (casts and
+        // Live asked for it per collider per cast: a walk up the hierarchy through every component).
+        NRigidbody2D body;
+        int bodyVersion = -1;
+
         public NRigidbody2D Rigidbody
         {
             get
             {
-                for (var t = GameObject.Transform; t != null; t = t.Parent)
+                if (bodyVersion == NTransform.HierarchyVersion && (body == null || !body.Destroyed)) return body;
+                NRigidbody2D found = null;
+                for (var t = GameObject.Transform; t != null && found == null; t = t.Parent)
                     foreach (var c in t.GameObject.Components)
-                        if (c is NRigidbody2D rb && !rb.Destroyed) return rb;
-                return null;
+                        if (c is NRigidbody2D rb && !rb.Destroyed) { found = rb; break; }
+                body = found;
+                bodyVersion = NTransform.HierarchyVersion;
+                return found;
             }
         }
 
         /// <summary>World-space convex pieces, recomputed when the transform or shape changes.</summary>
         public List<Shape> Shapes()
         {
-            var m = GameObject.Transform.LocalToWorld;
+            // The transform not invalidated since: no matrix to fetch and compare (each cast asked
+            // every collider: 4% of the first run-and-gun level's PC samples).
+            var t = GameObject.Transform;
+            if (cached && cachedVersion == Version && cachedT == t && cachedTV == t.WorldVersion) return World;
+            var m = t.LocalToWorld;
+            cachedT = t; cachedTV = t.WorldVersion;
             if (cached && cachedVersion == Version && m == cachedM) return World;
             cached = true; cachedVersion = Version; cachedM = m;
             Recompute(m);
             return World;
         }
+        NTransform cachedT;
+        int cachedTV;
 
         // Apart from Shapes: its local function P is made a delegate for polygons, so the
         // compiler puts the matrix it captures in a heap object at the method's start: every
@@ -536,8 +552,11 @@ namespace Cuphead360.Engine
             if (f.useLayerMask && (f.layerMask.value & (1 << c.GameObject.Layer)) == 0) return false;
             if (f.useDepth)
             {
-                float z = c.GameObject.Transform.Position.z;
-                bool inRange = z >= f.minDepth && z <= f.maxDepth;
+                // The legacy queries set depth from -Infinity to Infinity: every position is in it
+                // (fetching each collider's position was most of this test).
+                bool unbounded = float.IsNegativeInfinity(f.minDepth) && float.IsPositiveInfinity(f.maxDepth);
+                float z = unbounded ? 0f : c.GameObject.Transform.Position.z;
+                bool inRange = unbounded || (z >= f.minDepth && z <= f.maxDepth);
                 if (f.useOutsideDepth ? inRange : !inRange) return false;
             }
             return true;
