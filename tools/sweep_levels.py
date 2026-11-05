@@ -18,6 +18,16 @@ stretches without damage (a stuck phase). Scenes (maps, shops, cutscenes, hubs) 
 Writes <out>/<name>.log; prints a row per run (scene reached, how it ended, phases, milestones,
 damage, stalls, exceptions, data problems, missing engine methods), then the exceptions and
 missing methods over all runs, and which weapons, supers and charms were played. One run at a time.
+
+--forced (before a console run): every boss state gets --phase frames of that play, then the boss
+takes the damage that crosses into its next state through the level's own DealDamage, and after the
+last state its win; stuck run-and-gun levels move along their camera's path, tutorials and rooms go
+to their exits; then the results screen and what follows. Temporary pushes to reach everything, not
+a way to play. Each run also scans the render list (`--gaps 120`: GAP lines for shaders drawn as
+plain sprites, textures not converted for the console, render textures nothing drew) and captures
+each state late in its turn, the win and the screens after: the runs go through the hidden live
+window (no focus, no sound), whose shots at those points make <out>/sheet_<name>.png. Adds the
+GAPS and NOT FINISHED reports.
 """
 import argparse, collections, os, re, shutil, subprocess, sys, time
 
@@ -30,10 +40,14 @@ LEVELS = """Tutorial ShmupTutorial ChaliceTutorial
 Veggies Slime Frogs Flower FlyingBlimp Platforming_Level_1_1 Platforming_Level_1_2 Mausoleum
 Baroness Clown Dragon FlyingBird FlyingGenie Platforming_Level_2_1 Platforming_Level_2_2
 Bee Pirate Mouse Robot SallyStagePlay Train FlyingMermaid Platforming_Level_3_1 Platforming_Level_3_2
-DicePalaceMain DicePalaceBooze DicePalaceChips DicePalaceCigar DicePalaceDomino DicePalaceRabbit
+DicePalaceMain KingDice DicePalaceBooze DicePalaceChips DicePalaceCigar DicePalaceDomino DicePalaceRabbit
 DicePalaceFlyingHorse DicePalaceRoulette DicePalaceEightBall DicePalaceFlyingMemory Devil
 Airplane OldMan RumRunners SnowCult FlyingCowboy Saltbaker Graveyard
 ChessPawn ChessKnight ChessBishop ChessRook ChessQueen""".split()
+
+# Runs that load another level and set it up once it has started: KingDice is the board at its end, whose
+# next roll starts King Dice's own fight (DicePalaceMain plays the board's first roll, into one of his rooms).
+SETUPS = {"KingDice": ("DicePalaceMain", "set DicePalaceMainLevelGameInfo.PLAYER_SPACES_MOVED 99\n")}
 
 # Scenes that aren't fights: maps (the DLC island too), shops, hubs, cutscenes (played without input).
 SCENES = """scene_map_world_1 scene_map_world_2 scene_map_world_3 scene_map_world_4 scene_map_world_DLC
@@ -72,11 +86,36 @@ mugman {mugman}
 difficulty {mode}
 level {level} 3600
 wait 200
-invincible
+{setup}invincible
 fight {fight} all
 """
 
 SCENE_SCRIPT = PROLOGUE + """scene {scene} 3600
+visit {frames}{quiet}
+"""
+
+# The forced sweep (--forced): not a way to play but a way to reach everything. Each boss state gets
+# --phase frames of the normal policy, then the boss takes the damage that crosses into its next state
+# through the level's own LevelProperties.DealDamage, and after the last state its win (BotPolicy.ForceStep);
+# run-and-gun levels move along their camera's path when stuck, tutorials and rooms go to their exits.
+# Then the results screen and whatever follows. Captures of each state late in its turn, of the win and
+# the screens after; GAP lines (Gaps.cs) name what can't be drawn yet.
+FORCED_LEVEL_SCRIPT = PROLOGUE + """loadout {primary} {secondary} {super} {charm}
+mugman {mugman}
+difficulty {mode}
+level {level} 3600
+wait 200
+{setup}invincible
+fight {fight} all force phase={phase}
+capture 240
+capture 900
+visit 1500
+"""
+
+FORCED_SCENE_SCRIPT = PROLOGUE + """scene {scene} 3600
+capture 300
+capture 1200
+capture 2400
 visit {frames}{quiet}
 """
 
@@ -113,13 +152,38 @@ def summarize(text):
     # the ledger's lines; Rewired's Windows input probes (user32, raw input) are expected
     s["missing"] = sorted(set(m.group(1) for m in re.finditer(r"^\s+missing (?:icall|pinvoke) (\S+)(.*)$", text, re.M)
                               if not re.search(r"user32\.dll|RawInput", m.group(2))))
+    s["gaps"] = sorted(set(re.findall(r"^GAP ([^\n(]+)", text, re.M)) | set(re.findall(r"^EFFECT (not drawn yet: [^\n]+)", text, re.M)))
+    s["forced"] = len(re.findall(r"^BOT force: ", text, re.M))
+    s["kill_failed"] = bool(re.search(r"^BOT force: the kill didn't end", text, re.M))
     m = re.search(r"data problems (\d+)", text)
     s["data"] = int(m.group(1)) if m else -1
     s["problems"] = sorted(set(re.findall(r"^DATA [^\n]{0,200}", text, re.M)))[:10]
     return s
 
 
-def run(a, name, script_text, frames):
+def forced_args(a, name, frames):
+    """The forced sweep's run: the hidden live window (its shots are the bot's capture points), the gap scan."""
+    shots = os.path.join(a.out, "shots_" + name)
+    shutil.rmtree(shots, ignore_errors=True)
+    return ("--gaps", "120", "--live", "1", "--hidden", "1", "--unlocked", "1", "--max-frames", str(frames), "--shot-dir", shots)
+
+
+def sheet(a, name):
+    """The run's shots as one sheet (quarter size, four across): <out>/sheet_<name>.png."""
+    from PIL import Image
+    shots = os.path.join(a.out, "shots_" + name)
+    files = sorted(f for f in os.listdir(shots) if f.endswith(".png")) if os.path.isdir(shots) else []
+    if not files:
+        return
+    tiles = [Image.open(os.path.join(shots, f)).convert("RGB").resize((320, 180), Image.BILINEAR) for f in files]
+    cols = 4
+    img = Image.new("RGB", (cols * 320, (len(tiles) + cols - 1) // cols * 180), (40, 40, 40))
+    for i, t in enumerate(tiles):
+        img.paste(t, ((i % cols) * 320, (i // cols) * 180))
+    img.save(os.path.join(a.out, "sheet_%s.png" % name))
+
+
+def run(a, name, script_text, frames, extra=()):
     script = os.path.join(a.out, "bot_%s.txt" % name)
     open(script, "w", encoding="utf-8").write(script_text)
     save = os.path.join(a.out, "save_" + name)
@@ -127,7 +191,7 @@ def run(a, name, script_text, frames):
     shutil.copytree(a.save, save)
     log = os.path.join(a.out, name + ".log")
     with open(log, "wb") as f:
-        subprocess.run(["dotnet", PLAYER, "run", "--frames", str(frames), "--save", save, "--bot", script],
+        subprocess.run(["dotnet", PLAYER, "run", "--frames", str(frames), "--save", save, "--bot", script] + list(extra),
                        stdout=f, stderr=subprocess.STDOUT, cwd=ROOT, creationflags=0x08000000 if os.name == "nt" else 0)
     shutil.rmtree(save, ignore_errors=True)
     return summarize(open(log, encoding="utf-8", errors="replace").read())
@@ -143,32 +207,49 @@ def main():
     ap.add_argument("--fight", type=int, default=18000, help="frames of fighting per level at most")
     ap.add_argument("--visit", type=int, default=2400, help="frames per visited scene")
     ap.add_argument("--out", default=os.path.join(ROOT, "work", "sweep"))
+    ap.add_argument("--forced", action="store_true", help="the forced sweep: every boss state, run, room and scene pushed to its end, "
+                    "captured, with the gap scan (GAP lines)")
+    ap.add_argument("--phase", type=int, default=1200, help="--forced: frames of normal play per boss state before the push")
     a = ap.parse_args()
     levels = LEVELS if a.levels == "all" else [] if a.levels == "none" else a.levels.split(",")
     scenes = SCENES if a.scenes == "all" else [] if a.scenes == "none" else a.scenes.split(",")
     os.makedirs(a.out, exist_ok=True)
     allexc, allmissing = collections.Counter(), collections.Counter()
     weapons, supers, charms, stalled = collections.Counter(), collections.Counter(), collections.Counter(), []
+    allgaps, unfinished = collections.defaultdict(list), []
     for pi, mode in enumerate(a.passes.split(",")):
         for li, lv in enumerate(levels):
             lo = LOADOUTS[(li + 3 * pi) % len(LOADOUTS)]
             name = "%s_%s" % (lv, mode)
             t0 = time.time()
-            s = run(a, name, LEVEL_SCRIPT.format(name=name, map=a.map, level=lv, mode=mode, fight=a.fight, primary=lo[0], secondary=lo[1],
-                                                 super=lo[2], charm=lo[3], mugman="on" if lo[4] == "mugman" else "off"), 1800 + 900 + a.fight + 600)
+            script = FORCED_LEVEL_SCRIPT if a.forced else LEVEL_SCRIPT
+            frames = 1800 + 900 + a.fight + (1500 if a.forced else 600)
+            level, setup = SETUPS.get(lv, (lv, ""))
+            s = run(a, name, script.format(name=name, map=a.map, level=level, setup=setup, mode=mode, fight=a.fight, primary=lo[0], secondary=lo[1], phase=a.phase,
+                                           super=lo[2], charm=lo[3], mugman="on" if lo[4] == "mugman" else "off"),
+                    frames, forced_args(a, name, frames) if a.forced else ())
+            if a.forced: sheet(a, name)
+            for g in s["gaps"]: allgaps[g].append(name)
+            # The board's first roll ends in one of King Dice's rooms; his fight is the KingDice run.
+            board_done = lv == "DicePalaceMain" and any(v.startswith("scene_level_dice_palace_") and v != "scene_level_dice_palace_main" for v in s["visited"])
+            if a.forced and (not s["won"] or s["kill_failed"]) and not board_done: unfinished.append((name, s["end"], s["phases"], s["missing_phases"]))
             for k, n in s["exceptions"].items(): allexc[(k, name)] += n
             for m in s["missing"]: allmissing[m] += 1
             for w in s["weapons"]: weapons[w] += 1
             for x in s["supers"]: supers[x] += 1
             charms[lo[3]] += 1
             if s["stall_lines"] or s["missing_phases"]: stalled.append((name, s["missing_phases"], s["stall_lines"]))
-            print("%-30s %-34s %-32s %-4s ph %-5s %-14s st %d pa %3d ko %d exc %d data %d miss %d  %s/%s %s (%.0f s)" % (
+            print("%-30s %-34s %-32s %-4s ph %-5s %-14s st %d pa %3d ko %d exc %d data %d miss %d gaps %d  %s/%s %s (%.0f s)" % (
                 name, s["scene"], s["end"], "WON" if s["won"] else "", s["phases"], s["damage"], s["stalls"], s["parries"], s["knockouts"],
-                sum(s["exceptions"].values()), s["data"], len(s["missing"]), lo[3], lo[4], "%d %s" % (s["supers_used"], ",".join(sorted(s["supers"]))), time.time() - t0), flush=True)
+                sum(s["exceptions"].values()), s["data"], len(s["missing"]), len(s["gaps"]), lo[3], lo[4], "%d %s" % (s["supers_used"], ",".join(sorted(s["supers"]))), time.time() - t0), flush=True)
     for sc in scenes:
         scene, _, quiet = sc.partition(":")
         t0 = time.time()
-        s = run(a, scene, SCENE_SCRIPT.format(name=scene, map=a.map, scene=scene, frames=a.visit, quiet=" quiet" if quiet else ""), 1800 + 900 + a.visit + 600)
+        frames = 1800 + 900 + a.visit + 600
+        s = run(a, scene, (FORCED_SCENE_SCRIPT if a.forced else SCENE_SCRIPT).format(name=scene, map=a.map, scene=scene, frames=a.visit,
+                                                                                   quiet=" quiet" if quiet else ""), frames, forced_args(a, scene, frames) if a.forced else ())
+        if a.forced: sheet(a, scene)
+        for g in s["gaps"]: allgaps[g].append(scene)
         for k, n in s["exceptions"].items(): allexc[(k, scene)] += n
         for m in s["missing"]: allmissing[m] += 1
         print("%-30s %-34s %-32s exc %d data %d miss %d  then %s (%.0f s)" % (
@@ -184,6 +265,13 @@ def main():
         print("  %s: missing [%s]" % (name, missing))
         for ln in lines: print("      " + ln)
     print("\nPLAYED weapons %s\n       supers %s\n       charms %s" % (dict(weapons), dict(supers), dict(charms)))
+    if a.forced:
+        print("\nGAPS (what can't be drawn yet, the runs that met it)")
+        for g, names in sorted(allgaps.items(), key=lambda kv: -len(kv[1])):
+            print("  %-100s %s" % (g.strip(), ", ".join(names[:6]) + (" +%d" % (len(names) - 6) if len(names) > 6 else "")))
+        print("\nNOT FINISHED by the forced sweep (no win, or the kill didn't end the level)")
+        for name, end, ph, missing in unfinished:
+            print("  %-30s %-36s phases %s%s" % (name, end, ph, " missing [%s]" % missing if missing else ""))
     return 0
 
 

@@ -229,6 +229,17 @@ Start** to quit to the dashboard.
 The game writes `cuphead360.txt` next to `default.xex`. If something goes
 wrong, include that file when you report it, and say what you were doing.
 
+To see how fast each scene ran, copy that file to your PC and run:
+
+```
+python tools\perf_report.py cuphead360.txt
+```
+
+It prints a row per scene: the time between frames, the share of frames at
+60, 30 and 20 fps, where the game's time went, the GPU's time by kind of
+pass, and what holds the scene back (the game on the CPU, the GPU, or
+hitches).
+
 ## After an update
 
 After `git pull` in `cuphead360` (and in `spire360`):

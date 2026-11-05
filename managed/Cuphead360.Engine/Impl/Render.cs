@@ -418,7 +418,12 @@ namespace Cuphead360.Engine
             tex = null; textureRect = default; uvTransform = default; settings = 0;
             if (i == null) return false;
             if (i.Texture != null) { tex = i.Texture; textureRect = i.TextureRect; uvTransform = i.UvTransform; settings = i.SettingsRaw; return true; }
-            return Atlases.Bound(i, out tex, out textureRect, out uvTransform, out settings);
+            if (Atlases.Bound(i, out tex, out textureRect, out uvTransform, out settings)) return true;
+            // Unity loads a late-bound sprite again with whatever uses it next, and asks for its atlas then.
+            // Built sprites stay here, so one drawn after a scene change destroyed its atlas (a UI Image whose
+            // sprite the UI code set: the map's ingredient cards) asks when it's drawn.
+            Atlases.Touch(s);
+            return false;
         }
 
         /// <summary>Texture coordinates (0..1, Unity orientation) of a sprite's vertices.</summary>

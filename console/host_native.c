@@ -103,6 +103,15 @@ int ch360_plat_frame_begin(void) {
     return frames_left-- > 0;
 }
 
+void ch360_plat_host_stats(unsigned* out, int n) {
+    /* no GPU here: the frame count only */
+    static long frames_seen = 0;
+    int i;
+    for (i = 0; i < n; i++) out[i] = 0;
+    if (n > 0) out[0] = (unsigned)(frame_no - frames_seen);
+    frames_seen = frame_no;
+}
+
 int ch360_plat_pad(int index, ch360_pad* out) {
     (void)out;
     return index == 0; /* one connected pad, idle (the bot drives input when given) */

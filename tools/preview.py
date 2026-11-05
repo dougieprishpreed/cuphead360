@@ -152,6 +152,10 @@ def _blend(shader, tex, col):
         return t
     if "SpriteBlendDynamic/Multiply" in shader or shader.endswith("/MultiplyBlend"):
         return np.concatenate([t[..., :3] * c[:3], t[..., 3:4]], axis=-1)
+    if shader == "Sprites/Color/Overlay":
+        a, b = t[..., :3], c[:3]
+        rgb = np.where(t[..., 0:1] < 0.5, 2 * a * b, 1 - 2 * (1 - a) * (1 - b))
+        return np.concatenate([rgb, t[..., 3:4] * c[3]], axis=-1)
     if "SpriteBlendDynamic/Overlay" in shader or shader.endswith("/OverlayBlend"):
         a, b = t[..., :3], c[:3]
         rgb = np.where(a < 0.5, 2 * a * b, 1 - 2 * (1 - a) * (1 - b))
@@ -176,6 +180,17 @@ def frag_out(name, t, c, p):
     if name == "screen":
         rgb = t[..., :3] + np.array(c[:3]) * c[3] * p[0] * (1 - t[..., :3])
         return np.concatenate([rgb * t[..., 3:4], t[..., 3:4]], axis=-1)
+    if name == "mono":
+        sh = lambda dx, dy: np.roll(np.roll(t, -dy, axis=0), dx, axis=1)   # neighbours (warped space: about one texel)
+        m = np.maximum.reduce([sh(-1, -1), sh(1, 1), sh(-1, 1), sh(1, -1), t])
+        edge = 1 - 2 * np.abs(m[..., 3:4] - 0.5)
+        ratio = t[..., :3].max(-1, keepdims=True) / np.maximum(m[..., :3].max(-1, keepdims=True), 0.5)
+        base = np.array(p[0:4], np.float32)
+        mono = base + t[..., :3].min(-1, keepdims=True) * (1 - base)
+        r = t + (mono - t) * p[4]
+        r[..., 3:4] = r[..., 3:4] + (ratio * t[..., 3:4] - r[..., 3:4]) * p[4]
+        o = (r + (t - r) * edge) * np.array(c)
+        return np.concatenate([o[..., :3] * o[..., 3:4], o[..., 3:4]], axis=-1)
     if name in ("blendk", "blendm", "blendn"):
         s3 = t[..., :3]
         hi = (t[..., 0:1] >= 0.5).astype(np.float32)
@@ -208,6 +223,7 @@ PASSES = {
     26: [("a", "rev_da"), ("sprite", "add_da")], 27: [("clear", "mask_write")],
     30: [], 32: [], 33: [("blendk", "mul"), ("blendm", "add_lit")],
     34: [("blendk", "mul"), ("blendm", "add_lit"), ("blendn", "rev_sub")],
+    35: [("mono", "premul")],
 }
 
 
@@ -351,9 +367,15 @@ def powc(x, g):
     return np.exp2(np.log2(np.maximum(x, 1e-6)) * g)
 
 
+NO_POST = False
+
+
 def blit(mode, p, src, w, h, overlay):
-    """A blit's output (w x h RGBA), as the console's shaders (console/xsdk/shaders) compute it."""
+    """A blit's output (w x h RGBA), as the console's shaders (console/xsdk/shaders) compute it
+    (--no-post: every blit a copy, for quick sheets)."""
     u, v = target_uv(w, h)
+    if NO_POST:
+        return sample(src, u, v)
     if mode == 11:
         return sample(src, u, v)
     if mode == 12:
@@ -458,8 +480,9 @@ def render(frame, textures):
             sizes[key] = tuple(tg["size"])
         TW, TH = sizes[key]
         if key != current:
-            # A render texture's pass starts cleared (transparent); the screen keeps what it has.
-            if key is not None:
+            # A render texture's pass starts cleared (transparent), but where it goes on after a grab's
+            # copy (resume); the screen keeps what it has.
+            if key is not None and not (v.get("resume") and key in canvases):
                 canvases[key] = np.zeros((TH, TW, 4), np.float32)
             current = key
         canvas = canvases[key]
@@ -535,6 +558,24 @@ def render(frame, textures):
             if mode in PASSES:
                 draw_group(canvas, img, *args, passes=PASSES[mode], params=p)
                 continue
+            if mode in (30, 31, 32):
+                # The Rum Runners' banded stencil masks: 9-14 by the mask's alpha band, 0 by the clearer; the
+                # reversed masked sprite where the stencil is under 9 (its faint passes in the bands left out here).
+                if mode == 31:
+                    before = canvas.copy()
+                    draw_group(canvas, img, *args)
+                    canvas[:] = np.where((stencil < 9)[..., None], canvas, before)
+                else:
+                    scratch = np.zeros_like(canvas)
+                    draw_group(scratch, img, pts, uvs, it["tris"], it["tint"], colors, rect, TH)
+                    a_ = scratch[..., 3]
+                    if mode == 32:
+                        stencil[coverage(pts, it["tris"], TW, TH)] = 0
+                    else:
+                        for b_ in range(6):
+                            lo, hi = (0.4 + 0.1 * b_, 0.5 + 0.1 * b_) if b_ < 5 else (0.8999, 2.0)
+                            stencil[(a_ > lo) & (a_ <= hi)] = 9 + b_
+                continue
             if mode in (28, 29):
                 # The game's stencil masks: 5 written where the mask's alpha is half or more; drawn where it is 5.
                 if mode == 28:
@@ -587,7 +628,10 @@ def main():
     ap.add_argument("--out", default=os.path.join(ROOT, "work", "preview"))
     ap.add_argument("--frames", help="comma-separated frame numbers (default: all captured)")
     ap.add_argument("--sheet", action="store_true", help="also write sheet.png with every frame at quarter size")
+    ap.add_argument("--no-post", action="store_true", help="blits as plain copies (no blur, film grain or fringes): quicker")
     a = ap.parse_args()
+    global NO_POST
+    NO_POST = a.no_post
     if os.path.abspath(a.out).startswith(os.path.abspath(a.game)):
         sys.exit("--out must be outside the game folder")
     global capture_path

@@ -21,7 +21,10 @@ namespace Cuphead360.Player
     ///   gotoxy X Y [RADIUS] [TIMEOUT]    steer toward a world position
     ///   fight [TIMEOUT] [FLAGS]     boss fight policy until the scene changes; flags: ex (EX shots),
     ///                               all (EX and supers, parries, weapon switches, dashes, aiming, the
-    ///                               plane and run-and-gun policies); the boss's phases are logged
+    ///                               plane and run-and-gun policies), force (the forced sweep: each boss
+    ///                               state N frames, phase=N, then on to the next; runs and rooms pushed
+    ///                               to their exits; BotPolicy.ForceStep); the boss's phases are logged
+    ///   capture N                   a render capture N frames on (with --capture-out)
     ///   loadout PRIMARY SECONDARY SUPER CHARM   player one's equipment (Weapon/Super/Charm names)
     ///   mugman on|off               player one plays Mugman (the slot select's swap)
     ///   difficulty Easy|Normal|Hard the next level's mode (the map's difficulty choice)
@@ -184,6 +187,7 @@ namespace Cuphead360.Player
                             {
                                 // Synthetic, as the game's debug level select: any level from wherever the bot is.
                                 levelFrom = Cuphead360.Engine.Scenes.Active?.Name;
+                                loadsFrom = Cuphead360.Engine.SceneLoader.Loads;
                                 Type levels = null, loader = null;
                                 foreach (var asm in AppDomain.CurrentDomain.GetAssemblies()) { levels ??= asm.GetType("Levels"); loader ??= asm.GetType("SceneLoader"); }
                                 var load = loader?.GetMethod("LoadLevel", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
@@ -195,7 +199,7 @@ namespace Cuphead360.Player
                                 return f;
                             }
                             var now = Cuphead360.Engine.Scenes.Active?.Name;
-                            if (now != null && now != levelFrom && now != "scene_load_helper") { Next("SYNTHETIC: SceneLoader.LoadLevel(" + s[1] + ") -> " + now); continue; }
+                            if (now != null && (now != levelFrom || Cuphead360.Engine.SceneLoader.Loads != loadsFrom) && now != "scene_load_helper") { Next("SYNTHETIC: SceneLoader.LoadLevel(" + s[1] + ") -> " + now); continue; }
                             if (t > timeout) { Next("TIMEOUT"); continue; }
                             return f;
                         }
@@ -204,12 +208,15 @@ namespace Cuphead360.Player
                             int timeout = s.Length > 1 ? I(s[1]) : 36000;
                             fightAll = Array.IndexOf(s, "all", 2) >= 0;
                             fightEx = fightAll || Array.IndexOf(s, "ex", 2) >= 0;
+                            fightForce = Array.IndexOf(s, "force", 2) >= 0;
+                            foreach (var a in s) if (a.StartsWith("phase=")) forcePhaseFrames = I(a.Substring(6));
                             if (t == 0) { fightScene = Cuphead360.Engine.Scenes.Active?.Name; ResetTracking(); }
                             if (Cuphead360.Engine.Scenes.Active?.Name != fightScene) { FightSummary(); Next("scene changed to " + Cuphead360.Engine.Scenes.Active?.Name); continue; }
                             if (t > timeout) { FightSummary(); Next("TIMEOUT"); continue; }
                             TrackPhases();
                             if (fightAll) FightAll(p, t);
                             else Fight(p, t);
+                            if (fightForce) ForceStep(p, t);
                             return f;
                         }
                     case "scene":   // scene NAME [TIMEOUT]: the game's own SceneLoader.LoadScene(Scenes.NAME, Fade, Fade), then wait for it
@@ -218,6 +225,7 @@ namespace Cuphead360.Player
                             if (t == 0)
                             {
                                 levelFrom = Cuphead360.Engine.Scenes.Active?.Name;
+                                loadsFrom = Cuphead360.Engine.SceneLoader.Loads;
                                 var scenes = GameType("Scenes"); var loader = GameType("SceneLoader");
                                 MethodInfo load = null;
                                 foreach (var m in loader?.GetMethods(BindingFlags.Public | BindingFlags.Static) ?? new MethodInfo[0])
@@ -230,7 +238,7 @@ namespace Cuphead360.Player
                                 return f;
                             }
                             var now = Cuphead360.Engine.Scenes.Active?.Name;
-                            if (now != null && now != levelFrom && now != "scene_load_helper") { Next("SYNTHETIC: SceneLoader.LoadScene(" + s[1] + ") -> " + now); continue; }
+                            if (now != null && (now != levelFrom || Cuphead360.Engine.SceneLoader.Loads != loadsFrom) && now != "scene_load_helper") { Next("SYNTHETIC: SceneLoader.LoadScene(" + s[1] + ") -> " + now); continue; }
                             if (t > timeout) { Next("TIMEOUT"); continue; }
                             return f;
                         }
@@ -248,6 +256,10 @@ namespace Cuphead360.Player
                             if (t % 90 < 6) p.Buttons |= PadButton.A;
                             return f;
                         }
+                    case "capture":   // capture N: a render capture N frames on
+                        ScheduleCapture(frame, s.Length > 1 ? I(s[1]) : 1);
+                        Next("capture at frame " + (frame + (s.Length > 1 ? I(s[1]) : 1)));
+                        continue;
                     case "loadout":   // loadout PRIMARY SECONDARY SUPER CHARM
                         Next(SetLoadout(s));
                         continue;
@@ -257,6 +269,15 @@ namespace Cuphead360.Player
                             var fld = GameType("PlayerManager")?.GetField("player1IsMugman", BindingFlags.Public | BindingFlags.Static);
                             fld?.SetValue(null, s.Length > 1 && s[1] == "on");
                             Next(fld != null ? "SYNTHETIC: PlayerManager.player1IsMugman " + (s.Length > 1 && s[1] == "on") : "PlayerManager.player1IsMugman not found");
+                            continue;
+                        }
+                    case "set":   // set TYPE.FIELD VALUE: a game static, for the forced sweep (King Dice's board at its end)
+                        {
+                            int dot = s.Length > 2 ? s[1].LastIndexOf('.') : -1;
+                            var fld = dot > 0 ? GameType(s[1].Substring(0, dot))?.GetField(s[1].Substring(dot + 1), BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static) : null;
+                            if (fld == null) { Next(s.Length > 1 ? s[1] + " not found" : "set needs TYPE.FIELD VALUE"); continue; }
+                            fld.SetValue(null, fld.FieldType.IsEnum ? Enum.Parse(fld.FieldType, s[2]) : Convert.ChangeType(s[2], fld.FieldType, System.Globalization.CultureInfo.InvariantCulture));
+                            Next("SYNTHETIC: " + s[1] + " = " + s[2]);
                             continue;
                         }
                     case "difficulty":
@@ -366,6 +387,7 @@ namespace Cuphead360.Player
         }
 
         string fightScene, levelFrom, visitScene;
+        int loadsFrom;
         bool fightEx;
         int jumpUntil, dashUntil, dashCooldown, jumpCooldown;
         readonly Dictionary<NGameObject, Vector3> lastPos = new Dictionary<NGameObject, Vector3>();

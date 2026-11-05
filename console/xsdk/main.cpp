@@ -190,38 +190,41 @@ const size_t STAGING_RING = 8u << 20;
 const unsigned MEMORY_FLOOR_MB = 24;
 
 
-enum { MODE_SPRITE, MODE_SCREEN, MODE_MULTIPLY, MODE_OVERLAY, MODE_SDF, MODE_LIGHTRAY,
+enum { MODE_SPRITE, MODE_SCREEN, MODE_MULTIPLY, MODE_OVERLAY, MODE_SDF, MODE_COLOROVERLAY, MODE_LIGHTRAY,
        MODE_KNIGHT, MODE_DARK, MODE_BLURSPRITE, MODE_COPY, MODE_DOWN4, MODE_BLUR7, MODE_BLUR7G, MODE_TWOSTRIP, MODE_BW,
        MODE_GRAIN, MODE_BLUR7A, MODES };
 // The effects (items' modes 8-17, Cuphead360.Engine's Effects): a second
 // texture and twelve floats; the blits (from MODE_COPY) replace their target.
 const int FIRST_FX = MODE_KNIGHT, FIRST_BLIT = MODE_COPY;
 // An item's mode -> its pipeline's (7, the sprite masks, has pipelines of its own).
-const signed char PIPE_MODE[19] = { MODE_SPRITE, MODE_SCREEN, MODE_MULTIPLY, MODE_OVERLAY, MODE_SPRITE, MODE_SDF,
+const signed char PIPE_MODE[20] = { MODE_SPRITE, MODE_SCREEN, MODE_MULTIPLY, MODE_OVERLAY, MODE_SPRITE, MODE_SDF,
                                     MODE_LIGHTRAY, MODE_SPRITE, MODE_KNIGHT, MODE_DARK, MODE_BLURSPRITE, MODE_COPY,
-                                    MODE_DOWN4, MODE_BLUR7, MODE_BLUR7G, MODE_TWOSTRIP, MODE_BW, MODE_GRAIN, MODE_BLUR7A };
+                                    MODE_DOWN4, MODE_BLUR7, MODE_BLUR7G, MODE_TWOSTRIP, MODE_BW, MODE_GRAIN, MODE_BLUR7A,
+                                    MODE_COLOROVERLAY };
 // Sprite masks (ch360_item.stencil): a pipeline per mode for drawing where the
 // stencil is 1 or more (inside) or 0 (outside); the masks' own two (add, remove).
 enum { STENCIL_NONE, STENCIL_INSIDE, STENCIL_OUTSIDE, STENCIL_TESTS, STENCIL_ADD = STENCIL_TESTS, STENCIL_REMOVE,
-       STENCIL_WRITE, STENCIL_EQUAL };   // the game's stencil masks: write a value / draw where it is that value
+       STENCIL_WRITE, STENCIL_EQUAL, STENCIL_GREATER };   // the game's stencil masks: write a value / draw where it is
+                                                          // that value / under it
 // Blend states (Unity's factors and ops) of the game's blend and mask shaders' passes.
 enum { BLEND_PREMUL, BLEND_REPLACE, BLEND_MASK_WRITE, BLEND_MASKED0, BLEND_MASKED1, BLEND_REV_DA, BLEND_ADD_DA,
        BLEND_REV_IDA, BLEND_ADD_IDA, BLEND_NO_COLOR, BLEND_MUL, BLEND_ADD_LIT, BLEND_REV_SUB };
 // Their passes' fragment programs.
 enum { PF_SPRITE, PF_INV, PF_STRAIGHT, PF_SQ, PF_A, PF_CLEAR, PF_SCREEN, PF_STENCIL, PF_BLENDK, PF_BLENDM, PF_BLENDN,
-       PASS_FRAGS };
+       PF_MONO, PF_BAND, PF_CAPPED, PF_HONEY, PF_ICE, PF_GRABOVL, PASS_FRAGS };
 struct FxPass {
     signed char frag, blend, stencil;
     unsigned char ref;
+    float lo, hi;   // the pass's own p2.xy (an alpha band, a cap) when not both 0
 };
 struct FxPasses {
     int n;
-    FxPass p[3];
+    FxPass p[6];
 };
-// Items' modes 20-34 (Effects.cs): each drawn in its passes, as Unity draws
-// every pass of a sprite's shader. 30 and 32 (the stencil masks of several
-// levels, Rum Runners') draw nothing yet, 31 not this way.
-const FxPasses PASSES[15] = {
+// Items' modes 20-38 (Effects.cs): each drawn in its passes, as Unity draws
+// every pass of a sprite's shader (StencilMaskedMultiReversed's last pass
+// draws nothing and is left out).
+const FxPasses PASSES[19] = {
     { 1, { { PF_INV, BLEND_MASK_WRITE, STENCIL_NONE, 0 } } },                                                  // 20 AlphaMask
     { 2, { { PF_INV, BLEND_MASKED0, STENCIL_NONE, 0 }, { PF_STRAIGHT, BLEND_MASKED1, STENCIL_NONE, 0 } } },    // 21 AlphaMasked
     { 2, { { PF_SQ, BLEND_REV_IDA, STENCIL_NONE, 0 }, { PF_SPRITE, BLEND_ADD_IDA, STENCIL_NONE, 0 } } },       // 22 ..NonDestructive
@@ -232,12 +235,22 @@ const FxPasses PASSES[15] = {
     { 1, { { PF_CLEAR, BLEND_MASK_WRITE, STENCIL_NONE, 0 } } },                                                // 27 AlphaMaskClearer
     { 1, { { PF_STENCIL, BLEND_NO_COLOR, STENCIL_WRITE, 5 } } },                                               // 28 StencilMask
     { 1, { { PF_SPRITE, BLEND_PREMUL, STENCIL_EQUAL, 5 } } },                                                  // 29 StencilMasked
-    { 0, { { 0, 0, 0, 0 } } },                                                                                 // 30 StencilMaskMulti
-    { 0, { { 0, 0, 0, 0 } } },                                                                                 // 31
-    { 0, { { 0, 0, 0, 0 } } },                                                                                 // 32 StencilMaskMultiClearer
+    { 6, { { PF_BAND, BLEND_NO_COLOR, STENCIL_WRITE, 9, 0.4f, 0.5f }, { PF_BAND, BLEND_NO_COLOR, STENCIL_WRITE, 10, 0.5f, 0.6f },
+           { PF_BAND, BLEND_NO_COLOR, STENCIL_WRITE, 11, 0.6f, 0.7f }, { PF_BAND, BLEND_NO_COLOR, STENCIL_WRITE, 12, 0.7f, 0.8f },
+           { PF_BAND, BLEND_NO_COLOR, STENCIL_WRITE, 13, 0.8f, 0.9f },
+           { PF_BAND, BLEND_NO_COLOR, STENCIL_WRITE, 14, 0.8999f, 2.0f } } },                                    // 30 StencilMaskMulti
+    { 6, { { PF_CAPPED, BLEND_PREMUL, STENCIL_GREATER, 9, 1.0f, 0 }, { PF_CAPPED, BLEND_PREMUL, STENCIL_EQUAL, 9, 0.5f, 0 },
+           { PF_CAPPED, BLEND_PREMUL, STENCIL_EQUAL, 10, 0.4f, 0 }, { PF_CAPPED, BLEND_PREMUL, STENCIL_EQUAL, 11, 0.3f, 0 },
+           { PF_CAPPED, BLEND_PREMUL, STENCIL_EQUAL, 12, 0.2f, 0 },
+           { PF_CAPPED, BLEND_PREMUL, STENCIL_EQUAL, 13, 0.1f, 0 } } },                                          // 31 ..MaskedMultiReversed
+    { 1, { { PF_BAND, BLEND_NO_COLOR, STENCIL_WRITE, 0, -1.0f, 2.0f } } },                                     // 32 StencilMaskMultiClearer
     { 2, { { PF_BLENDK, BLEND_MUL, STENCIL_NONE, 0 }, { PF_BLENDM, BLEND_ADD_LIT, STENCIL_NONE, 0 } } },       // 33 Blend Modes/Screen
     { 3, { { PF_BLENDK, BLEND_MUL, STENCIL_NONE, 0 }, { PF_BLENDM, BLEND_ADD_LIT, STENCIL_NONE, 0 },
            { PF_BLENDN, BLEND_REV_SUB, STENCIL_NONE, 0 } } },                                                  // 34 Hard Light
+    { 1, { { PF_MONO, BLEND_PREMUL, STENCIL_NONE, 0 } } },                                                     // 35 MonochromeNoBlack
+    { 1, { { PF_HONEY, BLEND_REPLACE, STENCIL_NONE, 0 } } },                                                   // 36 Honey
+    { 1, { { PF_ICE, BLEND_PREMUL, STENCIL_NONE, 0 } } },                                                      // 37 IceCubes
+    { 1, { { PF_GRABOVL, BLEND_PREMUL, STENCIL_NONE, 0 } } },                                                  // 38 Blend Modes/Overlay
 };
 const VkFormat DEPTH_FORMAT = VK_FORMAT_D24_UNORM_S8_UINT;
 
@@ -265,11 +278,26 @@ struct Garbage {
     VkFramebuffer fb;   // a render texture's
 };
 
+// GPU time stamps: slot 0 as the frame's work starts, then one as each run of
+// passes of one kind ends (vulkan4xenon writes the GPU clock once the GPU is idle).
+const unsigned QSLOTS = 16;
+enum { GPU_RT, GPU_FX, GPU_SCREEN, GPU_KINDS };
+
 struct Frame {
     VkCommandBuffer cmd;
     VkFence fence;
     VkSemaphore acquired, rendered;
     std::vector<Garbage> dead;
+    VkQueryPool queries;   // its own pool: resetting a pool waits for the submission that last wrote it
+    unsigned query_count;
+    unsigned char query_kind[QSLOTS];
+};
+
+// The host's side of frames since the player last asked (ch360_plat_host_stats):
+// times in ms, fill in screens of pixels.
+struct HostStats {
+    double frames, gpu_frames, gpu_ms, gpu_kind[GPU_KINDS], fence_ms, present_ms, host_ms, loads_ms, uploads_ms;
+    double textures, fill_screen, fill_offscreen, draws, passes, slow;
 };
 
 class Renderer {
@@ -283,6 +311,10 @@ public:
     size_t make_room(size_t bytes) { return release_unused(bytes); }
     double gpu_wait_ms, present_ms;
     double host_ms_[8];
+    HostStats stats_;
+    double host_gpu_[GPU_KINDS + 1], host_fill_[2];   // the HOST line's window: GPU ms by kind and in all, fill
+    unsigned host_gpu_frames_, host_passes_, host_slow_, host_slow_logged_;
+    double ts_period_ms_;
     unsigned host_draws_, host_items_;
     unsigned long long host_vertices_;
     unsigned uploads, evictions;
@@ -348,6 +380,7 @@ private:
     VkRenderPass pass_;
     VkRenderPass pass_load_;   // the screen again after a render texture's pass (kept, not cleared)
     VkRenderPass rt_pass_;     // a render texture: cleared, then sampled
+    VkRenderPass rt_pass_load_;   // a render texture gone on in after a grab's copy (what it held drawn back in)
     std::map<unsigned, Target> targets_;
     std::map<std::pair<int, int>, DepthBuf> depths_;   // render textures' depth and stencil by size but the screen's
     VkCommandPool pool_;
@@ -449,6 +482,11 @@ VkShaderModule Renderer::module(const uint32_t* code, unsigned bytes) {
 
 bool Renderer::init() {
     gpu_wait_ms = present_ms = 0;
+    memset(&stats_, 0, sizeof(stats_));
+    memset(host_gpu_, 0, sizeof(host_gpu_));
+    memset(host_fill_, 0, sizeof(host_fill_));
+    host_gpu_frames_ = host_passes_ = host_slow_ = host_slow_logged_ = 0;
+    ts_period_ms_ = 0;
     uploads = evictions = 0;
     frame_ = 0;
     frame_no_ = 0;
@@ -644,6 +682,9 @@ bool Renderer::init() {
     rpi.dependencyCount = 2;
     rpi.pDependencies = dep;
     if (!vk(vkCreateRenderPass(dev_, &rpi, NULL, &rt_pass_), "vkCreateRenderPass (render texture)")) return false;
+    a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    a.initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (!vk(vkCreateRenderPass(dev_, &rpi, NULL, &rt_pass_load_), "vkCreateRenderPass (render texture again)")) return false;
     views_.resize(count);
     fbs_.resize(count);
     for (uint32_t i = 0; i < count; ++i) {
@@ -694,6 +735,14 @@ bool Renderer::init() {
         vkCreateFence(dev_, &fci, NULL, &frames_[i].fence);
         vkCreateSemaphore(dev_, &semi, NULL, &frames_[i].acquired);
         vkCreateSemaphore(dev_, &semi, NULL, &frames_[i].rendered);
+        VkQueryPoolCreateInfo qci;
+        memset(&qci, 0, sizeof(qci));
+        qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qci.queryCount = QSLOTS;
+        frames_[i].queries = VK_NULL_HANDLE;
+        frames_[i].query_count = 0;
+        if (vkCreateQueryPool(dev_, &qci, NULL, &frames_[i].queries) != VK_SUCCESS) frames_[i].queries = VK_NULL_HANDLE;
     }
     if (!vk(vkAllocateCommandBuffers(dev_, &cai, &upload_cmd_), "vkAllocateCommandBuffers")) return false;
     fci.flags = 0;
@@ -762,6 +811,7 @@ bool Renderer::init() {
     frags_[MODE_MULTIPLY] = module(multiply_frag_spirv, MULTIPLY_FRAG_SPIRV_BYTES);
     frags_[MODE_OVERLAY] = module(overlay_frag_spirv, OVERLAY_FRAG_SPIRV_BYTES);
     frags_[MODE_SDF] = module(sdf_frag_spirv, SDF_FRAG_SPIRV_BYTES);
+    frags_[MODE_COLOROVERLAY] = module(coloroverlay_frag_spirv, COLOROVERLAY_FRAG_SPIRV_BYTES);
     frags_[MODE_LIGHTRAY] = module(lightray_frag_spirv, LIGHTRAY_FRAG_SPIRV_BYTES);
     frags_[MODE_KNIGHT] = module(knightglow_frag_spirv, KNIGHTGLOW_FRAG_SPIRV_BYTES);
     frags_[MODE_DARK] = module(darkness_frag_spirv, DARKNESS_FRAG_SPIRV_BYTES);
@@ -785,6 +835,12 @@ bool Renderer::init() {
     pass_frags_[PF_BLENDK] = module(blendk_frag_spirv, BLENDK_FRAG_SPIRV_BYTES);
     pass_frags_[PF_BLENDM] = module(blendm_frag_spirv, BLENDM_FRAG_SPIRV_BYTES);
     pass_frags_[PF_BLENDN] = module(blendn_frag_spirv, BLENDN_FRAG_SPIRV_BYTES);
+    pass_frags_[PF_MONO] = module(mono_frag_spirv, MONO_FRAG_SPIRV_BYTES);
+    pass_frags_[PF_BAND] = module(band_frag_spirv, BAND_FRAG_SPIRV_BYTES);
+    pass_frags_[PF_CAPPED] = module(capped_frag_spirv, CAPPED_FRAG_SPIRV_BYTES);
+    pass_frags_[PF_HONEY] = module(honey_frag_spirv, HONEY_FRAG_SPIRV_BYTES);
+    pass_frags_[PF_ICE] = module(ice_frag_spirv, ICE_FRAG_SPIRV_BYTES);
+    pass_frags_[PF_GRABOVL] = module(grabovl_frag_spirv, GRABOVL_FRAG_SPIRV_BYTES);
     mask_frag_ = module(mask_frag_spirv, MASK_FRAG_SPIRV_BYTES);
     vert_ = vert;
     memset(pipes_, 0, sizeof(pipes_));
@@ -807,6 +863,8 @@ bool Renderer::init() {
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(phys_, &props);
     logf("vk: %s, %dx%d, %u swapchain images", props.deviceName, W, H, count);
+    ts_period_ms_ = props.limits.timestampPeriod * 1e-6;
+    logf("vk: GPU time stamps %s (%.3f ns a tick, every 4th frame)", frames_[0].queries ? "on" : "unavailable", props.limits.timestampPeriod);
     return true;
 }
 
@@ -931,7 +989,7 @@ VkPipeline Renderer::make_pipeline(VkShaderModule frag, VkPipelineLayout layout,
                   : stencil == STENCIL_REMOVE ? VK_STENCIL_OP_DECREMENT_AND_CLAMP
                   : stencil == STENCIL_WRITE ? VK_STENCIL_OP_REPLACE : VK_STENCIL_OP_KEEP;
         so.compareOp = stencil == STENCIL_INSIDE ? VK_COMPARE_OP_LESS_OR_EQUAL
-                     : stencil == STENCIL_OUTSIDE ? VK_COMPARE_OP_GREATER
+                     : stencil == STENCIL_OUTSIDE || stencil == STENCIL_GREATER ? VK_COMPARE_OP_GREATER
                      : stencil == STENCIL_EQUAL ? VK_COMPARE_OP_EQUAL : VK_COMPARE_OP_ALWAYS;
         so.compareMask = 0xFF;
         so.writeMask = stencil == STENCIL_ADD || stencil == STENCIL_REMOVE || stencil == STENCIL_WRITE ? 0xFF : 0;
@@ -1514,6 +1572,8 @@ void Renderer::frame(const ch360_frame* f) {
     // wholly off screen), load what those draw, then run the uploads.
     Stage marker("vk: loading textures");
     on_view_.assign(f->item_count, 0);
+    unsigned uploads0 = uploads;
+    double fill[2] = { 0, 0 };   // pixels the items cover (their boxes in their views): the screen's, render textures'
     for (unsigned v = 0; v < f->view_count; ++v) {
         const ch360_view& view = f->views[v];
         float tw = view.target ? (float)view.tw : (float)W, th = view.target ? (float)view.th : (float)H;
@@ -1525,6 +1585,12 @@ void Renderer::frame(const ch360_frame* f) {
             bool on = it.count > 0 && (it.x0 > it.x1 || (it.x1 >= rx0 && it.x0 <= rx1 && it.y1 >= ry0 && it.y0 <= ry1));
             on_view_[i] = on ? 1 : 0;
             if (!on) continue;
+            if (it.x0 > it.x1) fill[view.target ? 1 : 0] += (double)(rx1 - rx0) * (ry1 - ry0);
+            else {
+                float ax0 = it.x0 > rx0 ? it.x0 : rx0, ax1 = it.x1 < rx1 ? it.x1 : rx1;
+                float ay0 = it.y0 > ry0 ? it.y0 : ry0, ay1 = it.y1 < ry1 ? it.y1 : ry1;
+                if (ax1 > ax0 && ay1 > ay0) fill[view.target ? 1 : 0] += (double)(ax1 - ax0) * (ay1 - ay0);
+            }
             load_for(it.texture);
             if (it.mode == 6 || it.mode == 17)   // the light ray's two more textures, the film grain's overlay
                 for (int k = 0; k < 2; ++k) load_for(it.textures[k]);
@@ -1537,6 +1603,22 @@ void Renderer::frame(const ch360_frame* f) {
     double t2 = now_ms();
     gpu_wait_ms += t2 - t1;
     vkResetFences(dev_, 1, &fr.fence);
+    if (fr.query_count > 1) {
+        uint64_t ts[QSLOTS];
+        if (vkGetQueryPoolResults(dev_, fr.queries, 0, fr.query_count, sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+            double total = (double)(ts[fr.query_count - 1] - ts[0]) * ts_period_ms_;
+            for (unsigned q = 1; q < fr.query_count; ++q) {
+                double d = (double)(ts[q] - ts[q - 1]) * ts_period_ms_;
+                stats_.gpu_kind[fr.query_kind[q]] += d;
+                host_gpu_[fr.query_kind[q]] += d;
+            }
+            stats_.gpu_ms += total;
+            stats_.gpu_frames += 1;
+            host_gpu_[GPU_KINDS] += total;
+            ++host_gpu_frames_;
+        }
+    }
+    fr.query_count = 0;
     for (size_t i = 0; i < fr.dead.size(); ++i) {
         if (fr.dead[i].fb) vkDestroyFramebuffer(dev_, fr.dead[i].fb, NULL);
         if (fr.dead[i].set) vkFreeDescriptorSets(dev_, desc_pool_, 1, &fr.dead[i].set);
@@ -1565,6 +1647,25 @@ void Renderer::frame(const ch360_frame* f) {
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &bi);
+    // Every 4th frame timed on the GPU: a stamp as its work starts and as each run of passes of one
+    // kind (render textures, effect blits, the screen) ends.
+    bool timed = fr.queries != VK_NULL_HANDLE && frame_no_ % 4 == 0;
+    int run_kind = -1;
+    unsigned passes = 0;
+    if (timed) {
+        vkCmdResetQueryPool(cmd, fr.queries, 0, QSLOTS);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, fr.queries, fr.query_count++);
+    }
+    auto stamp = [&](bool last) {   // the run of run_kind passes ends (the last slot kept for the frame's end)
+        if (!timed || run_kind < 0 || fr.query_count >= (last ? QSLOTS : QSLOTS - 1)) return;
+        fr.query_kind[fr.query_count] = (unsigned char)run_kind;
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, fr.queries, fr.query_count++);
+    };
+    auto kind_of = [&](const ch360_view& view) {
+        if (view.target == 0) return (int)GPU_SCREEN;
+        unsigned m = view.items && view.first_item < f->item_count ? f->items[view.first_item].mode : 0;
+        return m >= 11 && m <= 18 ? (int)GPU_FX : (int)GPU_RT;
+    };
     VkDeviceSize base = (VkDeviceSize)frame_ * VERTEX_RING;
     vkCmdBindVertexBuffers(cmd, 0, 1, &vbuf_, &base);
     ch360_vertex* ring = (ch360_vertex*)(vmap_ + base);
@@ -1602,6 +1703,12 @@ void Renderer::frame(const ch360_frame* f) {
         flush();
         if (in_pass) vkCmdEndRenderPass(cmd);
         in_pass = false;
+        int kind = kind_of(view);
+        if (kind != run_kind) {
+            stamp(false);
+            run_kind = kind;
+        }
+        ++passes;
         cur_target = view.target;
         skip_target = false;
         VkClearValue clears[2];
@@ -1625,7 +1732,7 @@ void Renderer::frame(const ch360_frame* f) {
                 skip_target = true;
                 return;
             }
-            rbi.renderPass = rt_pass_;
+            rbi.renderPass = (view.clear & 4) ? rt_pass_load_ : rt_pass_;
             rbi.framebuffer = t->fb;
             pw = (int)view.tw;
             ph = (int)view.th;
@@ -1702,13 +1809,14 @@ void Renderer::frame(const ch360_frame* f) {
             Tex* t = it.texture >= 0 ? sampled(it.texture) : &white_;
             if (!t || !t->image) continue;
             unsigned mode = it.mode;
-            if (mode >= 20 && mode <= 34) {
+            if (mode >= 20 && mode <= 38) {
                 // The game's blend and mask shaders: the item drawn once per pass, each with its state.
                 const FxPasses& ps = PASSES[mode - 20];
                 if (ps.n == 0) continue;
                 if (used + it.count > cap) break;
                 flush();
-                VkDescriptorSet sets[2] = { t->set, white_.set };
+                Tex* g = it.textures[0] >= 0 ? sampled(it.textures[0]) : NULL;   // a grab, the grab shaders'
+                VkDescriptorSet sets[2] = { t->set, g && g->image ? g->set : white_.set };
                 g_memcpy(&ring[used], &f->vertices[it.first], it.count * sizeof(ch360_vertex));
                 for (int k = 0; k < ps.n; ++k) {
                     VkPipeline pp = pass_pipeline(ps.p[k]);
@@ -1720,6 +1828,10 @@ void Renderer::frame(const ch360_frame* f) {
                         use_layout(fx_layout_);
                         vkCmdPushConstants(cmd, fx_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 16, 48, it.params);
                     }
+                    if (ps.p[k].lo != 0.0f || ps.p[k].hi != 0.0f) {   // the pass's band or cap into p2.xy
+                        float band[2] = { ps.p[k].lo, ps.p[k].hi };
+                        vkCmdPushConstants(cmd, fx_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 48, sizeof(band), band);
+                    }
                     if (ps.p[k].stencil == STENCIL_WRITE) stencil_dirty = true;
                     vkCmdDraw(cmd, it.count, 1, (uint32_t)used, 0);
                     ++draws;
@@ -1730,7 +1842,7 @@ void Renderer::frame(const ch360_frame* f) {
                 bound_set = VK_NULL_HANDLE;
                 continue;
             }
-            int m = mode < 19 ? (int)PIPE_MODE[mode] : (int)MODE_SPRITE;
+            int m = mode < 20 ? (int)PIPE_MODE[mode] : (int)MODE_SPRITE;
             VkPipeline pipe;
             if (mode == 7) {   // a sprite mask: the stencil alone
                 if (it.stencil != 1 && it.stencil != 2) continue;
@@ -1793,6 +1905,7 @@ void Renderer::frame(const ch360_frame* f) {
         begin(none);
         vkCmdEndRenderPass(cmd);
     }
+    stamp(true);
     vkEndCommandBuffer(cmd);
     double t5 = now_ms();
     VkPipelineStageFlags stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -1841,15 +1954,49 @@ void Renderer::frame(const ch360_frame* f) {
     host_draws_ += draws;
     host_vertices_ += used;
     host_items_ += f->item_count;
+    host_passes_ += passes;
+    host_fill_[0] += fill[0] / (W * H);
+    host_fill_[1] += fill[1] / (W * H);
+    stats_.frames += 1;
+    stats_.fence_ms += t2 - t1;
+    stats_.present_ms += t7 - t6;
+    stats_.host_ms += t6 - t0;
+    stats_.loads_ms += t1 - t0;
+    stats_.uploads_ms += t3 - t2;
+    stats_.textures += uploads - uploads0;
+    stats_.fill_screen += fill[0] / (W * H);
+    stats_.fill_offscreen += fill[1] / (W * H);
+    stats_.draws += draws;
+    stats_.passes += passes;
+    // A host part over 12 ms (texture loads, a GPU behind, uploads...) said frame by frame, six a window.
+    if (t6 - t0 > 12.0) {
+        stats_.slow += 1;
+        ++host_slow_;
+        if (host_slow_logged_ < 6) {
+            ++host_slow_logged_;
+            logf("HOST SLOW frame %u: %.1f ms: boxes+loads %.1f (%u textures), fence %.1f, uploads %.1f, acquire %.1f, record %.1f, "
+                 "submit %.1f, present %.1f; %u draws, %u passes, %u items", frame_no_, t6 - t0, t1 - t0, uploads - uploads0, t2 - t1,
+                 t3 - t2, t4 - t3, t5 - t4, t6 - t5, t7 - t6, draws, passes, f->item_count);
+        }
+    }
     if (frame_no_ % 300 == 0) {
         logf("HOST frames %u-%u: glue %.1f, boxes+loads %.1f, fence %.1f, uploads %.1f, acquire %.1f, record %.1f, submit %.1f, "
              "present %.1f ms/frame; %u draws, %u vertices, %u items a frame; %u items left on halved atlas pages so far",
              frame_no_ - 299, frame_no_, host_ms_[0] / 300, host_ms_[1] / 300, host_ms_[2] / 300, host_ms_[3] / 300,
              host_ms_[4] / 300, host_ms_[5] / 300, host_ms_[6] / 300, host_ms_[7] / 300, host_draws_ / 300,
              (unsigned)(host_vertices_ / 300), host_items_ / 300, ch360_remap_misses());
+        // The GPU's own time (time stamps on every 4th frame), the passes and the pixels the items cover.
+        double gf = host_gpu_frames_ ? host_gpu_frames_ : 1;
+        logf("GPU frames %u-%u: %.1f ms/frame (render textures %.1f, effects %.1f, screen %.1f; %u frames timed); %.1f passes a frame; "
+             "fill %.2f screens + %.2f in render textures a frame; %u slow host parts (%u said)",
+             frame_no_ - 299, frame_no_, host_gpu_[GPU_KINDS] / gf, host_gpu_[GPU_RT] / gf, host_gpu_[GPU_FX] / gf, host_gpu_[GPU_SCREEN] / gf,
+             host_gpu_frames_, host_passes_ / 300.0, host_fill_[0] / 300, host_fill_[1] / 300, host_slow_, host_slow_logged_);
         memset(host_ms_, 0, sizeof(host_ms_));
+        memset(host_gpu_, 0, sizeof(host_gpu_));
+        memset(host_fill_, 0, sizeof(host_fill_));
         host_draws_ = host_items_ = 0;
         host_vertices_ = 0;
+        host_gpu_frames_ = host_passes_ = host_slow_ = host_slow_logged_ = 0;
     }
 }
 
@@ -1929,6 +2076,23 @@ static void probe_on_thread(int hw, size_t stack, const char* where) {
     pthread_t th;
     if (pthread_create(&th, &attr, probe_thread, &arg) == 0) pthread_join(th, NULL);
     pthread_attr_destroy(&attr);
+}
+
+// The host's tallies since the last call, for the player's per-scene summaries (u32s: counts, ms x 100, fill x 100).
+extern "C" void ch360_plat_host_stats(unsigned* out, int n) {
+    if (!g_renderer || n <= 0) return;
+    HostStats& s = g_renderer->stats_;
+    static unsigned underruns_seen = 0;
+    unsigned f, tot;
+    memory_mb(&f, &tot);
+    double v[CH360_HOST_STATS] = {
+        s.frames, s.gpu_frames, s.gpu_ms * 100, s.gpu_kind[GPU_RT] * 100, s.gpu_kind[GPU_FX] * 100, s.gpu_kind[GPU_SCREEN] * 100,
+        s.fence_ms * 100, s.present_ms * 100, s.host_ms * 100, s.loads_ms * 100, s.uploads_ms * 100, s.textures,
+        s.fill_screen * 100, s.fill_offscreen * 100, s.draws, s.passes, (double)(g_audio_underruns - underruns_seen),
+        (double)(g_renderer->texture_bytes() >> 20), (double)f, s.slow };
+    underruns_seen = g_audio_underruns;
+    for (int i = 0; i < n && i < CH360_HOST_STATS; ++i) out[i] = v[i] < 0 ? 0 : v[i] > 4294967295.0 ? 0xFFFFFFFFu : (unsigned)v[i];
+    memset(&s, 0, sizeof(s));
 }
 
 extern "C" int ch360_plat_frame_begin(void) {

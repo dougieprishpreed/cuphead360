@@ -140,7 +140,7 @@ namespace Cuphead360.Engine
             if (viewsUsed == viewPool.Count) viewPool.Add(new View());
             var v = viewPool[viewsUsed++];
             v.Camera = cam; v.PixelRect = rect; v.Items.Clear();
-            v.Target = target; v.IsBlit = false; v.Group = group;
+            v.Target = target; v.IsBlit = false; v.Group = group; v.Resume = false;
             return v;
         }
 
@@ -169,6 +169,8 @@ namespace Cuphead360.Engine
             public bool IsBlit;
             /// <summary>The camera it belongs to this frame (its view, its image effects' blits).</summary>
             public int Group;
+            /// <summary>Goes on in its target with what it held (after a grab's copy): no clear.</summary>
+            public bool Resume;
         }
 
         public static Camera Current;
@@ -342,8 +344,23 @@ namespace Cuphead360.Engine
             // Cameras with a target texture first (Unity renders them before the others), then the
             // screen's; each by depth.
             group = 0;
-            foreach (var cam in cams) if (cam.Target != null) CameraViews(cam);
-            foreach (var cam in cams) if (cam.Target == null) CameraViews(cam);
+            screenTarget = null;
+            foreach (var cam in cams) if (cam.Target != null) CameraViews(cam, false);
+            int lastScreen = -1;
+            for (int i = 0; i < cams.Count; i++) if (cams[i].Target == null) lastScreen = i;
+            for (int i = 0; i < cams.Count; i++) if (cams[i].Target == null) CameraViews(cams[i], i == lastScreen);
+            SplitForGrabs();
+            // The picture still in a texture (the last screen camera had no image effects to take it on): to the screen.
+            if (screenTarget != null)
+            {
+                group++;
+                var copy = AddBlit(null, Icalls.ScreenWidth, Icalls.ScreenHeight);
+                copy.Texture = screenTarget;
+                copy.Effect = Effects.Copy;
+                copy.P ??= new float[Effects.ParamCount];
+                Array.Clear(copy.P, 0, copy.P.Length);
+                screenTarget = null;
+            }
             // Screen-space overlay canvases draw last, over every camera (and its image effects).
             group++;
             var overlay = NewView(null, new Rect(0, 0, Icalls.ScreenWidth, Icalls.ScreenHeight));
@@ -359,29 +376,40 @@ namespace Cuphead360.Engine
         }
 
         static int group;
+        /// <summary>The texture the screen's picture is in after an image-effect camera that wasn't the last to draw (null: the screen).</summary>
+        static RenderTexture screenTarget;
 
         /// <summary>
         /// A camera's view, into its target texture or the screen. With image effects (OnRenderImage) it draws
         /// into a temporary texture the effects then blit on, the last into its target; one that doesn't clear
-        /// starts from what is on the screen, so the screen's views so far draw into that texture instead.
+        /// starts from what is on the screen, so the screen's views so far draw into that texture instead. A
+        /// screen camera's last effect blits onto the screen only if no camera draws there after it; otherwise
+        /// into a texture the later cameras draw on (Unity hands it a texture, not null: the map's and levels'
+        /// pause blur, BlurOptimized, reads its size), put on the screen at the end.
         /// </summary>
-        static void CameraViews(NCamera cam)
+        static void CameraViews(NCamera cam, bool lastOnScreen)
         {
             group++;
             var fx = Effects.ImageEffects(cam);
             var target = cam.Target;
             if (fx.Count == 0)
             {
-                var v = NewView(cam, cam.PixelRect, target);
+                var v = NewView(cam, cam.PixelRect, target ?? screenTarget);
                 ViewItems(cam, CamXform.Of(cam), v.Items);
                 views.Add(v);
                 return;
             }
             int w = target != null ? Effects.Width(target) : Icalls.ScreenWidth, h = target != null ? Effects.Height(target) : Icalls.ScreenHeight;
-            var src = Effects.GetTemporary(w, h);
             bool clears = cam.ClearFlags == CameraClearFlags.SolidColor || cam.ClearFlags == CameraClearFlags.Skybox;
-            if (!clears && target == null)
-                foreach (var pv in views) if (pv.Target == null) pv.Target = src;
+            RenderTexture src;
+            if (target == null && !clears && screenTarget != null) src = screenTarget;   // the picture so far is already in one
+            else
+            {
+                src = Effects.GetTemporary(w, h);
+                if (!clears && target == null)
+                    foreach (var pv in views) if (pv.Target == null) pv.Target = src;
+            }
+            if (target == null) screenTarget = null;
             var cv = NewView(cam, cam.PixelRect, src);
             ViewItems(cam, CamXform.Of(cam), cv.Items);
             views.Add(cv);
@@ -392,13 +420,60 @@ namespace Cuphead360.Engine
             var cur = src;
             for (int i = 0; i < chain.Count; i++)
             {
-                var dst = i == chain.Count - 1 ? target : Effects.GetTemporary(w, h);
+                var dst = i < chain.Count - 1 ? Effects.GetTemporary(w, h) : target != null || lastOnScreen ? target : Effects.GetTemporary(w, h);
                 Effects.RunImageEffect(chain[i], cur, dst);
                 Effects.ReleaseTemporary(cur);
                 cur = dst;
             }
+            if (target == null && !lastOnScreen) screenTarget = cur;
         }
         static readonly List<NBehaviour> fxChain = new List<NBehaviour>();
+
+        static readonly HashSet<string> grabWarned = new HashSet<string>();
+
+        /// <summary>
+        /// Unity's GrabPass: before an item whose shader reads what is behind it (Effects.NeedsGrab), the camera's
+        /// view stops, a blit copies its target so far into a temporary texture the item samples (consecutive such
+        /// items share one), and a resumed view of the same camera goes on in the target with what it held. Only a
+        /// target texture can be copied: on the screen itself (no image-effect camera after it) the item stays plain.
+        /// </summary>
+        static void SplitForGrabs()
+        {
+            for (int vi = 0; vi < views.Count; vi++)
+            {
+                var v = views[vi];
+                if (v.IsBlit) continue;
+                int k = -1;
+                for (int i = 0; i < v.Items.Count; i++)
+                    if (v.Items[i].Tex2 == null && Effects.NeedsGrab(Effects.ModeOf(v.Items[i]))) { k = i; break; }
+                if (k < 0) continue;
+                if (v.Target == null)
+                {
+                    if (grabWarned.Add(v.Camera?.GameObject?.Name ?? "")) Log.Line($"EFFECT a grab on the screen itself ({v.Items[k].Name}): drawn plain");
+                    continue;
+                }
+                int w = Effects.Width(v.Target), h = Effects.Height(v.Target);
+                var grab = Effects.GetTemporary(w, h);
+                var copyView = NewView(null, new Rect(0, 0, w, h), grab);
+                copyView.IsBlit = true; copyView.Group = v.Group;
+                var it = NewItem();
+                var s = it.ScreenOf(4);
+                s[0] = new Vector2(0, 0); s[1] = new Vector2(w, 0); s[2] = new Vector2(w, h); s[3] = new Vector2(0, h);
+                it.Screen = s; it.Uv = quadUv; it.Triangles = quadTris; it.BaseName = "Grab"; it.Kind = "blit";
+                it.Texture = v.Target; it.Effect = Effects.Copy;
+                it.P ??= new float[Effects.ParamCount];
+                Array.Clear(it.P, 0, it.P.Length);
+                copyView.Items.Add(it);
+                var rest = NewView(v.Camera, v.PixelRect, v.Target);
+                rest.Group = v.Group; rest.Resume = true;
+                for (int i = k; i < v.Items.Count; i++) rest.Items.Add(v.Items[i]);
+                v.Items.RemoveRange(k, v.Items.Count - k);
+                for (int i = 0; i < rest.Items.Count && Effects.NeedsGrab(Effects.ModeOf(rest.Items[i])); i++) rest.Items[i].Tex2 = grab;
+                views.Insert(vi + 1, copyView);
+                views.Insert(vi + 2, rest);
+                vi++;   // the next look starts at the resumed view (its later grab items)
+            }
+        }
 
         public static int ViewCount => views.Count;
         public static View ViewAt(int i) => views[i];
@@ -780,6 +855,7 @@ namespace Cuphead360.Engine
                     sb.Append(",\"target\":{\"rt\":").Append(Effects.TargetId(v.Target)).Append(",\"name\":").Append(S(Objects.Of(v.Target)?.Name))
                       .Append(",\"size\":[").Append(Effects.Width(v.Target)).Append(',').Append(Effects.Height(v.Target)).Append("]}");
                 if (v.IsBlit) sb.Append(",\"blit\":true");
+                if (v.Resume) sb.Append(",\"resume\":true");
                 if (c != null) sb.Append(",\"background\":[").Append(F(c.Background.r)).Append(',').Append(F(c.Background.g)).Append(',').Append(F(c.Background.b)).Append(',').Append(F(c.Background.a)).Append(']');
                 sb.Append(",\"items\":[");
                 for (int ii = 0; ii < v.Items.Count; ii++)

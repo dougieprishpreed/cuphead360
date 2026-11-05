@@ -472,7 +472,35 @@ void main() {
     vec4 o = texture2D(uTex2, fract(vec2(dot(vUv, uP1.zw), dot(vUv, uP2.xy))));
     gl_FragColor = vec4(o.rgb * (vec3(r, g, b) + 1.0 - o.a), 1.0);
   }
-  else if (uMode >= 40 && uMode <= 50) {
+  else if (uMode == 19) { vec3 o = mix(2.0 * t.rgb * c.rgb, 1.0 - 2.0 * (1.0 - t.rgb) * (1.0 - c.rgb), step(0.5, t.r)); float oa = t.a * c.a; gl_FragColor = vec4(o * oa, oa); }   // premultiplied (the effects' blend)
+  else if (uMode >= 52 && uMode <= 56) {
+      // Banded stencil masks, capped alpha, and the grab shaders (console/xsdk/shaders band, capped, honey, ice, grabovl).
+      vec4 tc = t * c;
+      vec2 g = gl_FragCoord.xy * uP2.zw;
+      if (uMode == 52) { if (tc.a <= uP2.x || tc.a > uP2.y) discard; gl_FragColor = vec4(0.0); }
+      else if (uMode == 53) { float a = min(tc.a, uP2.x); gl_FragColor = vec4(tc.rgb * a, a); }
+      else if (uMode == 56) {
+        vec3 gr = texture2D(uTex2, g).rgb;
+        vec3 o = mix(1.0 - 2.0 * (1.0 - gr) * (1.0 - t.rgb), 2.0 * gr * t.rgb, step(0.5, gr.r)) * c.rgb;
+        float a = t.a * c.a; gl_FragColor = vec4(o * a, a);
+      }
+      else {
+        float d = uP0.x * t.a;
+        vec3 b = texture2D(uTex2, g - vec2(0.0, 3.0 * d)).rgb * 0.0205 + texture2D(uTex2, g - vec2(0.0, 2.0 * d)).rgb * 0.0855
+               + texture2D(uTex2, g - vec2(0.0, d)).rgb * 0.232 + texture2D(uTex2, g).rgb * 0.324 + texture2D(uTex2, g + vec2(0.0, d)).rgb * 0.232
+               + texture2D(uTex2, g + vec2(0.0, 2.0 * d)).rgb * 0.0855 + texture2D(uTex2, g + vec2(0.0, 3.0 * d)).rgb * 0.0205;
+        vec3 lit = clamp(2.0 * t.rgb, 0.0, 1.0);
+        vec3 l = clamp(2.0 * t.rgb - 1.0, 0.0, 1.0) * (1.0 - b * lit) + b * lit;
+        if (uMode == 54) gl_FragColor = vec4(mix(b, l, t.a), t.a);
+        else {
+          float keep = max(step(uP0.y, t.a) * (1.0 - step(t.a, uP0.y)), (1.0 - step(uP0.w, t.g)) * (1.0 - step(uP1.x, t.b)) * (1.0 - step(t.a, 0.0)));
+          float none = (1.0 - keep) * (1.0 - step(uP0.z, t.a));
+          vec4 o = vec4(mix(l, t.rgb, uP1.y), 1.0);
+          gl_FragColor = mix(mix(o, vec4(0.0), none), t, keep);
+        }
+      }
+    }
+  else if (uMode >= 40 && uMode <= 51) {
     // The passes of the game's blend and mask shaders (console/xsdk/shaders/am_*, stencilmask, blend*).
     vec4 tc = t * c; float a = t.a * c.a; float hi = step(0.5, t.r);
     vec3 hard = a * mix(t.rgb, 2.0 * t.rgb - 1.0, hi);
@@ -486,6 +514,16 @@ void main() {
     else if (uMode == 47) gl_FragColor = vec4(mix(1.0 - a + a * c.rgb * (1.0 - t.rgb), 1.0 - a + hi * 2.0 * a * (1.0 - t.rgb), uP0.x), 1.0);
     else if (uMode == 48) gl_FragColor = vec4(max(mix(a * c.rgb * t.rgb, hard, uP0.x), vec3(0.0)), a);
     else if (uMode == 49) gl_FragColor = vec4(max(-hard, vec3(0.0)), 0.0);
+    else if (uMode == 51) {
+      vec2 tx = uP2.xy;
+      vec4 m = max(max(max(texture2D(uTex, vUv + vec2(-tx.x, tx.y)), texture2D(uTex, vUv + vec2(tx.x, -tx.y))), max(texture2D(uTex, vUv - tx), texture2D(uTex, vUv + tx))), t);
+      float edge = 1.0 - 2.0 * abs(m.a - 0.5);
+      float ratio = max(max(t.r, t.g), t.b) / max(max(max(m.r, m.g), m.b), 0.5);
+      vec4 mono = uP0 + min(min(t.r, t.g), t.b) * (vec4(1.0) - uP0);
+      vec4 r = mix(t, mono, uP1.x); r.a = mix(r.a, ratio * t.a, uP1.x);
+      vec4 o = mix(r, t, edge) * c;
+      gl_FragColor = vec4(o.rgb * o.a, o.a);
+    }
     else gl_FragColor = vec4(tc.rgb * tc.a, tc.a);
   }
   else if (uMode == 18) {
@@ -705,7 +743,8 @@ void main() {
             float sx = 1, sy = 1;
             foreach (var v in views)
             {
-                // A render texture's run of views starts cleared (transparent); the screen keeps what it has.
+                // A render texture's run of views starts cleared (transparent), but where it goes on after a
+                // grab's copy (Resume); the screen keeps what it has.
                 if (first || !ReferenceEquals(v.Target, current))
                 {
                     current = v.Target;
@@ -726,21 +765,21 @@ void main() {
                         glUniform2f(uScreen, t.w, t.h);
                         glClearColor(0, 0, 0, 0);
                         glStencilMask(0xFF);
-                        glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+                        if (!v.Resume) glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
                     }
                     glEnable(GL_SCISSOR_TEST);
                     first = false;
                 }
                 var r = v.PixelRect;
                 glScissor((int)(r.x * sx), (int)(r.y * sy), (int)Math.Ceiling(r.width * sx), (int)Math.Ceiling(r.height * sy));
-                if (v.Camera != null && (v.Camera.ClearFlags == CameraClearFlags.SolidColor || v.Camera.ClearFlags == CameraClearFlags.Skybox))
+                if (!v.Resume && v.Camera != null && (v.Camera.ClearFlags == CameraClearFlags.SolidColor || v.Camera.ClearFlags == CameraClearFlags.Skybox))
                 {
                     var bg = v.Camera.Background;
                     glClearColor(bg.r, bg.g, bg.b, v.Target != null ? bg.a : 1);
                     glClear(GL_COLOR_BUFFER_BIT);
                 }
                 glStencilMask(0xFF);
-                glClear(GL_STENCIL_BUFFER_BIT);   // each camera starts with a clear stencil (UGUI masks)
+                if (!v.Resume) glClear(GL_STENCIL_BUFFER_BIT);   // each camera starts with a clear stencil (UGUI masks)
                 foreach (var it in v.Items) DrawItem(it, sx, sy);
             }
             glDisable(GL_STENCIL_TEST);
@@ -749,7 +788,30 @@ void main() {
 
         // The game's blend and mask shaders' passes (console/xsdk/main.cpp, PASSES): program (uMode), blend
         // (GL factors, colour then alpha, and ops), stencil (0 none, 1 write the value, 2 draw where it is).
-        static readonly (int prog, uint sf, uint df, uint sfa, uint dfa, bool revRgb, bool noColor, int stencil, int sref)[][] passes =
+        static (int prog, uint sf, uint df, uint sfa, uint dfa, bool revRgb, bool noColor, int stencil, int sref, float lo, float hi)[][] passes => banded ??= Bands(passTable);
+        static (int prog, uint sf, uint df, uint sfa, uint dfa, bool revRgb, bool noColor, int stencil, int sref, float lo, float hi)[][] banded;
+
+        /// <summary>The table with each pass's band or cap (p2.xy), as console/xsdk/main.cpp's PASSES.</summary>
+        static (int, uint, uint, uint, uint, bool, bool, int, int, float, float)[][] Bands((int prog, uint sf, uint df, uint sfa, uint dfa, bool revRgb, bool noColor, int stencil, int sref)[][] t)
+        {
+            var r = new (int, uint, uint, uint, uint, bool, bool, int, int, float, float)[t.Length + 3][];
+            for (int i = 0; i < t.Length; i++) r[i] = Array.ConvertAll(t[i], x => (x.prog, x.sf, x.df, x.sfa, x.dfa, x.revRgb, x.noColor, x.stencil, x.sref, 0f, 0f));
+            // 30 StencilMaskMulti: 9-14 by the mask's alpha band; 31 the reversed masked sprite: whole under 9, capped in each band; 32 the clearer.
+            var multi = new (int, uint, uint, uint, uint, bool, bool, int, int, float, float)[6];
+            for (int p = 0; p < 6; p++) multi[p] = (52, 1u, 0x0303u, 1u, 0x0303u, false, true, 1, 9 + p, p < 5 ? 0.4f + 0.1f * p : 0.8999f, p < 5 ? 0.5f + 0.1f * p : 2f);
+            r[10] = multi;
+            var rev = new (int, uint, uint, uint, uint, bool, bool, int, int, float, float)[6];
+            rev[0] = (53, 1u, 0x0303u, 1u, 0x0303u, false, false, 3, 9, 1f, 0f);
+            for (int p = 1; p < 6; p++) rev[p] = (53, 1u, 0x0303u, 1u, 0x0303u, false, false, 2, 8 + p, 0.6f - 0.1f * p, 0f);
+            r[11] = rev;
+            r[12] = new[] { (52, 1u, 0x0303u, 1u, 0x0303u, false, true, 1, 0, -1f, 2f) };
+            r[t.Length] = new[] { (54, 1u, 0u, 1u, 0u, false, false, -1, 0, 0f, 0f) };              // 36 Honey (replace)
+            r[t.Length + 1] = new[] { (55, 1u, 0x0303u, 1u, 0x0303u, false, false, 0, 0, 0f, 0f) };  // 37 IceCubes
+            r[t.Length + 2] = new[] { (56, 1u, 0x0303u, 1u, 0x0303u, false, false, 0, 0, 0f, 0f) };  // 38 Overlay
+            return r;
+        }
+
+        static readonly (int prog, uint sf, uint df, uint sfa, uint dfa, bool revRgb, bool noColor, int stencil, int sref)[][] passTable =
         {
             /* 20 */ new[] { (40, 0u, 1u, 1u, 0u, false, false, 0, 0) },
             /* 21 */ new[] { (40, 0u, 1u, 0x0305u, 1u, false, false, 0, 0), (41, 0x0305u, 0x0304u, 0u, 1u, false, false, 0, 0) },
@@ -767,14 +829,18 @@ void main() {
             /* 33 */ new[] { (47, 0u, 0x0300u, 0u, 1u, false, false, 0, 0), (48, 1u, 1u, 0x0302u, 0x0303u, false, false, 0, 0) },
             /* 34 */ new[] { (47, 0u, 0x0300u, 0u, 1u, false, false, 0, 0), (48, 1u, 1u, 0x0302u, 0x0303u, false, false, 0, 0),
                              (49, 1u, 1u, 0u, 1u, true, false, 0, 0) },
+            /* 35 */ new[] { (51, 1u, 0x0303u, 1u, 0x0303u, false, false, 0, 0) },
         };
 
         static void DrawPasses(RenderList.Item it, int mode, int n, uint tex)
         {
             var p = effectParams;
             Effects.Params(it, mode, p);
-            glUniform4f(uP0, p[0], p[1], p[2], p[3]);
+            glUniform4f(uP0, p[0], p[1], p[2], p[3]); glUniform4f(uP1, p[4], p[5], p[6], p[7]); glUniform4f(uP2, p[8], p[9], p[10], p[11]);
             glUniform4f(uTint, it.Tint.r, it.Tint.g, it.Tint.b, it.Tint.a);
+            glActiveTexture(0x84C1);   // TEXTURE1: the grab
+            glBindTexture(GL_TEXTURE_2D, it.Tex2 != null ? Texture(it.Tex2, out _) : 0);
+            glActiveTexture(0x84C0);
             glBindTexture(GL_TEXTURE_2D, tex);
             fixed (float* pp = pos) fixed (float* up = uv) fixed (byte* cp = col)
             {
@@ -784,21 +850,24 @@ void main() {
                 foreach (var ps in passes[mode - 20])
                 {
                     glUniform1i(uMode, ps.prog);
+                    if (ps.lo != 0f || ps.hi != 0f) glUniform4f(uP2, ps.lo, ps.hi, p[10], p[11]);
+                    if (ps.stencil < 0) glDisable(GL_BLEND); else glEnable(GL_BLEND);
                     glBlendFuncSeparate(ps.sf, ps.df, ps.sfa, ps.dfa);
                     glBlendEquationSeparate(ps.revRgb ? 0x800Bu /* FUNC_REVERSE_SUBTRACT */ : 0x8006u /* FUNC_ADD */, 0x8006u);
                     if (ps.noColor) glColorMask(false, false, false, false);
-                    if (ps.stencil != 0)
+                    if (ps.stencil > 0)
                     {
                         glEnable(GL_STENCIL_TEST);
-                        glStencilFunc(ps.stencil == 1 ? 0x0207u /* ALWAYS */ : 0x0202u /* EQUAL */, ps.sref, 0xFF);
+                        glStencilFunc(ps.stencil == 1 ? 0x0207u /* ALWAYS */ : ps.stencil == 2 ? 0x0202u /* EQUAL */ : 0x0204u /* GREATER */, ps.sref, 0xFF);
                         glStencilOp(0x1E00, 0x1E00, ps.stencil == 1 ? 0x1E01u /* REPLACE */ : 0x1E00u);
                         glStencilMask(ps.stencil == 1 ? 0xFFu : 0u);
                     }
                     glDrawArrays(GL_TRIANGLES, 0, n);
                     if (ps.noColor) glColorMask(true, true, true, true);
-                    if (ps.stencil != 0) { glDisable(GL_STENCIL_TEST); glStencilMask(0xFF); }
+                    if (ps.stencil > 0) { glDisable(GL_STENCIL_TEST); glStencilMask(0xFF); }
                 }
             }
+            glEnable(GL_BLEND);
             glBlendEquationSeparate(0x8006u, 0x8006u);
             glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         }
@@ -820,7 +889,7 @@ void main() {
                 col[i * 4] = c.r; col[i * 4 + 1] = c.g; col[i * 4 + 2] = c.b; col[i * 4 + 3] = c.a;
             }
             int mode = Effects.ModeOf(it);
-            if (mode >= 20 && mode <= 34) { DrawPasses(it, mode, n, tex); return; }
+            if (mode >= 20 && mode <= 38) { DrawPasses(it, mode, n, tex); return; }
             if (mode == Effects.Sprite || mode == Effects.LightRay) mode = texMode;   // (the light ray drawn as a sprite here)
             if (it.Texture == null && mode < Effects.KnightGlow) mode = 6;
             if (mode >= Effects.KnightGlow)

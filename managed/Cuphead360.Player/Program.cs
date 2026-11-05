@@ -121,9 +121,14 @@ namespace Cuphead360.Player
                         break;
                     case "--capture-every": Capture.Every = int.Parse(a[i + 1]); break;
                     case "--capture-out": Capture.Path = System.IO.Path.GetFullPath(a[i + 1]); break;
+                    case "--gaps":   // --gaps N: build the render list every N frames and log what can't be drawn yet (GAP lines)
+                        Gaps.Every = int.Parse(a[i + 1]);
+                        Gaps.ConvertedDir = System.IO.Path.GetFullPath("work/GameData/ctex");
+                        break;
                     case "--live": live = true; break;
                     case "--console": console = a[i + 1] != "0"; break;
                     case "--shot": foreach (var f in a[i + 1].Split(',')) LiveHost.Shots.Add(int.Parse(f)); break;
+                    case "--shot-dir": LiveHost.ShotDir = a[i + 1]; break;
                     case "--max-frames": LiveHost.MaxFrames = int.Parse(a[i + 1]); break;
                     case "--unlocked": LiveHost.Unlocked = a[i + 1] != "0"; break;
                     case "--hidden": LiveHost.Hidden = a[i + 1] != "0"; break;

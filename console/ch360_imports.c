@@ -43,6 +43,20 @@ U32 i5_ch36011_frameX5Fbegin(wasmModuleInstance* inst) {
     return (U32)ch360_plat_frame_begin();
 }
 
+void i5_ch36010_hostX5Fstats(wasmModuleInstance* inst, U32 out, U32 n) {
+    unsigned v[CH360_HOST_STATS];
+    unsigned i, k = n > CH360_HOST_STATS ? CH360_HOST_STATS : n;
+    U8* s;
+    (void)inst;
+    if (k == 0 || !srt_mem_ok(out, k * 4)) return;
+    memset(v, 0, sizeof(v));
+    ch360_plat_host_stats(v, (int)k);
+    s = srt_mem_ptr(out);
+    for (i = 0; i < k; i++) {
+        s[i * 4] = (U8)v[i]; s[i * 4 + 1] = (U8)(v[i] >> 8); s[i * 4 + 2] = (U8)(v[i] >> 16); s[i * 4 + 3] = (U8)(v[i] >> 24);
+    }
+}
+
 U32 i5_ch3603_pad(wasmModuleInstance* inst, U32 index, U32 state) {
     ch360_pad p;
     U8* s;
@@ -379,7 +393,7 @@ static void remap_item(ch360_item* it) {
                 v[k].u = v[k].u * b->su + b->ou;
                 v[k].v = v[k].v * b->sv + b->ov;
             }
-            if (it->mode == 10) { /* the blur's offsets are in the page's uvs */
+            if (it->mode == 10 || it->mode == 35) { /* their taps' offsets are in the page's uvs */
                 it->params[8] *= b->su;
                 it->params[9] *= b->sv;
             }

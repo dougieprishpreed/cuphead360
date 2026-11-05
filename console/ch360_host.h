@@ -36,6 +36,14 @@ typedef struct ch360_pad {
 
 /* Start of a frame: 0 ends the game loop. */
 int ch360_plat_frame_begin(void);
+/* The host's tallies since the last call (the player's per-scene summaries), up to
+ * CH360_HOST_STATS u32s: frames, GPU-timed frames, GPU ms in all, render textures,
+ * effects, screen, fence wait, present, host part (the frame's work before present),
+ * texture loads, uploads (those times ms x 100), textures loaded, fill on the screen
+ * and in render textures (screens x 100), draws, passes, audio underruns, texture MB
+ * now, free MB now, slow host parts. Zero where a host has no such thing. */
+#define CH360_HOST_STATS 20
+void ch360_plat_host_stats(unsigned* out, int n);
 /* Fills *out for pad 0..3; 0 if it is not connected. */
 int ch360_plat_pad(int index, ch360_pad* out);
 /* A vertex as the GPU reads it (24 bytes): position in screen pixels from
@@ -59,10 +67,12 @@ typedef struct ch360_vertex {
  * Bishop's darkness, 10 the blur sprite (premultiplied over); blits, one quad
  * replacing its target: 11 copy, 12 four-tap downsample, 13 seven-tap blur,
  * 14-16 the blur with gamma (plain, two-strip, black and white), 17 the film
- * grain and colour fringes, 18 the seven-tap blur with its alpha blurred;
+ * grain and colour fringes, 18 the seven-tap blur with its alpha blurred; 19
+ * Sprites/Color/Overlay (premultiplied over);
  * 20-34 the game's alpha masks, stencil masks and Unity's Screen and Hard
  * Light blend modes, each drawn in its passes (params 0 _Amount, or 1 for
- * Hard Light). */
+ * Hard Light), 35 MonochromeNoBlack; 36-38 Honey, IceCubes and Unity's
+ * Overlay blend mode (textures[0] the grab of the target behind them). */
 typedef struct ch360_item {
     int texture;
     unsigned mode, first, count;
@@ -80,7 +90,8 @@ typedef struct ch360_item {
 } ch360_item;
 
 /* A view: its rect in its target's pixels (from the bottom left), clear (1
- * the colour, 2 depth and stencil) and colour, its items; the target: 0 the
+ * the colour, 2 depth and stencil, 4 go on in the target with what it held:
+ * after a grab's copy) and colour, its items; the target: 0 the
  * screen, else a render texture's number (CH360_RT_BASE + it as a texture),
  * tw x th pixels, cleared with alpha a. */
 typedef struct ch360_view {

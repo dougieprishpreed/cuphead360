@@ -52,6 +52,8 @@ namespace Cuphead360.Engine
         public const int Blur7Alpha = 18;
         public const int FirstBlit = Copy;
         public static bool IsBlit(int mode) => mode >= Copy && mode <= Blur7Alpha;
+        /// <summary>Sprites/Color/Overlay (the HUD's cards): the colour overlaid on the texel, both halves chosen by its red.</summary>
+        public const int ColorOverlay = 19;
         // The game's blend and mask shaders, drawn in their passes with their blend and stencil states (the
         // hosts' pass tables): the alpha masks write the target's alpha, the masked sprites draw by it (where a
         // mask is, or with Reversed where it isn't; Destructive ones also wear the mask away, NonDestructive
@@ -62,6 +64,18 @@ namespace Cuphead360.Engine
             AlphaMaskedNonDestructiveScreen = 24, AlphaMaskedNonDestructiveReversedScreen = 25, AlphaMaskedNonDestructiveReversedGlyphs = 26,
             AlphaMaskClearer = 27, StencilMask = 28, StencilMasked = 29, StencilMaskMulti = 30, StencilMaskMultiClearer = 32,
             BlendModeScreen = 33, BlendModeHardLight = 34;
+        /// <summary>Cuphead/Sprites/MonochromeNoBlack: P0-3 _MonochromeBase, P4 _Factor, P8-9 texel size (one pass in the pass tables).</summary>
+        public const int MonochromeNoBlack = 35;
+        /// <summary>The Rum Runners' banded stencil masks: StencilMaskMulti writes 9-14 by its alpha's band, the reversed masked sprite fades across them.</summary>
+        public const int StencilMaskedMultiReversed = 31;
+        /// <summary>
+        /// Shaders that read what was drawn behind them (Unity's GrabPass): Honey, IceCubes, Unity's Overlay blend
+        /// mode. RenderList splits the camera's view before such an item, copies the target so far into a
+        /// temporary texture (Tex2) and goes on in the same target with what it held. P0 Honey _Amount; IceCubes
+        /// P0-5 _Amount, _CutoffMax, _CutoffMin, _CutoffGreen, _CutoffBlue, _BlendValue; P10-11 one over the grab's size.
+        /// </summary>
+        public const int Honey = 36, IceCubes = 37, BlendModeOverlay = 38;
+        public static bool NeedsGrab(int mode) => mode >= Honey && mode <= BlendModeOverlay;
         public const int ParamCount = 12;
 
         static readonly Dictionary<string, int> passModes = new Dictionary<string, int>
@@ -76,6 +90,10 @@ namespace Cuphead360.Engine
             ["Cuphead/Sprites/StencilMasked"] = StencilMasked, ["Cuphead/Sprites/StencilMaskMulti"] = StencilMaskMulti,
             ["Cuphead/Sprites/StencilMaskMultiClearer"] = StencilMaskMultiClearer,
             ["Sprites/Blend Modes/Screen"] = BlendModeScreen, ["Sprites/Blend Modes/Hard Light"] = BlendModeHardLight,
+            ["Sprites/Color/Overlay"] = ColorOverlay, ["Cuphead/Font/Alpha Mask Font"] = AlphaMask,
+            ["Cuphead/Sprites/MonochromeNoBlack"] = MonochromeNoBlack,
+            ["Cuphead/Sprites/StencilMaskedMultiReversed"] = StencilMaskedMultiReversed,
+            ["Cuphead/Sprites/Honey"] = Honey, ["Cuphead/Sprites/IceCubes"] = IceCubes, ["Sprites/Blend Modes/Overlay"] = BlendModeOverlay,
         };
 
         // ------------------------------------------------------------ shaders
@@ -113,7 +131,9 @@ namespace Cuphead360.Engine
         static readonly int outlineColorId = ShaderProps.Id("_OutlineColor"), dimId = ShaderProps.Id("_DimFactor"),
             increaseId = ShaderProps.Id("_OutlineIncreaseFactor"), lightingId = ShaderProps.Id("_LightingVector"), levelId = ShaderProps.Id("_Level"),
             blurAmountId = ShaderProps.Id("_BlurAmount"), blurLerpId = ShaderProps.Id("_BlurLerp"), dullCutoffId = ShaderProps.Id("_DullBlacksCutoff"),
-            dullFactorId = ShaderProps.Id("_DullBlacksFactor"), amountId = ShaderProps.Id("_Amount"), parameterId = ShaderProps.Id("_Parameter"), redId = ShaderProps.Id("_Red"),
+            dullFactorId = ShaderProps.Id("_DullBlacksFactor"), amountId = ShaderProps.Id("_Amount"), monoBaseId = ShaderProps.Id("_MonochromeBase"), factorId = ShaderProps.Id("_Factor"), cutoffMaxId = ShaderProps.Id("_CutoffMax"),
+            cutoffMinId = ShaderProps.Id("_CutoffMin"), cutoffGreenId = ShaderProps.Id("_CutoffGreen"), cutoffBlueId = ShaderProps.Id("_CutoffBlue"),
+            blendValueId = ShaderProps.Id("_BlendValue"), parameterId = ShaderProps.Id("_Parameter"), redId = ShaderProps.Id("_Red"),
             greenId = ShaderProps.Id("_Green"), blueId = ShaderProps.Id("_Blue"), screenId = ShaderProps.Id("_Screen"), uvTransformId = ShaderProps.Id("_UV_Transform"),
             overlayId = ShaderProps.Id("_Overlay");
 
@@ -127,6 +147,7 @@ namespace Cuphead360.Engine
             var ms = MaterialState.Of(it.Material);
             int w = Width(it.Texture), h = Height(it.Texture);
             p[8] = w > 0 ? 1f / w : 0f; p[9] = h > 0 ? 1f / h : 0f;
+            if (it.Tex2 is RenderTexture grab) { p[10] = 1f / Math.Max(1, Width(grab)); p[11] = 1f / Math.Max(1, Height(grab)); }
             if (mode == KnightGlow)
             {
                 var oc = V(ms, outlineColorId, new Vector4(1, 1, 1, 0.5f));
@@ -142,6 +163,17 @@ namespace Cuphead360.Engine
             }
             else if (mode == AlphaMaskedNonDestructiveScreen || mode == AlphaMaskedNonDestructiveReversedScreen) p[0] = F(ms, amountId, 1f);
             else if (mode == BlendModeHardLight) p[0] = 1f;   // the pass shaders' choice of Hard Light over Screen
+            else if (mode == Honey) p[0] = F(ms, amountId, 0.01f);
+            else if (mode == IceCubes)
+            {
+                p[0] = F(ms, amountId, 0.01f); p[1] = F(ms, cutoffMaxId, 1f); p[2] = F(ms, cutoffMinId, 0f);
+                p[3] = F(ms, cutoffGreenId, 0f); p[4] = F(ms, cutoffBlueId, 0f); p[5] = F(ms, blendValueId, 0f);
+            }
+            else if (mode == MonochromeNoBlack)
+            {
+                var b = V(ms, monoBaseId, Vector4.one);
+                p[0] = b.x; p[1] = b.y; p[2] = b.z; p[3] = b.w; p[4] = F(ms, factorId, 0f);
+            }
         }
 
         static readonly HashSet<string> warnedBlits = new HashSet<string>();

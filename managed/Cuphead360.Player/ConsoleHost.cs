@@ -116,8 +116,204 @@ namespace Cuphead360.Player
                 foreach (var g in new[] { "Ground", "Air" })
                     NAnimator.WindowOnPlay.Add(Animator.StringToHash("Ex." + d + "_" + g));
         }
-        static readonly double[] phaseSum = new double[PlayerLoop.PhaseMs.Length + 2];
-        static double frameSum;
+        [DllImport("ch360", EntryPoint = "host_stats"), WasmImportLinkage]
+        static extern void HostStats(uint* values, int count);
+
+        /// <summary>
+        /// What the console run logs to find where frame time goes (the run after the forced sweep is for
+        /// performance): every 300 frames the game's phases, the time between frames as percentiles and
+        /// 60/30/20 fps shares, script time, GC and allocation (FRAMES, TOP); a frame over 50 ms with its
+        /// breakdown (HITCH, ten a window); and at each scene change the scene's summary, with the host's
+        /// side from host_stats: the GPU's time by kind of pass, fill, texture loads (SCENE SUMMARY, GPU, TOP).
+        /// The host adds HOST, GPU and HOST SLOW lines of its own on the same frame numbers.
+        /// </summary>
+        sealed class PerfLog
+        {
+            const int Bins = 251;   // 1 ms bins of the time between frames, the last 250 ms and over
+            readonly double hz;
+            readonly int phases = PlayerLoop.PhaseMs.Length;
+            sealed class Tally
+            {
+                public readonly int[] Hist = new int[Bins];
+                public readonly double[] Phase = new double[PlayerLoop.PhaseMs.Length + 2];   // phases, list, submit
+                public readonly Dictionary<Type, long> Scripts = new Dictionary<Type, long>();
+                public double Game, Period, Decode;
+                public int Frames, Periods, Hitches, Unsaid;
+                public long Gc0, Gc1, Gc2, PauseMs, Alloc, DecodeAt;
+                public void Start()
+                {
+                    Array.Clear(Hist); Array.Clear(Phase); Scripts.Clear();
+                    Game = Period = Decode = 0; Frames = Periods = Hitches = Unsaid = 0;
+                    Gc0 = GC.CollectionCount(0); Gc1 = GC.CollectionCount(1); Gc2 = GC.CollectionCount(2);
+                    PauseMs = (long)GC.GetTotalPauseDuration().TotalMilliseconds; Alloc = Allocated(); DecodeAt = Audio.DecodeTicks;
+                }
+            }
+            readonly Tally window = new Tally(), scene = new Tally();
+            string sceneName, windowScenes = "";
+            int windowStart = 1;
+            // The last frame's breakdown, for a HITCH line when the time to the next frame says it was long.
+            readonly double[] lastPhase = new double[PlayerLoop.PhaseMs.Length + 2];
+            double lastGame;
+            long lastGc0, lastGc1, lastGc2, lastPauseMs, lastAlloc, lastDecode, gcAt0, gcAt1, gcAt2, pauseAt, allocAt, decodeAt;
+            int lastFrame, loadsAt;
+            bool lastLoaded, activation;
+            readonly uint[] host = new uint[20];
+            readonly double[] hostSum = new double[20];
+            static bool noAlloc;
+
+            static long Allocated()
+            {
+                if (noAlloc) return 0;
+                try { return GC.GetTotalAllocatedBytes(false); }
+                catch (Exception) { noAlloc = true; return 0; }
+            }
+
+            public PerfLog(long hz)
+            {
+                this.hz = hz;
+                window.Start(); scene.Start();
+                gcAt0 = window.Gc0; gcAt1 = window.Gc1; gcAt2 = window.Gc2; pauseAt = window.PauseMs; allocAt = window.Alloc; decodeAt = Audio.DecodeTicks;
+                loadsAt = Cuphead360.Engine.SceneLoader.Loads;
+                fixed (uint* h = host) HostStats(h, host.Length);   // the host's tallies start here
+            }
+
+            /// <summary>The time from the last frame's start to this one's: its share of the histograms, and a HITCH line when over 50 ms.</summary>
+            public void Between(double ms)
+            {
+                if (lastFrame == 0) return;
+                int bin = ms >= Bins - 1 ? Bins - 1 : (int)ms;
+                window.Hist[bin]++; window.Period += ms; window.Periods++;
+                // The frame that activated a scene (the load's last step) stays out of the new scene's spread.
+                bool act = activation;
+                activation = false;
+                if (!act) { scene.Hist[bin]++; scene.Period += ms; scene.Periods++; }
+                if (ms <= 50) return;
+                window.Hitches++;
+                if (!act) scene.Hitches++;
+                if (window.Hitches > 10) { window.Unsaid++; return; }
+                var sb = new StringBuilder();
+                sb.Append("HITCH frame ").Append(lastFrame).Append(": ").Append(ms.ToString("0")).Append(" ms to the next frame; game ")
+                  .Append(lastGame.ToString("0.0")).Append(" (");
+                bool any = false;
+                for (int i = 0; i < phases; i++)
+                    if (lastPhase[i] >= 0.5) { sb.Append(any ? " " : "").Append(PlayerLoop.PhaseNames[i]).Append('=').Append(lastPhase[i].ToString("0.0")); any = true; }
+                sb.Append(") list ").Append(lastPhase[phases].ToString("0.0")).Append(" submit ").Append(lastPhase[phases + 1].ToString("0.0"))
+                  .Append(", host and vblank ").Append((ms - lastGame).ToString("0.0")).Append(" ms");
+                if (lastGc0 + lastGc1 + lastGc2 > 0) sb.Append("; GC ").Append(lastGc0).Append('/').Append(lastGc1).Append('/').Append(lastGc2).Append(" paused ").Append(lastPauseMs).Append(" ms");
+                sb.Append("; allocated ").Append(lastAlloc >> 10).Append(" KB, audio decode ").Append((lastDecode * 1000.0 / hz).ToString("0.0")).Append(" ms");
+                sb.Append("; ").Append(sceneName ?? "?").Append(lastLoaded ? " (a scene activated)" : "");
+                Console.WriteLine(sb.ToString());
+            }
+
+            /// <summary>A frame done: its game time (the player loop's phases, the draw list and its hand-over).</summary>
+            public void Frame(int n, double game, double[] ph, double list, double submit)
+            {
+                long g0 = GC.CollectionCount(0), g1 = GC.CollectionCount(1), g2 = GC.CollectionCount(2);
+                long pause = (long)GC.GetTotalPauseDuration().TotalMilliseconds, alloc = Allocated(), decode = Audio.DecodeTicks;
+                int loads = Cuphead360.Engine.SceneLoader.Loads;
+                lastFrame = n; lastGame = game;
+                for (int i = 0; i < phases; i++) lastPhase[i] = ph[i];
+                lastPhase[phases] = list; lastPhase[phases + 1] = submit;
+                lastGc0 = g0 - gcAt0; lastGc1 = g1 - gcAt1; lastGc2 = g2 - gcAt2; lastPauseMs = pause - pauseAt; lastAlloc = alloc - allocAt;
+                lastDecode = decode - decodeAt; lastLoaded = loads != loadsAt;
+                gcAt0 = g0; gcAt1 = g1; gcAt2 = g2; pauseAt = pause; allocAt = alloc; decodeAt = decode; loadsAt = loads;
+                // A frame that changed the scene counts to the scene it ended (the loading screen's: the
+                // activation, its GC); the new scene's tally starts after it.
+                Add(window, game);
+                Add(scene, game);
+                var name = Cuphead360.Engine.Scenes.Active?.Name;
+                if (name != sceneName)
+                {
+                    if (sceneName != null && scene.Frames > 1) SceneSummary();
+                    sceneName = name;
+                    scene.Start();
+                    activation = true;
+                    if (!windowScenes.Contains(name ?? "?")) windowScenes += (windowScenes.Length > 0 ? "," : "") + (name ?? "?");
+                }
+                if (windowScenes.Length == 0) windowScenes = name ?? "?";
+                if (n % 300 == 0) Window(n);
+            }
+
+            void Add(Tally t, double game)
+            {
+                t.Frames++; t.Game += game;
+                for (int i = 0; i < lastPhase.Length; i++) t.Phase[i] += lastPhase[i];
+            }
+
+            static string Share(int[] hist, int periods, double lo, double hi)
+            {
+                int c = 0;
+                for (int i = 0; i < Bins; i++) if (i + 0.5 > lo && i + 0.5 <= hi) c += hist[i];
+                return (100.0 * c / Math.Max(1, periods)).ToString("0");
+            }
+
+            static string Percentile(int[] hist, int periods, double p)
+            {
+                int want = (int)Math.Ceiling(periods * p), c = 0;
+                for (int i = 0; i < Bins; i++) { c += hist[i]; if (c >= want && want > 0) return i == Bins - 1 ? ">250" : (i + 1).ToString(); }
+                return "-";
+            }
+
+            static string Max(int[] hist)
+            {
+                for (int i = Bins - 1; i >= 0; i--) if (hist[i] > 0) return i == Bins - 1 ? ">250" : (i + 1).ToString();
+                return "-";
+            }
+
+            // The time between frames: percentiles (1 ms bins, upper edges) and the shares at 60, 30, 20 fps and slower.
+            static string Spread(Tally t) =>
+                $"between frames p50 {Percentile(t.Hist, t.Periods, 0.5)} p95 {Percentile(t.Hist, t.Periods, 0.95)} p99 {Percentile(t.Hist, t.Periods, 0.99)} max {Max(t.Hist)} ms, "
+                + $"60fps {Share(t.Hist, t.Periods, 0, 17.5)}% 30fps {Share(t.Hist, t.Periods, 17.5, 34.5)}% 20fps {Share(t.Hist, t.Periods, 34.5, 51)}% slower {Share(t.Hist, t.Periods, 51, 1e9)}%";
+
+            string Phases(Tally t)
+            {
+                var sb = new StringBuilder();
+                int f = Math.Max(1, t.Frames);
+                for (int i = 0; i < phases; i++) sb.Append(i == 0 ? "" : " ").Append(PlayerLoop.PhaseNames[i]).Append('=').Append((t.Phase[i] / f).ToString("0.0"));
+                sb.Append(" list=").Append((t.Phase[phases] / f).ToString("0.0")).Append(" submit=").Append((t.Phase[phases + 1] / f).ToString("0.0"));
+                return sb.ToString();
+            }
+
+            string Gc(Tally t)
+            {
+                int f = Math.Max(1, t.Frames);
+                return $"GC {GC.CollectionCount(0) - t.Gc0}/{GC.CollectionCount(1) - t.Gc1}/{GC.CollectionCount(2) - t.Gc2} paused {(long)GC.GetTotalPauseDuration().TotalMilliseconds - t.PauseMs} ms, "
+                    + (noAlloc ? "allocation not counted" : $"allocated {(Allocated() - t.Alloc) / (1024.0 * 1024.0) / f:0.00} MB/frame");
+            }
+
+            void Window(int n)
+            {
+                PlayerLoop.DrainScriptTicks(window.Scripts, scene.Scripts);
+                string top = PlayerLoop.TopOf(window.Scripts, Math.Max(1, window.Frames), 12, out double scripts);
+                int f = Math.Max(1, window.Frames);
+                Console.WriteLine($"FRAMES {windowStart}-{n}: {window.Game / f:0.0} ms/frame; {Phases(window)}; audio decode {(Audio.DecodeTicks - window.DecodeAt) * 1000.0 / hz / f:0.0} ms/frame, "
+                    + $"{Audio.VoiceCount} voices; {Spread(window)}; scripts {scripts:0.0} ms/frame; {Gc(window)}; hitches {window.Hitches}"
+                    + (window.Unsaid > 0 ? $" ({window.Unsaid} not said)" : "") + $"; {windowScenes}");
+                Console.WriteLine($"TOP {windowStart}-{n} ms/frame:{top}");
+                windowStart = n + 1;
+                windowScenes = sceneName ?? "";
+                window.Start();
+            }
+
+            void SceneSummary()
+            {
+                PlayerLoop.DrainScriptTicks(window.Scripts, scene.Scripts);
+                string top = PlayerLoop.TopOf(scene.Scripts, Math.Max(1, scene.Frames), 16, out double scripts);
+                int f = Math.Max(1, scene.Frames);
+                double secs = scene.Period / 1000.0;
+                Console.WriteLine($"SCENE SUMMARY {sceneName}: {scene.Frames} frames in {secs:0.0} s ({scene.Periods / Math.Max(0.001, secs):0.0} fps); {Spread(scene)}; "
+                    + $"game {scene.Game / f:0.0} ms/frame ({Phases(scene)}), scripts {scripts:0.0}; {Gc(scene)}; hitches {scene.Hitches}; "
+                    + $"heap {GC.GetTotalMemory(false) >> 20} MB, {PlayerLoop.TrackedCount} behaviours");
+                fixed (uint* h = host) HostStats(h, host.Length);
+                double hf = Math.Max(1, host[0]), gf = Math.Max(1, host[1]);
+                Console.WriteLine($"SCENE GPU {sceneName}: {host[2] / 100.0 / gf:0.0} ms/frame (render textures {host[3] / 100.0 / gf:0.0}, effects {host[4] / 100.0 / gf:0.0}, "
+                    + $"screen {host[5] / 100.0 / gf:0.0}; {host[1]} frames timed); {host[15] / hf:0.0} passes, {host[14] / hf:0} draws a frame; fill {host[12] / 100.0 / hf:0.00} screens "
+                    + $"+ {host[13] / 100.0 / hf:0.00} in render textures; host part {host[8] / 100.0 / hf:0.0} ms/frame (texture loads {host[9] / 100.0 / hf:0.0}, uploads {host[10] / 100.0 / hf:0.0}; "
+                    + $"{host[11]} textures loaded), fence {host[6] / 100.0 / hf:0.0}, present {host[7] / 100.0 / hf:0.0}; {host[19]} slow host parts; audio underruns {host[16]}; "
+                    + $"textures {host[17]} MB, {host[18]} MB free");
+                Console.WriteLine($"SCENE TOP {sceneName} ms/frame:{top}");
+            }
+        }
 
         public static int Play(Func<int, bool> frame)
         {
@@ -133,11 +329,13 @@ namespace Cuphead360.Player
             int n = 0;
             long last = System.Diagnostics.Stopwatch.GetTimestamp(), hz = System.Diagnostics.Stopwatch.Frequency;
             PlayerLoop.Profile = true;
+            var perf = new PerfLog(hz);
             while (FrameBegin() != 0)
             {
                 long now = System.Diagnostics.Stopwatch.GetTimestamp();
                 float real = (float)((now - last) / (double)hz);
                 last = now;
+                perf.Between(real * 1000.0);
                 // A console frame slower than the vblank still moves the game at its real speed.
                 Delta = scripted != null ? scriptedStep : Math.Clamp(real, 1f / 60f, 1f / 30f);
                 PlayerLoop.AudioDelta = scripted != null ? -1 : Math.Clamp(real, 0f, 0.25f);
@@ -148,29 +346,8 @@ namespace Cuphead360.Player
                 long listed = System.Diagnostics.Stopwatch.GetTimestamp();
                 Draw(views);
                 long drawn = System.Diagnostics.Stopwatch.GetTimestamp();
-                var ph = PlayerLoop.PhaseMs;
-                for (int i = 0; i < ph.Length; i++) phaseSum[i] += ph[i];
-                phaseSum[ph.Length] += (listed - built) * 1000.0 / hz;
-                phaseSum[ph.Length + 1] += (drawn - listed) * 1000.0 / hz;
-                frameSum += (drawn - now) * 1000.0 / hz;
-                // A frame over half a second says where its time went (the player loop's phases, the draw list).
-                if ((drawn - now) * 2 > hz)
-                    Console.WriteLine($"SLOW frame {n}: {(drawn - now) * 1000 / hz} ms; {PlayerLoop.ProfileReport(1)} list={(listed - built) * 1000 / hz} submit={(drawn - listed) * 1000 / hz}");
-                else Array.Clear(PlayerLoop.PhaseMs);
-                // Where an ordinary frame's time goes, averaged over 300 frames.
-                if (n % 300 == 0)
-                {
-                    var sb = new StringBuilder($"FRAMES {n - 299}-{n}: {frameSum / 300:0.0} ms/frame;");
-                    for (int i = 0; i < ph.Length; i++) sb.Append(' ').Append(PlayerLoop.PhaseNames[i]).Append('=').Append((phaseSum[i] / 300).ToString("0.0"));
-                    sb.Append(" list=").Append((phaseSum[ph.Length] / 300).ToString("0.0")).Append(" submit=").Append((phaseSum[ph.Length + 1] / 300).ToString("0.0"));
-                    sb.Append("; audio decode ").Append((Audio.DecodeTicks * 1000.0 / hz / 300).ToString("0.0")).Append(" ms/frame, ").Append(Audio.VoiceCount).Append(" voices");
-                    Audio.DecodeTicks = 0;
-                    Console.WriteLine(sb.ToString());
-                    // The scripts behind update and fixed: the costliest types (messages and coroutines).
-                    Console.WriteLine($"TOP {n - 299}-{n} ms/frame:{PlayerLoop.TopReport(300, 12)}");
-                    Array.Clear(phaseSum);
-                    frameSum = 0;
-                }
+                perf.Frame(n, (drawn - now) * 1000.0 / hz, PlayerLoop.PhaseMs, (listed - built) * 1000.0 / hz, (drawn - listed) * 1000.0 / hz);
+                Array.Clear(PlayerLoop.PhaseMs);
                 if (n % 600 == 0)
                     Console.WriteLine($"CONSOLE frame {n} scene={Cuphead360.Engine.Scenes.Active?.Name} heap {GC.GetTotalMemory(false) >> 20} MB exceptions {Exceptions.Count}; "
                         + $"GCs {GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)} (gen0/1/2), paused {(long)GC.GetTotalPauseDuration().TotalMilliseconds} ms in all; "
@@ -277,6 +454,7 @@ namespace Cuphead360.Player
                 bool clear = cam != null && (cam.ClearFlags == CameraClearFlags.SolidColor || cam.ClearFlags == CameraClearFlags.Skybox);
                 // 1 the colour; 2 depth and stencil (every clear flag but Nothing; the sprite masks' stencil)
                 ((uint*)vh)[4] = (clear ? 1u : 0u) | (cam != null && cam.ClearFlags != CameraClearFlags.Nothing ? 2u : 0u);
+                if (v.Resume) ((uint*)vh)[4] = 4u;   // 4: go on in the target with what it held (after a grab's copy)
                 var bg = cam != null ? cam.Background : default;
                 vh[5] = bg.r; vh[6] = bg.g; vh[7] = bg.b; vh[8] = 1f;
                 // The target: 0 the screen, else a render texture (cleared with the camera's alpha).

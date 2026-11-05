@@ -43,6 +43,8 @@ namespace Cuphead360.Engine
     {
         // Every behaviour with an update message, coroutine or invoke, in creation order.
         static readonly List<NBehaviour> tracked = new List<NBehaviour>();
+        /// <summary>Behaviours the loop runs (the console's scene summaries).</summary>
+        public static int TrackedCount => tracked.Count;
         static readonly HashSet<NBehaviour> trackedSet = new HashSet<NBehaviour>();
         static readonly List<NBehaviour> startQueue = new List<NBehaviour>();
         static readonly List<NObject> destroyQueue = new List<NObject>();
@@ -144,7 +146,13 @@ namespace Cuphead360.Engine
             P(6); UI.WillRender();
             Atlases.Flush();
             P(7); RenderList.PreRender();
-            if (Capture.Wanted(Clock.FrameCount)) Capture.Write(Clock.FrameCount, RenderList.Build());
+            bool capture = Capture.Wanted(Clock.FrameCount);
+            if (capture || (Gaps.Every > 0 && Clock.FrameCount % Gaps.Every == 0))
+            {
+                var views = RenderList.Build();
+                if (Gaps.Every > 0) Gaps.Scan(views);
+                if (capture) Capture.Write(Clock.FrameCount, views);
+            }
             RenderFrame?.Invoke();
             RenderList.PostRender();
             ResumeCoroutines(fixedPhase: false, endOfFrame: true);
@@ -168,7 +176,7 @@ namespace Cuphead360.Engine
         }
         /// <summary>
         /// With Profile on: a script call's time (Stopwatch ticks, which TopReport
-        /// adds up by type), logged with its type and method when it took 50 ms
+        /// adds up by type), logged with its type and method when it took 25 ms
         /// or more. The names are worked out only then: NativeAOT decodes a
         /// type's name from its metadata at each ask, and asking for every
         /// coroutine step and message was 16% of a world map frame (host_native,
@@ -177,7 +185,7 @@ namespace Cuphead360.Engine
         public static long SlowCall(long start, object target, System.Reflection.MethodInfo method, string methodName = null)
         {
             long ticks = System.Diagnostics.Stopwatch.GetTimestamp() - start;
-            if (ticks * 1000 / System.Diagnostics.Stopwatch.Frequency >= 50)
+            if (ticks * 1000 / System.Diagnostics.Stopwatch.Frequency >= 25)
                 Log.Line($"SLOW call {(target is Type ty ? ty.FullName : target?.GetType().Name)}.{methodName ?? method?.Name}: {ticks * 1000 / System.Diagnostics.Stopwatch.Frequency} ms (frame {Clock.FrameCount})");
             return ticks;
         }
@@ -191,22 +199,46 @@ namespace Cuphead360.Engine
         /// </summary>
         public static string TopReport(int frames, int top)
         {
-            var byType = new Dictionary<Type, long>(FinishedTicks);
-            FinishedTicks.Clear();
-            void Add(Type t, long ticks) { if (ticks > 0) { byType.TryGetValue(t, out long v); byType[t] = v + ticks; } }
-            foreach (var b in tracked)
+            var byType = new Dictionary<Type, long>();
+            DrainScriptTicks(byType);
+            return TopOf(byType, frames, top, out _);
+        }
+
+        /// <summary>
+        /// The script time since the last drain by type (every message to a behaviour of the type, and its
+        /// coroutines' steps), added to each tally given (a report's window, a scene's); clears what it drains.
+        /// </summary>
+        public static void DrainScriptTicks(Dictionary<Type, long> a, Dictionary<Type, long> b = null)
+        {
+            void Add(Type t, long ticks)
             {
-                if (b.Managed != null) Add(b.Managed.GetType(), b.ProfTicks);
-                b.ProfTicks = 0;
-                foreach (var c in b.Coroutines)
+                if (ticks <= 0) return;
+                a.TryGetValue(t, out long v); a[t] = v + ticks;
+                if (b != null) { b.TryGetValue(t, out long w); b[t] = w + ticks; }
+            }
+            foreach (var kv in FinishedTicks) Add(kv.Key, kv.Value);
+            FinishedTicks.Clear();
+            foreach (var bh in tracked)
+            {
+                if (bh.Managed != null) Add(bh.Managed.GetType(), bh.ProfTicks);
+                bh.ProfTicks = 0;
+                foreach (var c in bh.Coroutines)
                 {
                     if (c.Routine != null) Add(c.Routine.GetType(), c.ProfTicks);
                     c.ProfTicks = 0;
                 }
             }
+        }
+
+        /// <summary>A tally's costliest types, ms a frame over frames; totalMs: all its script time a frame.</summary>
+        public static string TopOf(Dictionary<Type, long> byType, int frames, int top, out double totalMs)
+        {
             var list = new List<KeyValuePair<Type, long>>(byType);
             list.Sort((x, y) => y.Value.CompareTo(x.Value));
             double scale = 1000.0 / System.Diagnostics.Stopwatch.Frequency / Math.Max(1, frames);
+            long all = 0;
+            foreach (var kv in list) all += kv.Value;
+            totalMs = all * scale;
             var sb = new System.Text.StringBuilder();
             for (int i = 0; i < list.Count && i < top; i++)
             {

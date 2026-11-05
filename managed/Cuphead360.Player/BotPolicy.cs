@@ -90,6 +90,7 @@ namespace Cuphead360.Player
             phaseList.Clear(); phasesReached.Clear(); weaponsSeen.Clear(); targetsSeen.Clear(); supersSeen.Clear(); lastWeapon = null; lastSuper = null;
             runBest = float.MinValue; runLastProgress = 0; parryArm = false;
             wantSuper = true; exLeft = 0; lastMeter = float.NaN; supersUsed = exUsed = 0;
+            ResetForce();
         }
 
         /// <summary>The level's LevelProperties (a field whose type derives from AbstractLevelProperties), or null.</summary>
@@ -227,6 +228,176 @@ namespace Cuphead360.Player
             }
         }
 
+        // ---- forced progress ("fight N all force") ----
+        bool fightForce;
+        int forcePhaseFrames = 1500, forceStateIndex = -1, forceStateStart, forceKilledAt, forceBestFrame, forceLastPush, forceDoorAt, forceEndingSince, forceRetries;
+        int forceEvents = -1, forceLastHit, forceNoTarget, forceIdlePushes;
+        float forceBestX = float.MinValue, forcePathT;
+        bool forceKillFailed, forceEndLogged;
+        object forceLevel;
+
+        void ResetForce()
+        {
+            forceStateIndex = -1; forceStateStart = frame; forceKilledAt = 0; forceBestFrame = frame; forceLastPush = 0; forceDoorAt = 0;
+            forceBestX = float.MinValue; forcePathT = 0; forceKillFailed = forceEndLogged = false; forceEndingSince = 0; forceRetries = 0; forceLevel = null;
+            forceEvents = -1; forceLastHit = 0; forceNoTarget = 0; forceIdlePushes = 0;
+        }
+
+        /// <summary>A render capture (with --capture-out) and a live-window shot (with --live) delay frames on.</summary>
+        static void ScheduleCapture(int frameNow, int delay)
+        {
+            if (Capture.Path != null) Capture.Frames.Add(frameNow + delay);
+            LiveHost.Shots.Add(frameNow + delay);
+        }
+
+        bool LevelEnding() => Get(trackedLevel, "Ending") is true;
+
+        /// <summary>
+        /// The forced sweep's progress: temporary pushes to reach everything a level holds, not a way to
+        /// play it. Each of the boss's states gets forcePhaseFrames of the normal policy, then the boss is
+        /// dealt the damage that crosses into its next state through the level's own
+        /// LevelProperties.DealDamage (so its own phase handlers run), and after the last state the rest
+        /// (its own win). A run-and-gun level that makes no progress for five seconds moves the player along
+        /// its camera's path to the exit; a level that doesn't end that way (the tutorials, rooms) puts the
+        /// player at its exit door and presses A. Each state is captured (with --capture-out) early and late.
+        /// </summary>
+        void ForceStep(InputFrame.Pad p, int t)
+        {
+            // A lost level the game restarts (the Mausoleum's urn): the next tries get shorter turns.
+            if (trackedLevel != forceLevel)
+            {
+                if (forceLevel != null) { forceRetries++; Console.WriteLine($"BOT force: the level restarted (try {forceRetries + 1}) at frame {frame}"); }
+                forceLevel = trackedLevel; forceStateIndex = -1; forceKilledAt = 0; forceKillFailed = forceEndLogged = false; forceEndingSince = 0;
+            }
+            int turn = forcePhaseFrames >> Math.Min(forceRetries, 3);
+            if (forceKilledAt > 0 && !forceKillFailed && !LevelEnding() && frame - forceKilledAt > 900)
+            {
+                forceKillFailed = true;
+                Console.WriteLine($"BOT force: the kill didn't end {trackedLevel?.GetType().Name} in 15 s; trying its exit");
+            }
+            if (LevelEnding() && !forceKillFailed)
+            {
+                if (!forceEndLogged) { forceEndLogged = true; forceEndingSince = frame; Console.WriteLine($"BOT force: level ending at frame {frame}"); ScheduleCapture(frame, 120); }
+                // Ending without leaving (the tutorials end at their door): the exit.
+                if (frame - forceEndingSince > 900) { forceKillFailed = true; Console.WriteLine($"BOT force: {trackedLevel?.GetType().Name} still here 15 s after ending; trying its exit"); }
+                return;
+            }
+            if (props != null && !forceKillFailed)
+            {
+                int idx = Get(props, "stateIndex") is int i ? i : -1;
+                // A new turn with each state, and with each of the death card's milestones (the sub-bosses of a
+                // level whose health is one state: the Phantom Express, the Root Pack, the Baroness's candies).
+                if (idx != forceStateIndex || eventsReached != forceEvents)
+                {
+                    forceStateIndex = idx; forceEvents = eventsReached; forceStateStart = frame; forceNoTarget = 0; forceIdlePushes = 0;
+                    ScheduleCapture(frame, 150); ScheduleCapture(frame, Math.Max(300, turn - 120));
+                }
+                if (forceKilledAt > 0 || frame - forceStateStart < turn) return;
+                // First through the part being fought (its own damage handler: sub-bosses die by their own code),
+                // 3% of the boss's health every 20 frames; the level's properties only when nothing takes it.
+                // A part that ignores the pushes (the Rum Runners' worm between its attacks) counts as nothing to hit
+                // once 15 of them in a row moved neither the level's health nor the death card's damage (the
+                // Phantom Express's parts have health of their own: its level health stays put).
+                var rcv = LastBossReceiver;
+                if (forceIdlePushes < 15 && rcv != null && !rcv.Destroyed && rcv.Enabled && rcv.GameObject != null && rcv.GameObject.ActiveInHierarchy && Get(rcv.Managed, "OnDamageTaken") != null)
+                {
+                    forceNoTarget = 0;
+                    if (frame - forceLastHit < 20) return;
+                    forceIdlePushes = lastDamageFrame <= forceLastHit && frame - forceStateStart - turn >= 20 ? forceIdlePushes + 1 : 0;
+                    forceLastHit = frame;
+                    if (forceIdlePushes == 15) Console.WriteLine($"BOT force: {rcv.GameObject.Name} took 15 pushes without any damage counting; the level's own damage from here");
+                    float amount = Math.Max(1f, GetFloat(props, "TotalHealth") * 0.03f);
+                    if ((frame - forceStateStart - turn) < 20)
+                        Console.WriteLine($"BOT force: state {idx} ({phase}), milestone {eventsReached}, played {turn} frames; pushing {rcv.GameObject.Name} {amount:0.#} every 20 frames from frame {frame}");
+                    var infoType = GameType("DamageDealer+DamageInfo");
+                    var ps = infoType?.GetConstructors()[0].GetParameters();
+                    if (ps != null && ps.Length == 4)
+                    {
+                        var info = Activator.CreateInstance(infoType, amount, Enum.ToObject(ps[1].ParameterType, 0), (Vector2)rcv.GameObject.Transform.Position, Enum.ToObject(ps[3].ParameterType, 0));
+                        rcv.Managed.GetType().GetMethod("TakeDamage")?.Invoke(rcv.Managed, new[] { info });
+                    }
+                    return;
+                }
+                if (forceNoTarget == 0) forceNoTarget = frame;
+                if (frame - forceNoTarget < 600) return;
+                float total = GetFloat(props, "TotalHealth"), hp = GetFloat(props, "CurrentHealth");
+                float trig = props.GetType().GetMethod("GetNextStateHealthTrigger")?.Invoke(props, null) is float f ? f : 0f;
+                float dmg = trig > 0 ? hp - trig * total + Math.Max(1f, total * 0.002f) : hp + 1f;
+                if (dmg <= 0) dmg = 1f;
+                Console.WriteLine($"BOT force: state {idx} ({phase}) played {frame - forceStateStart} frames; dealing {dmg:0.#} at frame {frame} (health {hp:0.#}/{total:0})" + (trig > 0 ? "" : ": the last state, the kill"));
+                props.GetType().GetMethod("DealDamage")?.Invoke(props, new object[] { dmg });
+                if (trig <= 0) { forceKilledAt = frame; ScheduleCapture(frame, 60); ScheduleCapture(frame, 400); }
+                forceStateStart = frame;   // a state that doesn't change gets another full turn before the next push
+                return;
+            }
+            var pc = PlayerController(LiveNow());
+            if (pc == null) return;
+            var tr = ((Component)pc.Managed).transform;
+            if (trackedLevel != null && trackedLevel.GetType().Name.StartsWith("PlatformingLevel")) { ForceRun(tr); return; }
+            ForceDoor(p, t, tr);
+        }
+
+        /// <summary>A run-and-gun level: after five seconds without progress, the player a step further along its camera's path; at its end, past the exit.</summary>
+        void ForceRun(Transform tr)
+        {
+            var me = tr.position;
+            if (me.x > forceBestX + 40f) { forceBestX = me.x; forceBestFrame = frame; }
+            if (frame - forceBestFrame < 300 || frame - forceLastPush < 300) return;
+            forceLastPush = frame;
+            var cam = GameType("CupheadLevelCamera")?.GetProperty("Current", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+            var path = Get(cam, "path");
+            var lerp = path?.GetType().GetMethod("Lerp", new[] { typeof(float) });
+            Vector3 target;
+            if (lerp != null && forcePathT < 1f)
+            {
+                // Where along the path the player is (the nearest of 64 samples), then a step on.
+                float bestT = 0, bd = float.MaxValue;
+                for (int k = 0; k <= 64; k++)
+                {
+                    var q = (Vector3)lerp.Invoke(path, new object[] { k / 64f });
+                    float d = (q.x - me.x) * (q.x - me.x) + (q.y - me.y) * (q.y - me.y);
+                    if (d < bd) { bd = d; bestT = k / 64f; }
+                }
+                forcePathT = Math.Min(1f, Math.Max(forcePathT, bestT) + 0.06f);
+                target = (Vector3)lerp.Invoke(path, new object[] { forcePathT });
+            }
+            else
+            {
+                Vector3? exit = null; float dist = 500f;
+                foreach (var o in LiveNow())
+                    if (o is NBehaviour b && b.Managed != null && TypeName(b.Managed) == "PlatformingLevelExit")
+                    { exit = b.GameObject.Transform.Position; dist = GetFloat(b.Managed, "_exitDistance"); }
+                if (exit == null) { Console.WriteLine($"BOT force: no camera path or exit at frame {frame}"); return; }
+                target = exit.Value + new Vector3(dist + 40f, 60f, 0);
+            }
+            Console.WriteLine($"BOT force: no progress for 5 s at ({me.x:0},{me.y:0}); moved to ({target.x:0},{target.y:0}) (path {forcePathT:0.00}) at frame {frame}");
+            tr.position = new Vector3(target.x, target.y, me.z);
+            forceBestX = target.x; forceBestFrame = frame;
+            ScheduleCapture(frame, 90);
+        }
+
+        static readonly string[] exitTypes = { "TutorialLevelDoor", "HouseLevelExit", "KitchenLevelExit", "ChessCastleLevelExit", "PlatformingLevelExit" };
+
+        /// <summary>A level without a boss to finish (the tutorials, rooms): after its turn, the player at its exit and A pressed.</summary>
+        void ForceDoor(InputFrame.Pad p, int t, Transform tr)
+        {
+            if (t < forcePhaseFrames && !forceKillFailed) return;
+            Vector3? door = null; string which = null;
+            foreach (var o in LiveNow())
+                if (o is NBehaviour b && b.Managed != null && b.GameObject.ActiveInHierarchy && Array.IndexOf(exitTypes, TypeName(b.Managed)) >= 0)
+                { door = b.GameObject.Transform.Position; which = TypeName(b.Managed); break; }
+            if (door == null) return;
+            if (forceDoorAt == 0 || frame - forceDoorAt > 600)
+            {
+                forceDoorAt = frame;
+                Console.WriteLine($"BOT force: at the exit ({which}, {door.Value.x:0},{door.Value.y:0}) at frame {frame}");
+                tr.position = new Vector3(door.Value.x, door.Value.y + 10f, tr.position.z);
+                ScheduleCapture(frame, 60);
+            }
+            if ((frame - forceDoorAt) % 40 < 6) p.Buttons |= PadButton.A;
+            else if ((frame - forceDoorAt) % 40 < 12) p.Buttons |= PadButton.DPadUp;
+        }
+
         static object Stats(NBehaviour pc) => Get(pc.Managed, "stats");
 
         static NBehaviour PlayerController(List<NObject> live)
@@ -288,10 +459,13 @@ namespace Cuphead360.Player
         /// GameObject with a live collider on it or a child. A phase's parts that are shown but not hittable
         /// (the Devil's first body during his giant head) only when nothing hittable is there.
         /// </summary>
+        static NBehaviour LastBossReceiver;
+
         static Vector3? HittableBoss(Vector3 from, List<NObject> live)
         {
             Vector3? best = null; float bd = float.MaxValue;
             string bestName = null;
+            NBehaviour bestReceiver = null;
             // Parts off the screen (a later phase's, placed and waiting) count as far away.
             var cam = Camera.main;
             float OffScreen(Vector3 q)
@@ -313,9 +487,10 @@ namespace Cuphead360.Player
                 // the Robot's bomb bots, the Bee's invincible triangles), then the biggest, then nearest.
                 float area = hit != null ? Math.Min(hit.Value.width * hit.Value.height, 4e6f) : 0f;
                 float d = OffScreen(q) + (hit != null ? 0f : 1e7f) + (go.Name.EndsWith("(Clone)") ? 5e6f : 0f) - area + 0.01f * (q - from).magnitude;
-                if (d < bd) { bd = d; best = q; bestName = go.Name; }
+                if (d < bd) { bd = d; best = q; bestName = go.Name; bestReceiver = b; }
             }
             if (best != null) LastBossName = bestName;
+            LastBossReceiver = bestReceiver;
             return best;
         }
 
