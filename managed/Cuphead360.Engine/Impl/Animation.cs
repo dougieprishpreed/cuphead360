@@ -84,20 +84,20 @@ namespace Cuphead360.Engine
             // Streamed curves: frames of (time, keys (curve, 4 coefficients)).
             var sc = Tree.Get(clip, "m_StreamedClip");
             streamedCount = (int)Tree.Int(sc, "curveCount");
-            var words = Tree.List(sc, "data");
+            var words = Tree.Longs(sc, "data");
             var times = new List<float>[streamedCount];
             var coeffs = new List<float>[streamedCount];
             for (int i = 0; i < streamedCount; i++) { times[i] = new List<float>(); coeffs[i] = new List<float>(); }
             int p = 0;
-            float F(int at) => BitConverter.Int32BitsToSingle((int)(uint)(long)words[at]);
-            while (p + 2 <= words.Count)
+            float F(int at) => BitConverter.Int32BitsToSingle((int)(uint)words[at]);
+            while (p + 2 <= words.Length)
             {
                 float time = F(p);
-                int n = (int)(long)words[p + 1];
+                int n = (int)words[p + 1];
                 p += 2;
-                for (int k = 0; k < n && p + 5 <= words.Count; k++, p += 5)
+                for (int k = 0; k < n && p + 5 <= words.Length; k++, p += 5)
                 {
-                    int ci = (int)(long)words[p];
+                    int ci = (int)words[p];
                     if (ci < 0 || ci >= streamedCount) continue;
                     times[ci].Add(time);
                     coeffs[ci].Add(F(p + 1)); coeffs[ci].Add(F(p + 2)); coeffs[ci].Add(F(p + 3)); coeffs[ci].Add(F(p + 4));
@@ -112,8 +112,8 @@ namespace Cuphead360.Engine
             denseFrames = (int)Tree.Int(dc, "m_FrameCount");
             denseRate = Tree.Float(dc, "m_SampleRate", SampleRate);
             denseBegin = Tree.Float(dc, "m_BeginTime");
-            dense = Floats(Tree.List(dc, "m_SampleArray"));
-            constants = Floats(Tree.List(Tree.Get(clip, "m_ConstantClip"), "data"));
+            dense = Tree.Floats(dc, "m_SampleArray");
+            constants = Tree.Floats(Tree.Get(clip, "m_ConstantClip"), "data");
             constCount = constants.Length;
 
             var cb = Tree.Get(t, "m_ClipBindingConstant");
@@ -155,12 +155,6 @@ namespace Cuphead360.Engine
             Events = evs.ToArray();
         }
 
-        static float[] Floats(List<object> l)
-        {
-            var r = new float[l.Count];
-            for (int i = 0; i < r.Length; i++) r[i] = l[i] switch { float f => f, double d => (float)d, long x => x, _ => 0f };
-            return r;
-        }
 
         /// <summary>Value of curve i at clip time t (seconds from the clip's start time).</summary>
         public float Sample(int i, float t)

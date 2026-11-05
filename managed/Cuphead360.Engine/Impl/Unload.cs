@@ -92,11 +92,13 @@ namespace Cuphead360.Engine
             var weak = new WeakReference[cands.Count];
             for (int i = 0; i < cands.Count; i++) { cands[i].UnloadCandidate = true; weak[i] = new WeakReference(cands[i].Managed); }
             var aside = AssetDb.WeakenBuilt();
+            var weakFiles = AssetDb.WeakenFiles();
             for (int i = 0; i < cands.Count; i++) cands[i].Managed = null;
 
             // One full collection: weak references clear as soon as their objects are unreachable.
             GC.Collect();
             GC.KeepAlive(units);
+            int files = AssetDb.RestoreFiles(weakFiles);   // first: nothing may load a file while the table is empty
 
             int released = 0;
             for (int i = 0; i < cands.Count; i++)
@@ -108,11 +110,12 @@ namespace Cuphead360.Engine
             }
             AssetDb.RestoreBuilt(aside);
             Audio.ReleaseUnloaded();   // the host mixer's copies of clips that went
+            Atlases.Prune();
             Released += released;
             Passes++;
             long heap1 = GC.GetTotalMemory(false);
             Log.Line($"UNLOAD {why}: {released} of {cands.Count} assets let go in {(System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000 / System.Diagnostics.Stopwatch.Frequency} ms; "
-                + $"heap {heap0 >> 20} -> {heap1 >> 20} MB, live objects {Objects.LiveCount}");
+                + $"heap {heap0 >> 20} -> {heap1 >> 20} MB, live objects {Objects.LiveCount}; {files} converted files no longer read let go");
         }
 
         /// <summary>Prefabs: each member keeps the whole hierarchy alive (in a method of its own, so no local holds one).</summary>

@@ -40,7 +40,9 @@ target_include_directories(ch360_player PRIVATE "${CONSOLE}/w2c2"
     "${CH360_RUNTIME}/runtime/include" "${CH360_RUNTIME}/runtime/src" "${CH360_RUNTIME}/third_party/w2c2/w2c2"
     "${CH360_PLAYER_C}" "${CONSOLE}")
 target_compile_definitions(ch360_player PRIVATE W2C2_HOST_MEMORY)
-target_compile_options(ch360_player PRIVATE ${COMMON_FLAGS} -std=gnu99 -w)
+# No unwind tables for the C: nothing unwinds through it (the runtime traps with longjmp; an uncaught
+# exception ends the title either way), and they were 10 MB of the image the console keeps in memory.
+target_compile_options(ch360_player PRIVATE ${COMMON_FLAGS} -std=gnu99 -w -fno-asynchronous-unwind-tables -fno-unwind-tables)
 
 add_executable(cuphead360 "${CONSOLE}/xsdk/main.cpp" "${CONSOLE}/xsdk/big_alloc.c" "${CONSOLE}/xsdk/probe64.c"
     "${CONSOLE}/xsdk/probe64_raw.S" "${CH360_SHADERS}/ch360_shaders.c")

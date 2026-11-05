@@ -117,6 +117,8 @@ typedef struct ch360_frame {
 void ch360_plat_draw(const ch360_frame* frame);
 /* Texture id is the converted texture <key> (GameData/ctex/<key>.ctx). */
 void ch360_plat_texture_file(int id, const char* key);
+/* Texture id is likely drawn soon: read it ahead if memory allows (never waited for). */
+void ch360_plat_texture_prefetch(int id);
 /* Texture id's pixels (run-time textures: font atlases), BGRA rows. */
 void ch360_plat_texture_pixels(int id, int width, int height, const unsigned char* bgra);
 /* Mixed audio: frames of 48 kHz stereo, interleaved little-endian floats

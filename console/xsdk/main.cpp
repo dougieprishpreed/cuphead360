@@ -269,14 +269,17 @@ struct LoadJob {
     unsigned char* data;   // the texture's bytes after the 28-byte header
     unsigned n, fmt, w, h;
     int state;             // 0 read, 1 bad header, 2 bad read
+    bool pre;              // a prefetch (nothing drew it yet)
     double queued, read_ms;
 };
 const unsigned LOAD_RING = 64;
-LoadJob* g_load_in[LOAD_RING];
+LoadJob* g_load_in[LOAD_RING];    // textures items draw this frame
+LoadJob* g_pre_in[LOAD_RING];     // prefetches (read only when no drawn one waits)
 LoadJob* g_load_out[LOAD_RING];
-unsigned g_load_in_head, g_load_in_tail, g_load_out_head, g_load_out_tail;   // under g_load_lock
+unsigned g_load_in_head, g_load_in_tail, g_pre_in_head, g_pre_in_tail, g_load_out_head, g_load_out_tail;   // under g_load_lock
 pthread_mutex_t g_load_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t g_load_cond = PTHREAD_COND_INITIALIZER;
+pthread_cond_t g_load_cond = PTHREAD_COND_INITIALIZER;   // a job queued
+pthread_cond_t g_done_cond = PTHREAD_COND_INITIALIZER;   // a job done
 ch360_pack_reader* g_load_reader = NULL;
 bool g_loader = false;
 
@@ -286,10 +289,12 @@ void* texture_loader(void*) {
     xsdk_thread_move(2);
     for (;;) {
         pthread_mutex_lock(&g_load_lock);
-        while (g_load_in_head == g_load_in_tail) pthread_cond_wait(&g_load_cond, &g_load_lock);
-        LoadJob* j = g_load_in[g_load_in_head % LOAD_RING];
-        ++g_load_in_head;
+        while (g_load_in_head == g_load_in_tail && g_pre_in_head == g_pre_in_tail) pthread_cond_wait(&g_load_cond, &g_load_lock);
+        LoadJob* j;
+        if (g_load_in_head != g_load_in_tail) j = g_load_in[g_load_in_head++ % LOAD_RING];
+        else j = g_pre_in[g_pre_in_head++ % LOAD_RING];
         pthread_mutex_unlock(&g_load_lock);
+        if (!j) continue;   // a prefetch moved to the drawn ring
         double t0 = now_ms();
         unsigned char head[28];
         j->state = 1;
@@ -303,8 +308,9 @@ void* texture_loader(void*) {
         }
         j->read_ms = now_ms() - t0;
         pthread_mutex_lock(&g_load_lock);
-        g_load_out[g_load_out_tail % LOAD_RING] = j;   // never fuller than the in ring: at most LOAD_RING jobs exist
+        g_load_out[g_load_out_tail % LOAD_RING] = j;   // never fuller than the in rings: at most LOAD_RING jobs exist
         ++g_load_out_tail;
+        pthread_cond_signal(&g_done_cond);
         pthread_mutex_unlock(&g_load_lock);
     }
     return NULL;
@@ -324,8 +330,9 @@ struct Tex {
     bool failed;
     bool pinned;         // kept through evictions (the film grain's frames)
     bool loading;        // a job for it is with the loader thread
+    bool prefetching;    // that job is a prefetch
     Tex() : image(VK_NULL_HANDLE), mem(VK_NULL_HANDLE), view(VK_NULL_HANDLE), set(VK_NULL_HANDLE), w(0), h(0),
-            format(VK_FORMAT_UNDEFINED), bytes(0), last_used(0), retry_at(0), failed(false), pinned(false), loading(false) {}
+            format(VK_FORMAT_UNDEFINED), bytes(0), last_used(0), retry_at(0), failed(false), pinned(false), loading(false), prefetching(false) {}
 };
 
 struct Garbage {
@@ -398,12 +405,17 @@ private:
     void destroy(Tex& t, bool now);
     void load(int id, Tex& t);
     void load_packed(int id, Tex& t);
-    void take_loads();
+    void take_loads(bool all = false);
+    void finish_waits();
+    bool queue_load(int id, Tex& t, bool pre);
     std::vector<LoadJob*> taken_;   // done jobs past this frame's upload budget
+    std::vector<int> waiting_;      // textures this frame's items draw that the loader still has
     unsigned load_jobs_;            // jobs made and not yet taken back
-    size_t load_bytes_;             // their buffers'
+    size_t load_bytes_, pre_bytes_; // their buffers', the prefetches' of them
+    double wait_ms_;
 public:
     void start_loader();
+    void prefetch(int id);
 private:
     void evict();
     size_t release_unused(size_t want);
@@ -1331,6 +1343,9 @@ void Renderer::load_for(int id) {
     if (t) {
         load(id, *t);
         t->last_used = frame_no_;
+        // Drawn this frame: waited for (finish_waits) rather than drawn without it (the sixteenth run's
+        // flicker: the logo, transitions, the onion's new pages); also when the in-flight cap kept it back.
+        if (g_loader && (t->loading || (!t->image && !t->failed && !t->key.empty() && frame_no_ >= t->retry_at))) waiting_.push_back(id);
     }
 }
 
@@ -1546,7 +1561,8 @@ void Renderer::load(int id, Tex& t) {
 
 void Renderer::start_loader() {
     load_jobs_ = 0;
-    load_bytes_ = 0;
+    load_bytes_ = pre_bytes_ = 0;
+    wait_ms_ = 0;
     if (ch360_ctex_pack < 0) return;
     g_load_reader = ch360_pack_reader_new();
     if (!g_load_reader) return;
@@ -1557,7 +1573,7 @@ void Renderer::start_loader() {
 
 // The frame's start: textures the loader has read become images, copied into staging, within an upload
 // budget a frame (the copies are the game thread's part).
-void Renderer::take_loads() {
+void Renderer::take_loads(bool all) {
     if (!g_loader) return;
     pthread_mutex_lock(&g_load_lock);
     while (g_load_out_head != g_load_out_tail) {
@@ -1567,12 +1583,13 @@ void Renderer::take_loads() {
     pthread_mutex_unlock(&g_load_lock);
     size_t budget = 6u << 20, used = 0;
     size_t k = 0;
-    for (; k < taken_.size() && (used == 0 || used + taken_[k]->n <= budget); ++k) {
+    for (; k < taken_.size() && (all || used == 0 || used + taken_[k]->n <= budget); ++k) {
         LoadJob* j = taken_[k];
         used += j->n;
         Tex* t = tex(j->id);
         if (t && t->key == j->key && t->loading && !t->image) {
             t->loading = false;
+            t->prefetching = false;
             if (j->state != 0) {
                 logf("texture %s: %s", j->key.c_str(), j->state == 1 ? "missing from the pack or unreadable (run tools/stage_console.py)" : "bad read from the pack");
                 t->failed = true;
@@ -1586,8 +1603,11 @@ void Renderer::take_loads() {
                     if (!dst) destroy(*t, true);
                 }
                 if (!dst) {
-                    t->retry_at = frame_no_ + 120;
-                    logf("texture %s: no memory, drawn without it for now", j->key.c_str());
+                    // A prefetch is simply dropped (read again when drawn); a drawn one waits two seconds.
+                    if (!j->pre) {
+                        t->retry_at = frame_no_ + 120;
+                        logf("texture %s: no memory, drawn without it for now", j->key.c_str());
+                    }
                 } else {
                     if (staging_cached_) memcpy(dst, j->data, j->n);
                     else g_memcpy(dst, j->data, j->n);
@@ -1597,16 +1617,19 @@ void Renderer::take_loads() {
                         ++loads_logged_;
                         unsigned free_mb, total_mb;
                         memory_mb(&free_mb, &total_mb);
-                        logf("texture %s: format %u, %ux%u, %u KB (%u KB stored), read and decode %u ms on the loader, drawn %u ms after the ask; "
+                        logf("texture %s: format %u, %ux%u, %u KB (%u KB stored), read and decode %u ms on the loader, %s %u ms after the ask; "
                              "%u MB free, textures %u MB", j->key.c_str(), j->fmt, j->w, j->h, j->n >> 10, j->e.stored >> 10,
-                             (unsigned)j->read_ms, (unsigned)(now_ms() - j->queued), free_mb, (unsigned)(texture_bytes_ >> 20));
+                             (unsigned)j->read_ms, j->pre ? "prefetched, ready" : "ready", (unsigned)(now_ms() - j->queued), free_mb,
+                             (unsigned)(texture_bytes_ >> 20));
                     }
                 }
             }
         } else if (t) {
             // Given another texture (or pixels) meanwhile: free to load what it is now.
             t->loading = false;
+            t->prefetching = false;
         }
+        if (j->pre) pre_bytes_ -= j->n;
         load_bytes_ -= j->n;
         --load_jobs_;
         free(j->data);
@@ -1615,40 +1638,105 @@ void Renderer::take_loads() {
     taken_.erase(taken_.begin(), taken_.begin() + (long)k);
 }
 
+// The frame's textures still with the loader: the frame waits for them (the loader reads them meanwhile,
+// several in a row); those the in-flight cap kept back are queued as room comes.
+void Renderer::finish_waits() {
+    if (waiting_.empty()) return;
+    double t0 = now_ms();
+    for (;;) {
+        take_loads(true);
+        bool pending = false, held = false;
+        for (size_t k = 0; k < waiting_.size(); ++k) {
+            Tex* t = tex(waiting_[k]);
+            if (!t || t->image || t->failed || t->key.empty() || frame_no_ < t->retry_at) continue;
+            // kept back by the cap, or a prefetch: ahead now
+            if ((!t->loading || t->prefetching) && !queue_load(waiting_[k], *t, false) && !t->failed && frame_no_ >= t->retry_at) held = true;
+            if (t->loading) pending = true;
+        }
+        if (!pending && !(held && load_jobs_ > 0)) break;
+        pthread_mutex_lock(&g_load_lock);
+        while (g_load_out_head == g_load_out_tail) pthread_cond_wait(&g_done_cond, &g_load_lock);
+        pthread_mutex_unlock(&g_load_lock);
+    }
+    waiting_.clear();
+    wait_ms_ += now_ms() - t0;
+}
+
+// A texture the glue expects to draw soon (the other animations' pages of an atlas page just drawn): read
+// ahead, behind every texture a frame waits for, while memory has room.
+void Renderer::prefetch(int id) {
+    if (!g_loader || ch360_ctex_pack < 0) return;
+    Tex* t = tex(id);
+    if (!t || t->image || t->loading || t->failed || t->key.empty() || frame_no_ < t->retry_at) return;
+    if (pre_bytes_ > (8u << 20) || texture_bytes_ + load_bytes_ > TEXTURE_BUDGET * 3 / 4) return;
+    unsigned free_mb, total_mb;
+    memory_mb(&free_mb, &total_mb);
+    if (free_mb < MEMORY_FLOOR_MB + 48 + (unsigned)(load_bytes_ >> 20)) return;
+    queue_load(id, *t, true);
+}
+
+// A job for the loader thread: the drawn ring, or the prefetch ring (read when nothing drawn waits). A drawn
+// texture whose prefetch is still queued moves to the drawn ring. False when the in-flight cap (8 MB of
+// buffers) keeps it back, or it can't be read.
+bool Renderer::queue_load(int id, Tex& t, bool pre) {
+    if (t.loading && t.prefetching && !pre) {
+        pthread_mutex_lock(&g_load_lock);
+        for (unsigned k = g_pre_in_head; k != g_pre_in_tail; ++k) {
+            LoadJob* q = g_pre_in[k % LOAD_RING];
+            if (q && q->id == id && q->key == t.key) {
+                g_pre_in[k % LOAD_RING] = NULL;
+                q->pre = false;
+                pre_bytes_ -= q->n;
+                g_load_in[g_load_in_tail++ % LOAD_RING] = q;
+                pthread_cond_signal(&g_load_cond);
+                break;
+            }
+        }
+        pthread_mutex_unlock(&g_load_lock);
+        t.prefetching = false;   // already being read when not found: it comes back as it is
+        return true;
+    }
+    if (t.loading) return true;
+    if (load_jobs_ >= LOAD_RING - 1 || load_bytes_ > (8u << 20)) return false;
+    ch360_pack_entry pe;
+    if (!ch360_pack_find(ch360_ctex_pack, t.key.c_str(), t.key.size(), &pe) || pe.size < 28) {
+        logf("texture %s: missing from the pack (run tools/stage_console.py)", t.key.c_str());
+        t.failed = true;
+        return false;
+    }
+    unsigned n = pe.size - 28;
+    unsigned char* data = (unsigned char*)malloc(n ? n : 1);
+    if (!data) {
+        t.retry_at = frame_no_ + 120;
+        return false;
+    }
+    LoadJob* j = new LoadJob();
+    j->id = id;
+    j->key = t.key;
+    j->e = pe;
+    j->data = data;
+    j->n = n;
+    j->fmt = j->w = j->h = 0;
+    j->state = 1;
+    j->pre = pre;
+    j->queued = now_ms();
+    j->read_ms = 0;
+    ++load_jobs_;
+    load_bytes_ += n;
+    if (pre) pre_bytes_ += n;
+    t.loading = true;
+    t.prefetching = pre;
+    pthread_mutex_lock(&g_load_lock);
+    if (pre) g_pre_in[g_pre_in_tail++ % LOAD_RING] = j;
+    else g_load_in[g_load_in_tail++ % LOAD_RING] = j;
+    pthread_cond_signal(&g_load_cond);
+    pthread_mutex_unlock(&g_load_lock);
+    return true;
+}
+
 void Renderer::load_packed(int id, Tex& t) {
     if (g_loader) {
-        // A job for the loader (from here on the texture is read off the game thread).
-        if (load_jobs_ >= LOAD_RING || load_bytes_ > (32u << 20)) return;   // asked again next frame
-        ch360_pack_entry pe;
-        if (!ch360_pack_find(ch360_ctex_pack, t.key.c_str(), t.key.size(), &pe) || pe.size < 28) {
-            logf("texture %s: missing from the pack (run tools/stage_console.py)", t.key.c_str());
-            t.failed = true;
-            return;
-        }
-        unsigned n = pe.size - 28;
-        unsigned char* data = (unsigned char*)malloc(n ? n : 1);
-        if (!data) {
-            t.retry_at = frame_no_ + 120;
-            return;
-        }
-        LoadJob* j = new LoadJob();
-        j->id = id;
-        j->key = t.key;
-        j->e = pe;
-        j->data = data;
-        j->n = n;
-        j->fmt = j->w = j->h = 0;
-        j->state = 1;
-        j->queued = now_ms();
-        j->read_ms = 0;
-        ++load_jobs_;
-        load_bytes_ += n;
-        t.loading = true;
-        pthread_mutex_lock(&g_load_lock);
-        g_load_in[g_load_in_tail % LOAD_RING] = j;
-        ++g_load_in_tail;
-        pthread_cond_signal(&g_load_cond);
-        pthread_mutex_unlock(&g_load_lock);
+        queue_load(id, t, false);
         return;
     }
     double t0 = now_ms();
@@ -1741,6 +1829,7 @@ void Renderer::evict() {
 void Renderer::frame(const ch360_frame* f) {
     ++frame_no_;
     double t0 = now_ms();
+    unsigned uploads_at = uploads;   // the loader's textures taken here count as this frame's loads
     take_loads();
 
     // Pass 1: which items meet their view (the glue worked out their boxes;
@@ -1748,7 +1837,7 @@ void Renderer::frame(const ch360_frame* f) {
     // wholly off screen), load what those draw, then run the uploads.
     Stage marker("vk: loading textures");
     on_view_.assign(f->item_count, 0);
-    unsigned uploads0 = uploads;
+    unsigned uploads0 = uploads_at;
     double fill[2] = { 0, 0 };   // pixels the items cover (their boxes in their views): the screen's, render textures'
     for (unsigned v = 0; v < f->view_count; ++v) {
         const ch360_view& view = f->views[v];
@@ -1772,6 +1861,7 @@ void Renderer::frame(const ch360_frame* f) {
                 for (int k = 0; k < 2; ++k) load_for(it.textures[k]);
         }
     }
+    finish_waits();
     double t1 = now_ms();
     Frame& fr = frames_[frame_];
     g_stage = "vk: waiting for the frame's fence";
@@ -2339,6 +2429,7 @@ extern "C" void ch360_plat_draw(const ch360_frame* f) {
 }
 
 extern "C" void ch360_plat_texture_file(int id, const char* key) { g_renderer->texture_file(id, key); }
+extern "C" void ch360_plat_texture_prefetch(int id) { g_renderer->prefetch(id); }
 
 extern "C" void ch360_plat_texture_pixels(int id, int width, int height, const unsigned char* bgra) {
     Stage stage("vk: run-time texture");

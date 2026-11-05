@@ -435,7 +435,7 @@ namespace Cuphead360.Player
             Cuphead360.Engine.SceneLoader.Timing = true;
             Audio.OpenReader = HostClip.Open;
             ChobFile.Trace = Console.WriteLine;
-            Audio.CacheFloats = 4L * 1024 * 1024;   // 16 MB
+            Audio.CacheFloats = 2L * 1024 * 1024;   // 8 MB of the host mixer's decoded clips (textures need the room)
             if (ChobObject.TreeBudget == long.MaxValue) ChobObject.TreeBudget = 24L << 20;   // parsed trees kept (estimated bytes)
             ChobFile.BlockBudget = 8L << 20;   // large files' blocks kept
             RenderList.HostTransforms = !managedDraw;   // sprites' vertices go to the host untransformed

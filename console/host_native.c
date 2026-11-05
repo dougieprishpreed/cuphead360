@@ -155,6 +155,10 @@ void ch360_plat_draw(const ch360_frame* f) {
     if (trace_dir) trace_frame();
 }
 
+void ch360_plat_texture_prefetch(int id) {
+    (void)id;
+}
+
 void ch360_plat_texture_file(int id, const char* key) {
     textures_files++;
     if (dump_keys) {

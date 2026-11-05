@@ -187,6 +187,40 @@ namespace Cuphead360.Engine
         }
         public static void SetBuilt(ChobFile f, long pathId, UObject o) => built[(f, pathId)] = o;
 
+        /// <summary>
+        /// AssetUnload's pass: the converted files are held weakly through its collection, so a file no
+        /// live object reaches any more (the scene just left, bundles the game unloaded whose assets all
+        /// went) goes with its bytes, its objects' index and parsed trees in that same collection. Live
+        /// assets and components reach theirs through their sources, sprites their atlases', loaded bundles
+        /// and scenes being built theirs. The parsed-tree cache and the read blocks are let go first (they
+        /// would hold every file). A file asked for again loads anew, as Unity loads a bundle or scene again.
+        /// CH360_KEEP_FILES=1 keeps every file as before.
+        /// </summary>
+        public static List<(string key, WeakReference file)> WeakenFiles()
+        {
+            var weak = new List<(string, WeakReference)>();
+            if (keepFiles) return weak;
+            ChobObject.DropTrees();
+            ChobFile.DropBlocks();
+            foreach (var kv in files) if (kv.Value != null) weak.Add((kv.Key, new WeakReference(kv.Value)));
+            foreach (var w in weak) files.Remove(w.Item1);
+            return weak;
+        }
+
+        /// <summary>After the collection: the files that stayed go back; the number that went.</summary>
+        public static int RestoreFiles(List<(string key, WeakReference file)> weak)
+        {
+            int gone = 0;
+            foreach (var (key, w) in weak)
+            {
+                if (w.Target is ChobFile f) files[key] = f;
+                else gone++;
+            }
+            return gone;
+        }
+
+        static readonly bool keepFiles = Environment.GetEnvironmentVariable("CH360_KEEP_FILES") == "1";
+
         /// <summary>AssetUnload's pass: the built entries of its candidates held weakly (taken out of the table).</summary>
         public static List<((ChobFile, long) key, WeakReference obj)> WeakenBuilt()
         {

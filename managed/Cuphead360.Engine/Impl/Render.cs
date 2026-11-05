@@ -490,8 +490,20 @@ namespace Cuphead360.Engine
     /// </summary>
     public static class Atlases
     {
-        static readonly Dictionary<string, SpriteAtlas> byTag = new Dictionary<string, SpriteAtlas>(StringComparer.Ordinal);
-        static readonly Dictionary<string, (SpriteAtlas atlas, object data)> byKey = new Dictionary<string, (SpriteAtlas, object)>(StringComparer.Ordinal);
+        // Atlases are held weakly here: the game keeps those it wants (its loader's cache); held strongly
+        // they could never be unloaded, nor the files they came from.
+        static readonly Dictionary<string, WeakReference> byTag = new Dictionary<string, WeakReference>(StringComparer.Ordinal);
+        // A sprite's binding in an atlas: what Bound reads (the render data's tree was held here before,
+        // every atlas ever loaded: 10 MB of trees by Forest Follies).
+        sealed class Binding
+        {
+            public WeakReference Atlas;
+            public PPtr Texture;
+            public Rect TextureRect;
+            public Vector4 UvTransform;
+            public int Settings;
+        }
+        static readonly Dictionary<string, Binding> byKey = new Dictionary<string, Binding>(StringComparer.Ordinal);
         // Bumped whenever byKey changes: a sprite's Bound result is kept until then (it read the tree each frame).
         static int version = 1;
         static readonly bool noBoundCache = Environment.GetEnvironmentVariable("CH360_NO_BOUND_CACHE") == "1";
@@ -510,14 +522,14 @@ namespace Cuphead360.Engine
             {
                 // Unloaded since: the next load is a new atlas object.
                 if (!(Objects.Of(i.IncludedAtlas) is NAsset ia) || ia.Destroyed) i.IncludedAtlas = AssetDb.Resolve(i.AtlasFile, i.AtlasPtr) as SpriteAtlas;
-                if (i.IncludedAtlas != null && (!byKey.TryGetValue(i.RenderKey ?? "", out var cur) || cur.atlas != i.IncludedAtlas)) Register(i.IncludedAtlas);
+                if (i.IncludedAtlas != null && (!byKey.TryGetValue(i.RenderKey ?? "", out var cur) || cur.Atlas.Target != i.IncludedAtlas)) Register(i.IncludedAtlas);
                 return;
             }
             foreach (var tag in i.AtlasTags)
                 if (!Live(tag) && requested.Add(tag)) pending.Add(tag);
         }
 
-        static bool Live(string tag) => byTag.TryGetValue(tag, out var a) && Objects.Of(a) is NObject o && !o.Destroyed;
+        static bool Live(string tag) => byTag.TryGetValue(tag, out var w) && w.Target is SpriteAtlas a && Objects.Of(a) is NObject o && !o.Destroyed;
 
         /// <summary>Send queued atlas requests (main thread, outside object construction).</summary>
         public static void Flush()
@@ -546,14 +558,30 @@ namespace Cuphead360.Engine
             if (src == null) return;
             string tag = Tree.Str(src.Tree, "m_Tag");
             if (Trace) Log.Line($"TRACE atlas register {tag} id={Objects.Of(atlas)?.InstanceId} destroyed={Objects.Of(atlas)?.Destroyed} frame {Clock.FrameCount}");
-            byTag[tag] = atlas;
+            var weak = new WeakReference(atlas);
+            byTag[tag] = weak;
             requested.Remove(tag);   // answered: if this atlas is unloaded later, sprites ask again
             foreach (var e in Tree.List(src.Tree, "m_RenderDataMap"))
                 if (e is List<object> pair && pair.Count == 2)
                 {
                     string key = Sprites.Key(pair[0]);
-                    if (key != null) { byKey[key] = (atlas, pair[1]); version++; }
+                    if (key == null) continue;
+                    Sprites.ReadBinding(pair[1], out var rect, out _, out var uv, out int settings);
+                    byKey[key] = new Binding { Atlas = weak, Texture = Tree.Ptr(pair[1], "texture"), TextureRect = rect, UvTransform = uv, Settings = settings };
+                    version++;
                 }
+        }
+
+        /// <summary>Bindings of atlases that were destroyed (unloaded) go (AssetUnload's pass).</summary>
+        public static void Prune()
+        {
+            var gone = new List<string>();
+            foreach (var kv in byKey) if (!(kv.Value.Atlas.Target is SpriteAtlas sa) || !(Objects.Of(sa) is NAsset a) || a.Destroyed) gone.Add(kv.Key);
+            foreach (var k in gone) byKey.Remove(k);
+            if (gone.Count > 0) version++;
+            var tags = new List<string>();
+            foreach (var kv in byTag) if (!(kv.Value.Target is SpriteAtlas sa) || !(Objects.Of(sa) is NAsset a) || a.Destroyed) tags.Add(kv.Key);
+            foreach (var t in tags) byTag.Remove(t);
         }
 
         public static bool Bound(Sprites.Info i, out Texture2D tex, out Rect textureRect, out Vector4 uvTransform, out int settings)
@@ -570,10 +598,10 @@ namespace Cuphead360.Engine
             tex = null; textureRect = default; uvTransform = default; settings = 0;
             i.BoundVersion = version; i.BoundAtlas = null; i.BoundTex = null;
             if (i.RenderKey == null || !byKey.TryGetValue(i.RenderKey, out var b)) return false;
-            if (!(Objects.Of(b.atlas) is NAsset a) || a.Destroyed) { i.BoundVersion = 0; return false; }
-            tex = AssetDb.Resolve(a.Source.File, Tree.Ptr(b.data, "texture")) as Texture2D;
-            Sprites.ReadBinding(b.data, out textureRect, out _, out uvTransform, out settings);
-            i.BoundAtlas = b.atlas; i.BoundTex = tex; i.BoundRect = textureRect; i.BoundUv = uvTransform; i.BoundSettings = settings;
+            if (!(b.Atlas.Target is SpriteAtlas atlas) || !(Objects.Of(atlas) is NAsset a) || a.Destroyed) { i.BoundVersion = 0; return false; }
+            tex = AssetDb.Resolve(a.Source.File, b.Texture) as Texture2D;
+            textureRect = b.TextureRect; uvTransform = b.UvTransform; settings = b.Settings;
+            i.BoundAtlas = atlas; i.BoundTex = tex; i.BoundRect = textureRect; i.BoundUv = uvTransform; i.BoundSettings = settings;
             return tex != null;
         }
 

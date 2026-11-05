@@ -343,6 +343,23 @@ static unsigned* remap_grid(const remap_page* p) {
 }
 
 /* Moves an item drawn from an atlas page onto its sprite's full-size page. */
+/* The sprite pages cut from the same atlas page as one just drawn for the
+ * first time: mostly the same character's other animations, so they are read
+ * ahead (ch360_plat_texture_prefetch decides by memory) rather than when their
+ * first frame is drawn (a frame then waits for them). */
+static void remap_prefetch(const remap_page* p) {
+    unsigned k;
+    for (k = 0; k < p->count; k++) {
+        unsigned t = rm_boxes[p->first + k].target;
+        int id;
+        if (t >= rm_target_count || rm_plat[t] >= 0) continue;
+        id = rm_plat[t] = new_plat();
+        if (id < 0) return;
+        ch360_plat_texture_file(id, rm_strings + rm_names[t]);
+        ch360_plat_texture_prefetch(id);
+    }
+}
+
 static void remap_item(ch360_item* it) {
     remap_page* p;
     ch360_vertex* v;
@@ -386,7 +403,10 @@ static void remap_item(ch360_item* it) {
             int id = b->target < rm_target_count ? rm_plat[b->target] : -1;
             if (id < 0 && b->target < rm_target_count) {
                 id = rm_plat[b->target] = new_plat();
-                if (id >= 0) ch360_plat_texture_file(id, rm_strings + rm_names[b->target]);
+                if (id >= 0) {
+                    ch360_plat_texture_file(id, rm_strings + rm_names[b->target]);
+                    remap_prefetch(p);
+                }
             }
             if (id < 0) return;
             for (k = 0; k < it->count; k++) {

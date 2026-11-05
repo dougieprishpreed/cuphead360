@@ -198,9 +198,12 @@ namespace Cuphead360.Player
             float step = float.TryParse(stepArg[0], System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var st) && st > 0 ? st : 1f / 60f;
             int stepFrom = stepArg.Length > 1 && int.TryParse(stepArg[1], out int sf) ? sf : 0;
+            // CH360_HEAP_CENSUS_AT=<frame>: what the heap holds then (HeapCensus).
+            int censusAt = int.TryParse(Environment.GetEnvironmentVariable("CH360_HEAP_CENSUS_AT"), out int ca) ? ca : -1;
             for (int f = 1; f <= frames && !Icalls.QuitRequested; f++)
             {
                 PlayerLoop.Frame(f >= stepFrom ? step : 1f / 60f);
+                if (f == censusAt) HeapCensus.Run(f);
                 if (dumpAt.Contains(f)) DumpState(f);
                 if (PlayerLoop.Profile && f % 600 == 0) Console.WriteLine($"frame {f} " + PlayerLoop.ProfileReport(600));
                 if (report > 0 && f % report == 0)

@@ -97,6 +97,22 @@ namespace Cuphead360.Engine
             set { tree = value; Data = null; Strings = null; DiskPath = null; table = null; }
         }
 
+        /// <summary>AssetUnload's pass: every parsed tree read from a file is let go (they are parsed again when asked for).</summary>
+        internal static void DropTrees()
+        {
+            foreach (var o in cached)
+            {
+                if (o.table == null || o.tree == null) continue;   // set at run time: kept
+                o.tree = null;
+                o.Strings = o.table;
+                o.DiskPath = o.File.SourcePath;
+                o.Data = null;
+                TreesDropped++;
+            }
+            cached.Clear();
+            treeBytes = 0;
+        }
+
         /// <summary>
         /// Lets go of the least recently used parsed trees down to 3/4 of the budget, never the
         /// one being handed out: a tree over 3/4 of the budget let itself go, the getter returned
@@ -136,13 +152,19 @@ namespace Cuphead360.Engine
         public static string Census(IEnumerable<ChobFile> files)
         {
             var by = new Dictionary<string, (int n, long bytes)>();
-            long held = 0;
+            long held = 0, indexed = 0, tableChars = 0;
+            int nfiles = 0;
+            var tables = new HashSet<string[]>();
             foreach (var f in files)
             {
                 byte[] data = null;
+                nfiles++;
+                indexed += f.Ordered.Count;
                 foreach (var o in f.Ordered)
                 {
                     if (o.Data != null) data = o.Data;
+                    var st0 = o.Strings ?? o.table;
+                    if (st0 != null && tables.Add(st0)) foreach (var x in st0) tableChars += x?.Length ?? 0;
                     var t = o.Parsed;
                     if (t == null) continue;
                     by.TryGetValue(o.Type, out var st);
@@ -150,7 +172,9 @@ namespace Cuphead360.Engine
                 }
                 if (data != null) held += data.Length;
             }
-            var sb = new StringBuilder($"TREES file bytes held {held >> 20} MB;");
+            // An object's index record: ~84 bytes on the console's 32-bit heap, ~28 more in its file's map and list.
+            var sb = new StringBuilder($"TREES file bytes held {held >> 20} MB; {nfiles} files index {indexed} objects (~{indexed * 112 >> 20} MB), "
+                + $"string tables {tables.Count} (~{(tableChars * 2 + tables.Count * 0L) >> 20} MB of characters);");
             long total = 0;
             foreach (var kv in by) total += kv.Value.bytes;
             sb.Append($" trees {total >> 20} MB:");
@@ -169,6 +193,8 @@ namespace Cuphead360.Engine
                 case List<object> l:
                     { long s = 40 + l.Capacity * 8L; foreach (var x in l) s += Size(x); return s; }
                 case byte[] b: return 24 + b.Length;
+                case float[] f: return 24 + 4L * f.Length;
+                case long[] a: return 24 + 8L * a.Length;
                 case string str: return 0;   // shared with the file's string table mostly
                 case null: return 0;
                 default: return 24;          // a boxed number or bool, a PPtr
@@ -255,6 +281,15 @@ namespace Cuphead360.Engine
                 Buffer.BlockCopy(b.Data, within, dst, at, n);
                 off += n; at += n; count -= n;
             }
+        }
+
+        /// <summary>AssetUnload's pass: the read blocks and open streams go (they would keep every file they came from).</summary>
+        internal static void DropBlocks()
+        {
+            blocks.Clear();
+            lru.Clear();
+            foreach (var f in open) { f.stream?.Dispose(); f.stream = null; }
+            open.Clear();
         }
 
         Block BlockAt(int index)
@@ -609,6 +644,34 @@ namespace Cuphead360.Engine
                                 if (i == n) return bytes;
                                 p = save;
                             }
+                            // Long runs of numbers (an animation clip's curve words and samples): a float[] or a
+                            // long[] rather than a box per value (parsing the player's clips at its first spawn
+                            // was mostly the collections those boxes set off). Tree.List boxes them for callers
+                            // that want a list.
+                            if (n >= 64 && d[p] == 4)
+                            {
+                                int save = p;
+                                var fl = new float[n];
+                                int i = 0;
+                                for (; i < n && d[p] == 4; i++) { p++; fl[i] = BitConverter.Int32BitsToSingle(I32()); }
+                                if (i == n) return fl;
+                                p = save;
+                            }
+                            if (n >= 64 && d[p] == 3)
+                            {
+                                int save = p;
+                                var lg = new long[n];
+                                int i = 0;
+                                for (; i < n && d[p] == 3; i++)
+                                {
+                                    p++;
+                                    ulong z = 0; int shift = 0; byte b;
+                                    do { b = d[p++]; z |= (ulong)(b & 0x7F) << shift; shift += 7; } while ((b & 0x80) != 0);
+                                    lg[i] = (long)(z >> 1) ^ -(long)(z & 1);
+                                }
+                                if (i == n) return lg;
+                                p = save;
+                            }
                             var l = new List<object>(n);
                             for (int i = 0; i < n; i++) l.Add(Value());
                             return l;
@@ -690,8 +753,43 @@ namespace Cuphead360.Engine
         {
             List<object> l => l,
             byte[] b => b.Select(x => (object)(long)x).ToList(),   // a byte blob read back as a list
+            long[] a => a.Select(x => (object)x).ToList(),         // number runs (the reader keeps them unboxed)
+            float[] f => f.Select(x => (object)x).ToList(),
             _ => new List<object>(),
         };
+        /// <summary>A list of numbers as floats, unboxed when the reader kept it as a run.</summary>
+        public static float[] Floats(object t, string key)
+        {
+            switch (Get(t, key))
+            {
+                case float[] f: return f;
+                case long[] a: { var r = new float[a.Length]; for (int i = 0; i < r.Length; i++) r[i] = a[i]; return r; }
+                case byte[] b: { var r = new float[b.Length]; for (int i = 0; i < r.Length; i++) r[i] = b[i]; return r; }
+                case List<object> l:
+                    {
+                        var r = new float[l.Count];
+                        for (int i = 0; i < r.Length; i++) r[i] = l[i] switch { float x => x, double x => (float)x, long x => x, _ => 0f };
+                        return r;
+                    }
+                default: return new float[0];
+            }
+        }
+        /// <summary>A list of whole numbers, unboxed when the reader kept it as a run.</summary>
+        public static long[] Longs(object t, string key)
+        {
+            switch (Get(t, key))
+            {
+                case long[] a: return a;
+                case byte[] b: { var r = new long[b.Length]; for (int i = 0; i < r.Length; i++) r[i] = b[i]; return r; }
+                case List<object> l:
+                    {
+                        var r = new long[l.Count];
+                        for (int i = 0; i < r.Length; i++) r[i] = l[i] is long x ? x : 0;
+                        return r;
+                    }
+                default: return new long[0];
+            }
+        }
         public static PPtr Ptr(object t, string key) => Get(t, key) is PPtr p ? p : default;
         public static UnityEngine.Vector3 Vec3(object t, string key)
         {
