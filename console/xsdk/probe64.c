@@ -2,7 +2,7 @@
  * player starts). The third hardware run cleared the compare instructions
  * and every load and store form, yet a long built by `sldi; or` and tested
  * by `cmpdi` on the next instruction took its low word's sign
- * (docs/VERIFICATION.md). probe64_raw.S times that: five producers of a
+ * (round 11). probe64_raw.S times that: five producers of a
  * 64-bit value whose high word matters (0x00000001_80000000) and five
  * consumers of it, 0 to 12 nops apart, the register first holding a stale
  * 0x7EADBEEF high word. Each line reads, per distance 0 1 2 3 4 6 8 12:

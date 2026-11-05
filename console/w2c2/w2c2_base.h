@@ -1287,7 +1287,7 @@ static W2C2_INLINE U32 readSwapU32(const void* address, WasmMemoryAddress offset
 /* cuphead360 patch: a 64-bit value as two 32-bit accesses, low word first.
  * GCC turns the 8-byte copy into a doubleword load at whatever address the
  * guest uses, and the guest keeps many 64-bit values only 4-byte aligned;
- * two word accesses are aligned there (console/README.md). */
+ * two word accesses are aligned there. */
 static W2C2_INLINE U64 readSwapU64(const void* address, WasmMemoryAddress offset) {
     return ((U64)readSwapU32(address, offset + 4) << 32) | (U64)readSwapU32(address, offset);
 }

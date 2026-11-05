@@ -286,16 +286,17 @@ namespace Cuphead360.Player
         void Fight(InputFrame.Pad p, int t)
         {
             p.Buttons |= PadButton.X;   // shoot
-            var me = PlayerPosition();
+            var live = LiveNow();
+            var me = PlayerPosition(live);
             // Knocked out (ghost rising, death card up): confirm Retry now and then.
-            bool alive = me != null && me.Value.y <= 1500 && PlayerAlive();
+            bool alive = me != null && me.Value.y <= 1500 && PlayerAlive(live);
             if (!alive && wasAlive) Console.WriteLine($"BOT knocked out at frame {frame} fighting {LastBossName ?? "?"}");
             if (alive && !wasAlive) Console.WriteLine($"BOT attempt starts at frame {frame}");
             wasAlive = alive;
             if (!alive) { if (t % 90 < 6) p.Buttons |= PadButton.A; return; }
             var pos = me.Value;
             var body = pos + new Vector3(0, 60, 0);   // the player's hitbox centre, roughly
-            var boss = BossPosition(pos);
+            var boss = BossPosition(pos, live);
             float dir = 0;
             bool aimUp = false; float aimDir = 0;
             const float edge = 500f;
@@ -314,7 +315,7 @@ namespace Cuphead360.Player
             // Threats: predict each enemy shot's closest approach over the next 40 frames.
             bool jump = false; float dodge = 0; bool threat = false;
             var seen = new Dictionary<NGameObject, Vector3>();
-            foreach (var o in Objects.Live())
+            foreach (var o in live)
             {
                 if (!(o is NGameObject g) || !g.ActiveInHierarchy || (g.Tag != "EnemyProjectile" && g.Tag != "Enemy")) continue;
                 var q = g.Transform.Position;
@@ -377,9 +378,27 @@ namespace Cuphead360.Player
             return null;
         }
 
-        static bool PlayerAlive()
+        // The live objects once per fight step, and type names once per type: the step's four walks
+        // with Type.Name per behaviour were half of a PC run's time in the first run-and-gun level.
+        static readonly List<NObject> frameLive = new List<NObject>();
+        static List<NObject> LiveNow()
         {
-            foreach (var o in Objects.Live())
+            frameLive.Clear();
+            foreach (var o in Objects.Live()) frameLive.Add(o);
+            return frameLive;
+        }
+
+        static readonly Dictionary<Type, string> typeNames = new Dictionary<Type, string>();
+        static string TypeName(object o)
+        {
+            var t = o.GetType();
+            if (!typeNames.TryGetValue(t, out var n)) typeNames[t] = n = t.Name;
+            return n;
+        }
+
+        static bool PlayerAlive(List<NObject> live)
+        {
+            foreach (var o in live)
                 if (o is NSpriteRenderer sr && sr.GameObject != null && sr.GameObject.ActiveInHierarchy && sr.Sprite != null)
                 {
                     var n = Sprites.Of(sr.Sprite)?.Name ?? "";
@@ -389,10 +408,10 @@ namespace Cuphead360.Player
         }
 
         static readonly string[] playerTypes = { "MapPlayerController", "LevelPlayerController", "PlanePlayerController" };
-        static Vector3? PlayerPosition()
+        static Vector3? PlayerPosition(IEnumerable<NObject> live = null)
         {
-            foreach (var o in Objects.Live())
-                if (o is NBehaviour b && b.GameObject != null && b.GameObject.ActiveInHierarchy && Array.IndexOf(playerTypes, b.Managed.GetType().Name) >= 0)
+            foreach (var o in live ?? Objects.Live())
+                if (o is NBehaviour b && b.GameObject != null && b.GameObject.ActiveInHierarchy && Array.IndexOf(playerTypes, TypeName(b.Managed)) >= 0)
                     return b.GameObject.Transform.Position;
             return null;
         }
@@ -401,11 +420,11 @@ namespace Cuphead360.Player
         static string LastBossName;
 
         /// <summary>The nearest active enemy with a damage receiver (the boss part being fought).</summary>
-        static Vector3? BossPosition(Vector3 from)
+        static Vector3? BossPosition(Vector3 from, List<NObject> live)
         {
             Vector3? best = null; float bd = float.MaxValue;
-            foreach (var o in Objects.Live())
-                if (o is NBehaviour b && b.GameObject != null && b.GameObject.ActiveInHierarchy && b.Managed.GetType().Name == "DamageReceiver")
+            foreach (var o in live)
+                if (o is NBehaviour b && b.GameObject != null && b.GameObject.ActiveInHierarchy && TypeName(b.Managed) == "DamageReceiver")
                 {
                     var go = b.GameObject;
                     if (go.Tag == "Player" || go.Name.Contains("Player")) continue;

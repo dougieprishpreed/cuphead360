@@ -2,7 +2,7 @@
  * converted clips' Ogg Vorbis decoded natively by stb_vorbis. The engine's
  * own decoder, NVorbis, runs as translated wasm; on the console the world
  * map's music and ambience decoding took most of a frame (the seventh
- * run, docs/VERIFICATION.md). A clip's file is read whole into memory
+ * run). A clip's file is read whole into memory
  * (music is 1-3 MB) through the runtime's file calls, so the heartbeat
  * counts its reads. Samples go to guest memory as little-endian floats.
  * C89, like ch360_imports.c. */

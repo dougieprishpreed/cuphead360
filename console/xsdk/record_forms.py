@@ -6,7 +6,7 @@ instruction ("mr.", "and.", "rldicl." ...) sets CR0 from its result's low
 word only. With -mpowerpc64 GCC keeps a 64-bit value in one register and
 takes CR0 to judge all of it: `if (value >= 0)` on a long became
 `mr. r7,r5; bge`, so long.ToString printed 2147483648 as
--18446744071562067968 on the console (docs/VERIFICATION.md, round 11).
+-18446744071562067968 on the console (round 11).
 
 This compiles to assembly with GCC's insn names (-dp), follows each record
 form of a 64-bit (DImode) pattern with `cmpdi 0,rD,0`, which sets CR0 from

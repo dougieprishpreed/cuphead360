@@ -687,7 +687,7 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
      * conserve-memory mode, so the linear memory, which never shrinks, stays
      * close to the live heap. An 8 MB gen0 budget (DOTNET_GCgen0size=800000;
      * hex, no 0x) made every GC a gen1 and half of them gen2: 16.4 s of pauses
-     * over the native bot run against 3.4 s (docs/VERIFICATION.md, round 10). */
+     * over the native bot run against 3.4 s (round 10). */
     static const char* const env[3] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCConserveMemory=7" };
     srt_config cfg;
     memset(&cfg, 0, sizeof(cfg));

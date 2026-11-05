@@ -183,7 +183,7 @@ const VkDeviceSize VERTEX_RING = 2 * 1024 * 1024;
 const size_t TEXTURE_BUDGET = 112u << 20;
 // Uploads go through one staging buffer, run (submitted and waited) when it
 // fills: one buffer per texture until the frame ended doubled a scene's first
-// frame in memory, and the fifth run froze there (docs/VERIFICATION.md).
+// frame in memory, and the fifth run froze there.
 const size_t STAGING_RING = 8u << 20;
 // Free memory kept for the player's linear memory (it grows during scene
 // loads), the kernel and the driver: textures are not loaded into it.

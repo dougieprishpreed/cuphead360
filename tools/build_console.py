@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Build the console side of Cuphead360 from the translated player.
 
-    build_console.py [--stage native,xsdk] [--opt 1] [--jobs 2]
+    build_console.py [--stage native,xsdk] [--opt 1] [--jobs 2] [--distro CTR360-XSDK]
 
 Stages:
   native  work/managed/c (tools/build_managed.py --stage wasm,c) + the wasm
           runtime + console/host_native.c -> work/console/native/host_native.exe,
           the console build's code as a headless PC program (clang or gcc).
-  xsdk    console/xsdk/build.sh in the WSL distro CTR360-XSDK: the shaders,
-          the XEX -> /opt/cuphead360-xsdk/output/default.xex, copied to
+  xsdk    console/xsdk/build.sh in a WSL distro (--distro, default
+          CTR360-XSDK): the shaders, the XEX ->
+          /opt/cuphead360-xsdk/output/default.xex, copied to
           work/console/xsdk/default.xex.
 
 The runtime (srt) and w2c2's headers come from Spire360 next to this
@@ -85,7 +86,7 @@ def stage_xsdk(a):
     script = os.path.join(ROOT, "console", "xsdk", "build.sh")
     wsl_root = "/mnt/" + ROOT[0].lower() + ROOT[2:].replace("\\", "/")
     env = dict(os.environ, MSYS_NO_PATHCONV="1")
-    run(["wsl.exe", "-d", "CTR360-XSDK", "--", "bash", wsl_root + "/console/xsdk/build.sh"], env=env)
+    run(["wsl.exe", "-d", a.distro, "--", "bash", wsl_root + "/console/xsdk/build.sh"], env=env)
     dst = os.path.join(OUT, "xsdk")
     os.makedirs(dst, exist_ok=True)
     print("XEX: /opt/cuphead360-xsdk/output/default.xex (copied to %s by build.sh)" % dst)
@@ -97,6 +98,7 @@ def main():
     ap.add_argument("--opt", default="1")
     ap.add_argument("--jobs", type=int, default=2)
     ap.add_argument("--cc")
+    ap.add_argument("--distro", default="CTR360-XSDK", help="the WSL distro holding the xSDK toolchain (xsdk stage)")
     a = ap.parse_args()
     for s in a.stage.split(","):
         {"native": stage_native, "xsdk": stage_xsdk}[s](a)

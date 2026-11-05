@@ -7,7 +7,9 @@
 Starts the program with no window, waits for REGEX in its output, then --delay seconds, then samples the
 busiest thread's stack (dbghelp StackWalk64) for --seconds. Names: the exe's linker map (/MAP) gives the C
 function at each address; fN is wasm function N, named from wasm-ld's map (defined functions in index order
-after the imports). Prints self and inclusive shares, and for each --focus the callees beneath it.
+after the imports). Prints self and inclusive shares, and for each --focus the callees beneath it and the
+inclusive shares within it. --save-stacks keeps the named stacks; --load-stacks F reports on them again
+(other --focus/--callers) without running anything.
 
 The exe's map: relink work/console/native/obj/*.o with -Wl,/MAP:host_native_map.map (seconds; the same
 code). From Git Bash set MSYS_NO_PATHCONV=1 so the player's /paths reach it unchanged. Example (the map):
@@ -19,10 +21,12 @@ import argparse, bisect, ctypes, ctypes.wintypes as wt, re, subprocess, sys, tim
 from collections import Counter, defaultdict
 
 ap = argparse.ArgumentParser()
-ap.add_argument('--wasm-map', required=True)
-ap.add_argument('--exe-map', required=True)
-ap.add_argument('--log', required=True)
-ap.add_argument('--after', required=True)
+ap.add_argument('--wasm-map')
+ap.add_argument('--exe-map')
+ap.add_argument('--log')
+ap.add_argument('--after')
+ap.add_argument('--save-stacks', help='write the named stacks (leaf first, one sample a line)')
+ap.add_argument('--load-stacks', help='report on stacks written by --save-stacks instead of running')
 ap.add_argument('--delay', type=float, default=5)
 ap.add_argument('--after-count', type=int, default=1, help='wait for this many matches of --after')
 ap.add_argument('--seconds', type=float, default=20)
@@ -35,6 +39,59 @@ ap.add_argument('--imports', type=int, default=85)
 ap.add_argument('cmd', nargs=argparse.REMAINDER)
 a = ap.parse_args()
 cmd = a.cmd[1:] if a.cmd and a.cmd[0] == '--' else a.cmd
+
+
+def report(stacks, tid):
+    N = max(1, len(stacks))
+    selfc = Counter(st[0] for st in stacks if st)
+    incl = Counter()
+    for st in stacks:
+        for n in set(st): incl[n] += 1
+    out = []
+    out.append('%d samples of thread %d' % (N, tid))
+    out.append('\nSELF')
+    for n, c in selfc.most_common(a.top): out.append('%6.2f%%  %s' % (100.0 * c / N, n))
+    out.append('\nINCLUSIVE')
+    for n, c in incl.most_common(a.top * 2): out.append('%6.2f%%  %s' % (100.0 * c / N, n))
+    for fname in a.focus:
+        below = Counter(); within = Counter(); selfin = 0; tot = 0
+        for st in stacks:
+            idx = [i for i, n in enumerate(st) if fname in n]
+            if not idx: continue
+            tot += 1
+            i = idx[-1]   # the outermost match
+            if i == 0: selfin += 1
+            else: below[st[i - 1]] += 1
+            for n in set(st[:i]): within[n] += 1
+        out.append('\nFOCUS %s: %.2f%% of samples (self %.2f%%)' % (fname, 100.0 * tot / N, 100.0 * selfin / N))
+        for n, c in below.most_common(40): out.append('%6.2f%%  %s' % (100.0 * c / N, n))
+        out.append('  within it, inclusive:')
+        for n, c in within.most_common(a.top): out.append('%6.2f%%  %s' % (100.0 * c / N, n))
+    for fname in a.callers:
+        above = Counter(); tot = 0
+        for st in stacks:
+            idx = [i for i, n in enumerate(st) if fname in n]
+            if not idx: continue
+            tot += 1
+            i = idx[-1]   # the outermost match
+            # the first caller that isn't the function itself or a compiler-generated thunk of it
+            j = i + 1
+            while j < len(st) and fname in st[j]: j += 1
+            above[st[j] if j < len(st) else '(top)'] += 1
+        out.append('\nCALLERS %s: %.2f%% of samples' % (fname, 100.0 * tot / N))
+        for n, c in above.most_common(25): out.append('%6.2f%%  %s' % (100.0 * c / N, n))
+    text = '\n'.join(out)
+    print(text)
+    if a.out:
+        open(a.out, 'w', encoding='utf-8').write(text + '\n')
+
+
+if a.load_stacks:
+    with open(a.load_stacks, encoding='utf-8') as f:
+        report([ln.rstrip('\n').split(';') for ln in f if ln.strip()], 0)
+    sys.exit(0)
+if not (a.wasm_map and a.exe_map and a.log and a.after):
+    ap.error('--wasm-map, --exe-map, --log and --after are needed to run')
 
 # wasm-ld map (the ILC build's .linkmap): CODE section input functions, in index order after the imports.
 wnames = []
@@ -188,42 +245,7 @@ for pcs in samples:
         if n is None: n = cache[pc] = name_at(pc)
         st.append(n)
     stacks.append(st)
-N = max(1, len(stacks))
-selfc = Counter(st[0] for st in stacks if st)
-incl = Counter()
-for st in stacks:
-    for n in set(st): incl[n] += 1
-out = []
-out.append('%d samples of thread %d' % (N, tid))
-out.append('\nSELF')
-for n, c in selfc.most_common(a.top): out.append('%6.2f%%  %s' % (100.0 * c / N, n))
-out.append('\nINCLUSIVE')
-for n, c in incl.most_common(a.top * 2): out.append('%6.2f%%  %s' % (100.0 * c / N, n))
-for fname in a.focus:
-    below = Counter(); selfin = 0; tot = 0
-    for st in stacks:
-        idx = [i for i, n in enumerate(st) if fname in n]
-        if not idx: continue
-        tot += 1
-        i = idx[-1]   # the outermost match
-        if i == 0: selfin += 1
-        else: below[st[i - 1]] += 1
-    out.append('\nFOCUS %s: %.2f%% of samples (self %.2f%%)' % (fname, 100.0 * tot / N, 100.0 * selfin / N))
-    for n, c in below.most_common(40): out.append('%6.2f%%  %s' % (100.0 * c / N, n))
-for fname in a.callers:
-    above = Counter(); tot = 0
-    for st in stacks:
-        idx = [i for i, n in enumerate(st) if fname in n]
-        if not idx: continue
-        tot += 1
-        i = idx[-1]   # the outermost match
-        # the first caller that isn't the function itself or a compiler-generated thunk of it
-        j = i + 1
-        while j < len(st) and fname in st[j]: j += 1
-        above[st[j] if j < len(st) else '(top)'] += 1
-    out.append('\nCALLERS %s: %.2f%% of samples' % (fname, 100.0 * tot / N))
-    for n, c in above.most_common(25): out.append('%6.2f%%  %s' % (100.0 * c / N, n))
-text = '\n'.join(out)
-print(text)
-if a.out:
-    open(a.out, 'w', encoding='utf-8').write(text + '\n')
+if a.save_stacks:
+    with open(a.save_stacks, 'w', encoding='utf-8') as f:
+        for st in stacks: f.write(';'.join(st) + '\n')
+report(stacks, tid)

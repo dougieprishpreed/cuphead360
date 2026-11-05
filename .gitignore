@@ -49,3 +49,6 @@ desktop.ini
 /managed/**/bin/
 /managed/**/obj/
 /managed/Cuphead360.Engine/Generated/
+
+# Development notes (handoff, verification log, plans): local only.
+/notes/

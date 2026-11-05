@@ -260,20 +260,36 @@ namespace Cuphead360.Engine
         {
             var info = Sprites.Of(sr.Sprite);
             if (info == null || info.Vertices.Length == 0 || info.Triangles.Length == 0) return null;
-            if (!Sprites.Binding(sr.Sprite, out var tex, out _, out _)) tex = null;
             var m = sr.GameObject.Transform.LocalToWorld;
-            var uv = Sprites.RenderUvs(sr.Sprite);
             var pos = sr.GameObject.Transform.Position;
             float depth = xf.Viewport(pos).z;
             if (depth < cam.Near || depth > cam.Far) return null;   // outside the clip planes
-            var it = NewItem();
-            if (HostTransforms && xf.Ortho)
+            bool mapped = HostTransforms && xf.Ortho;
+            float a00 = 0, a01 = 0, b0 = 0, a10 = 0, a11 = 0, b1 = 0;
+            if (mapped)
             {
                 // One map for the whole sprite (the camera is orthographic, its z is 0): the host applies it per vertex.
                 var pvm = xf.ProjView * m;
                 float hx = 0.5f * xf.Pixel.width, hy = 0.5f * xf.Pixel.height, fx = sr.FlipX ? -1f : 1f, fy = sr.FlipY ? -1f : 1f;
-                it.A00 = hx * pvm.m00 * fx; it.A01 = hx * pvm.m01 * fy; it.B0 = xf.Pixel.x + hx * (pvm.m03 + 1f);
-                it.A10 = hy * pvm.m10 * fx; it.A11 = hy * pvm.m11 * fy; it.B1 = xf.Pixel.y + hy * (pvm.m13 + 1f);
+                a00 = hx * pvm.m00 * fx; a01 = hx * pvm.m01 * fy; b0 = xf.Pixel.x + hx * (pvm.m03 + 1f);
+                a10 = hy * pvm.m10 * fx; a11 = hy * pvm.m11 * fy; b1 = xf.Pixel.y + hy * (pvm.m13 + 1f);
+                // Wholly outside the camera's pixels (its box through the map, a pixel to spare): the host
+                // would skip it after the glue copied it. In the first run-and-gun level 371 items and
+                // 202,000 vertices a frame were handed over for 10,000 drawn.
+                var b = info.LocalBounds;
+                float cx = 0.5f * (b.x + b.z), cy = 0.5f * (b.y + b.w), ex = 0.5f * (b.z - b.x), ey = 0.5f * (b.w - b.y);
+                float sx = a00 * cx + a01 * cy + b0, rx = Math.Abs(a00) * ex + Math.Abs(a01) * ey + 1f;
+                float sy = a10 * cx + a11 * cy + b1, ry = Math.Abs(a10) * ex + Math.Abs(a11) * ey + 1f;
+                var px = xf.Pixel;
+                if (sx + rx < px.x || sx - rx > px.x + px.width || sy + ry < px.y || sy - ry > px.y + px.height) return null;
+            }
+            if (!Sprites.Binding(sr.Sprite, out var tex, out _, out _)) tex = null;
+            var uv = Sprites.RenderUvs(sr.Sprite);
+            var it = NewItem();
+            if (mapped)
+            {
+                it.A00 = a00; it.A01 = a01; it.B0 = b0;
+                it.A10 = a10; it.A11 = a11; it.B1 = b1;
                 it.Local = info.Vertices;
             }
             else

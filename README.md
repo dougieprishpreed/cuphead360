@@ -20,7 +20,7 @@ Tested with the GOG version of Cuphead 1.3.2, with The Delicious Last Course.
 
 - An Xbox 360 that runs homebrew (such as with ABadAvatar).
 - Your own copy of Cuphead (GOG version).
-- A USB drive formatted FAT32, with about 5 GB free.
+- A USB drive formatted FAT32, with about 6 GB free.
 - A Windows PC to build it on (see below).
 
 There's no ready-made download. The console build contains the game's own
@@ -31,10 +31,9 @@ then be shared.
 ## Building and installing
 
 You need some development tools: the .NET 10 SDK, Python 3, the WASI SDK, and
-a WSL (Linux) setup with the xSDK toolchain and vulkan4xenon. The steps are
-in [docs/BUILDING.md](docs/BUILDING.md) (the game data and the managed build)
-and [console/README.md](console/README.md) (the console build and putting it
-on a USB drive). In outline:
+a WSL (Linux) setup with the xSDK toolchain and vulkan4xenon. Every step,
+from installing the tools to putting the build on a USB drive, is in
+[docs/BUILDING.md](docs/BUILDING.md). In outline:
 
 1. Convert your game's files (objects, textures, sounds) with the tools in
    `tools/`.
@@ -42,7 +41,8 @@ on a USB drive). In outline:
 3. Stage it to your USB drive with `tools/stage_console.py`.
 4. On the console, start `default.xex` from the folder it made.
 
-Converting the textures takes one to two hours on a typical PC the first time.
+The first build takes three to four hours, mostly converting the textures and
+building the Xbox 360 compiler; later builds take minutes.
 
 ## Controls
 

@@ -222,6 +222,28 @@ namespace Cuphead360.Engine
                     return tris32;
                 }
             }
+            Vector2[] boundsFrom; Vector4 bounds;
+            /// <summary>The vertices' box (x0, y0, x1, y1), for the render list's culling (worked out once per mesh).</summary>
+            public Vector4 LocalBounds
+            {
+                get
+                {
+                    if (boundsFrom != Vertices)
+                    {
+                        float x0 = float.MaxValue, y0 = float.MaxValue, x1 = float.MinValue, y1 = float.MinValue;
+                        foreach (var v in Vertices)
+                        {
+                            if (v.x < x0) x0 = v.x;
+                            if (v.x > x1) x1 = v.x;
+                            if (v.y < y0) y0 = v.y;
+                            if (v.y > y1) y1 = v.y;
+                        }
+                        bounds = new Vector4(x0, y0, x1, y1);
+                        boundsFrom = Vertices;
+                    }
+                    return bounds;
+                }
+            }
             public string[] AtlasTags = new string[0];
             public string RenderKey;                           // GUID + local id, matches SpriteAtlas render data
             public Texture2D Texture;                          // own texture (not late-bound)

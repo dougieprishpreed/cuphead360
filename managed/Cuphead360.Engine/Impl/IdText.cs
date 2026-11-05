@@ -4,8 +4,7 @@ namespace Cuphead360.Engine
     /// A 64-bit id in decimal, as long.ToString() writes it, with 32-bit
     /// arithmetic only. The converted texture and audio files are named after
     /// their objects' path ids, and on the console's game thread long
-    /// formatting took the sign from the low word (docs/VERIFICATION.md,
-    /// rounds 7-10): names built here are right whatever the cause.
+    /// formatting took the sign from the low word (rounds 7-10): names built here are right whatever the cause.
     /// </summary>
     public static class IdText
     {
