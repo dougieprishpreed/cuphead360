@@ -48,27 +48,48 @@ typedef struct ch360_vertex {
     unsigned char color[4], blend[4];
 } ch360_vertex;
 
+/* Render textures (what a camera or a blit drew this frame) as textures:
+ * CH360_RT_BASE + the engine's number for one (Effects.TargetId). */
+#define CH360_RT_BASE 0x40000000
+
 /* An item: its texture (-1 none), mode, vertices (a triangle list) and their
- * screen box (x0 > x1 when not worked out: drawn wherever it lands). */
+ * screen box (x0 > x1 when not worked out: drawn wherever it lands).
+ * Modes (Cuphead360.Engine Effects): 0 sprite, 1 screen, 2 multiply, 3
+ * overlay, 5 SDF text, 6 light ray, 7 sprite mask; 8 the Knight's glow, 9 the
+ * Bishop's darkness, 10 the blur sprite (premultiplied over); blits, one quad
+ * replacing its target: 11 copy, 12 four-tap downsample, 13 seven-tap blur,
+ * 14-16 the blur with gamma (plain, two-strip, black and white), 17 the film
+ * grain and colour fringes, 18 the seven-tap blur with its alpha blurred;
+ * 20-34 the game's alpha masks, stencil masks and Unity's Screen and Hard
+ * Light blend modes, each drawn in its passes (params 0 _Amount, or 1 for
+ * Hard Light). */
 typedef struct ch360_item {
     int texture;
     unsigned mode, first, count;
     float x0, y0, x1, y1;
     /* mode 6 (Cuphead/Sprites/LightRay): its shadow and sky glow textures
-     * (-1 none) and its material's t, textureWidth, textureSpeed */
+     * (-1 none) and params 0-2 its material's t, textureWidth, textureSpeed;
+     * mode 17: textures[0] the film grain's overlay; modes 8-17: the effect's
+     * values (Effects.cs) */
     int textures[2];
-    float params[4];
+    float params[12];
     /* sprite masks: 1 adds one to the stencil, 2 takes one away (mode 7, the
      * mask's sprite: texel alpha at or above the blend alpha, no colour); 3
      * draws where the stencil is 1 or more, 4 where it is 0; 0 no stencil */
     unsigned stencil;
 } ch360_item;
 
+/* A view: its rect in its target's pixels (from the bottom left), clear (1
+ * the colour, 2 depth and stencil) and colour, its items; the target: 0 the
+ * screen, else a render texture's number (CH360_RT_BASE + it as a texture),
+ * tw x th pixels, cleared with alpha a. */
 typedef struct ch360_view {
     float x, y, w, h;
     unsigned clear;
     float r, g, b;
     unsigned first_item, items;
+    unsigned target, tw, th;
+    float a;
 } ch360_view;
 
 typedef struct ch360_frame {

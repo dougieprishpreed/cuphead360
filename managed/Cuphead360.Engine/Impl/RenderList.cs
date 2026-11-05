@@ -96,6 +96,12 @@ namespace Cuphead360.Engine
             /// </summary>
             public int SpriteStencil;
             public const int MaskAdd = 1, MaskRemove = 2, MaskInside = 3, MaskOutside = 4;
+            /// <summary>A blit's mode (Effects), fixed when it was recorded; -1: the material's shader's.</summary>
+            public int Effect = -1;
+            /// <summary>A blit's values (Effects.ParamCount), taken when it was recorded (owned, reused).</summary>
+            public float[] P;
+            /// <summary>A second texture the effect samples (the film grain's overlay).</summary>
+            public Texture Tex2;
             // Arrays this item fills, kept for its next use from the pool.
             internal Vector2[] OwnScreen, OwnUv;
 
@@ -125,15 +131,16 @@ namespace Cuphead360.Engine
             var it = pool[pooled++];
             it.BaseName = ""; it.Suffix = null; it.SpriteName = null; it.Texture = null; it.Material = null; it.Screen = null; it.Local = null; it.Uv = null; it.Colors = null;
             it.Triangles = null; it.Tint = Color.white; it.Layer = it.Order = 0; it.Depth = 0; it.Sequence = 0; it.Kind = "sprite"; it.GoLayer = 0;
-            it.Stencil = null; it.SpriteStencil = 0;
+            it.Stencil = null; it.SpriteStencil = 0; it.Effect = -1; it.Tex2 = null;
             return it;
         }
 
-        static View NewView(NCamera cam, Rect rect)
+        static View NewView(NCamera cam, Rect rect, RenderTexture target = null)
         {
             if (viewsUsed == viewPool.Count) viewPool.Add(new View());
             var v = viewPool[viewsUsed++];
             v.Camera = cam; v.PixelRect = rect; v.Items.Clear();
+            v.Target = target; v.IsBlit = false; v.Group = group;
             return v;
         }
 
@@ -156,6 +163,12 @@ namespace Cuphead360.Engine
             public NCamera Camera;
             public Rect PixelRect;
             public readonly List<Item> Items = new List<Item>();
+            /// <summary>What it draws into: a render texture, or null for the screen.</summary>
+            public RenderTexture Target;
+            /// <summary>A blit (Camera null): one quad over the target that replaces it.</summary>
+            public bool IsBlit;
+            /// <summary>The camera it belongs to this frame (its view, its image effects' blits).</summary>
+            public int Group;
         }
 
         public static Camera Current;
@@ -212,8 +225,9 @@ namespace Cuphead360.Engine
         {
             callbackCams.Clear();
             foreach (var c in Typed.Cameras)
-                if (c.Enabled && c.Target == null && c.GameObject != null && c.GameObject.ActiveInHierarchy) callbackCams.Add(c);
-            callbackCams.Sort((a, b) => a.Depth.CompareTo(b.Depth));
+                if (c.Enabled && c.GameObject != null && c.GameObject.ActiveInHierarchy) callbackCams.Add(c);
+            // Cameras with a target texture first (Unity renders them before the others), each by depth.
+            callbackCams.Sort((a, b) => a.Target != null != (b.Target != null) ? (a.Target != null ? -1 : 1) : a.Depth.CompareTo(b.Depth));
             if (WillRender.Count > 0) WillRender.RemoveAll(b => b.Destroyed);
             foreach (var cam in callbackCams)
             {
@@ -325,17 +339,13 @@ namespace Cuphead360.Engine
                     var t = cv.GameObject.Transform;
                     Log.Line($"TRACE canvas {cv.GameObject.Name} mode={cv.Mode} cam={Objects.Of(cv.WorldCamera)?.Name} plane={cv.PlaneDistance} sf={cv.ScaleFactor} layer={cv.GameObject.Layer} pos={t.Position} scale={t.LossyScale} parent={t.Parent?.GameObject.Name} rect={(t as NRectTransform)?.Rect}");
                 }
-            targetCams.Clear();
-            foreach (var cam in cams) if (cam.Target != null && !targetCams.ContainsKey(cam.Target)) targetCams[cam.Target] = cam;
-            foreach (var cam in cams)
-            {
-                // A camera drawing into a render texture is drawn where a mesh shows that texture (MeshItems).
-                if (cam.Target != null) continue;
-                var v = NewView(cam, cam.PixelRect);
-                ViewItems(cam, CamXform.Of(cam), v.Items, 0);
-                views.Add(v);
-            }
-            // Screen-space overlay canvases draw last, over every camera.
+            // Cameras with a target texture first (Unity renders them before the others), then the
+            // screen's; each by depth.
+            group = 0;
+            foreach (var cam in cams) if (cam.Target != null) CameraViews(cam);
+            foreach (var cam in cams) if (cam.Target == null) CameraViews(cam);
+            // Screen-space overlay canvases draw last, over every camera (and its image effects).
+            group++;
             var overlay = NewView(null, new Rect(0, 0, Icalls.ScreenWidth, Icalls.ScreenHeight));
             canvases.Sort((a, b) => { int c = SortingLayers.Index(a.SortingLayerID).CompareTo(SortingLayers.Index(b.SortingLayerID)); return c != 0 ? c : a.SortingOrder.CompareTo(b.SortingOrder); });
             int oseq = 0;
@@ -343,11 +353,96 @@ namespace Cuphead360.Engine
                 if (cv.Mode == RenderMode.ScreenSpaceOverlay || (cv.Mode == RenderMode.ScreenSpaceCamera && cv.WorldCamera == null))
                     foreach (var it in CanvasItems(null, default, cv)) { it.Sequence = oseq++; overlay.Items.Add(it); }
             if (overlay.Items.Count > 0) views.Add(overlay);
+            DropUnseenTargets();
+            Effects.FinishFrame();
             return views;
         }
 
-        /// <summary>Render textures' cameras this frame, by texture.</summary>
-        static readonly Dictionary<RenderTexture, NCamera> targetCams = new Dictionary<RenderTexture, NCamera>(ReferenceEqualityComparer.Instance as IEqualityComparer<RenderTexture>);
+        static int group;
+
+        /// <summary>
+        /// A camera's view, into its target texture or the screen. With image effects (OnRenderImage) it draws
+        /// into a temporary texture the effects then blit on, the last into its target; one that doesn't clear
+        /// starts from what is on the screen, so the screen's views so far draw into that texture instead.
+        /// </summary>
+        static void CameraViews(NCamera cam)
+        {
+            group++;
+            var fx = Effects.ImageEffects(cam);
+            var target = cam.Target;
+            if (fx.Count == 0)
+            {
+                var v = NewView(cam, cam.PixelRect, target);
+                ViewItems(cam, CamXform.Of(cam), v.Items);
+                views.Add(v);
+                return;
+            }
+            int w = target != null ? Effects.Width(target) : Icalls.ScreenWidth, h = target != null ? Effects.Height(target) : Icalls.ScreenHeight;
+            var src = Effects.GetTemporary(w, h);
+            bool clears = cam.ClearFlags == CameraClearFlags.SolidColor || cam.ClearFlags == CameraClearFlags.Skybox;
+            if (!clears && target == null)
+                foreach (var pv in views) if (pv.Target == null) pv.Target = src;
+            var cv = NewView(cam, cam.PixelRect, src);
+            ViewItems(cam, CamXform.Of(cam), cv.Items);
+            views.Add(cv);
+            // The scripts are copied first: one could enable or disable another.
+            var chain = fxChain;
+            chain.Clear();
+            chain.AddRange(fx);
+            var cur = src;
+            for (int i = 0; i < chain.Count; i++)
+            {
+                var dst = i == chain.Count - 1 ? target : Effects.GetTemporary(w, h);
+                Effects.RunImageEffect(chain[i], cur, dst);
+                Effects.ReleaseTemporary(cur);
+                cur = dst;
+            }
+        }
+        static readonly List<NBehaviour> fxChain = new List<NBehaviour>();
+
+        public static int ViewCount => views.Count;
+        public static View ViewAt(int i) => views[i];
+
+        static readonly int[] quadTris = { 0, 1, 2, 0, 2, 3 };
+        static readonly Vector2[] quadUv = { new Vector2(0, 0), new Vector2(1, 0), new Vector2(1, 1), new Vector2(0, 1) };
+
+        /// <summary>A blit's view: one quad over the target (w x h pixels; null the screen), its item to fill in.</summary>
+        internal static Item AddBlit(RenderTexture target, int w, int h)
+        {
+            var v = NewView(null, new Rect(0, 0, w, h), target);
+            v.IsBlit = true;
+            var it = NewItem();
+            var s = it.ScreenOf(4);
+            s[0] = new Vector2(0, 0); s[1] = new Vector2(w, 0); s[2] = new Vector2(w, h); s[3] = new Vector2(0, h);
+            it.Screen = s; it.Uv = quadUv; it.Triangles = quadTris;
+            it.BaseName = "Blit"; it.Kind = "blit";
+            v.Items.Add(it);
+            views.Add(v);
+            return it;
+        }
+
+        static readonly Dictionary<RenderTexture, int> ownerGroup = new Dictionary<RenderTexture, int>(ReferenceEqualityComparer.Instance as IEqualityComparer<RenderTexture>);
+        static readonly HashSet<int> seenGroups = new HashSet<int>();
+
+        /// <summary>
+        /// A camera drawing into a texture nothing else samples this frame (the Knight's glow between
+        /// flashes) is left out: Unity draws it anyway, but nothing shows it, and on the console each such
+        /// view is a pass of its own and a copy out of eDRAM.
+        /// </summary>
+        static void DropUnseenTargets()
+        {
+            ownerGroup.Clear(); seenGroups.Clear();
+            foreach (var v in views)
+                if (!v.IsBlit && v.Camera != null && v.Camera.Target != null) ownerGroup[v.Camera.Target] = v.Group;
+            if (ownerGroup.Count == 0) return;
+            foreach (var v in views)
+                foreach (var it in v.Items)
+                {
+                    if (it.Texture is RenderTexture rt && ownerGroup.TryGetValue(rt, out int g) && g != v.Group) seenGroups.Add(g);
+                    if (it.Tex2 is RenderTexture rt2 && ownerGroup.TryGetValue(rt2, out int g2) && g2 != v.Group) seenGroups.Add(g2);
+                }
+            views.RemoveAll(v => ownerGroup.ContainsValue(v.Group) && !seenGroups.Contains(v.Group));
+        }
 
         static readonly Comparison<Item> drawOrder = (a, b) =>
         {
@@ -358,8 +453,8 @@ namespace Cuphead360.Engine
             return a.Sequence.CompareTo(b.Sequence);
         };
 
-        /// <summary>A camera's items in draw order; nest > 0 for a render texture's camera drawn inside another's.</summary>
-        static void ViewItems(NCamera cam, CamXform xf, List<Item> into, int nest)
+        /// <summary>A camera's items in draw order.</summary>
+        static void ViewItems(NCamera cam, CamXform xf, List<Item> into)
         {
                 var v = into;
                 int seq = 0;
@@ -390,7 +485,7 @@ namespace Cuphead360.Engine
                 foreach (var mr in meshRenderers)
                 {
                     if ((cam.CullingMask & (1 << mr.GameObject.Layer)) == 0) continue;
-                    foreach (var it in MeshItems(cam, xf, mr, nest)) { it.Sequence = seq++; v.Add(it); }
+                    foreach (var it in MeshItems(cam, xf, mr)) { it.Sequence = seq++; v.Add(it); }
                 }
                 foreach (var cv in canvases)
                 {
@@ -501,7 +596,7 @@ namespace Cuphead360.Engine
         static readonly int MainTexId = ShaderProps.Id("_MainTex");
 
         /// <summary>A MeshRenderer's items: its MeshFilter's mesh through its transform, a submesh per material.</summary>
-        static List<Item> MeshItems(NCamera cam, in CamXform xf, NMeshRenderer mr, int nest)
+        static List<Item> MeshItems(NCamera cam, in CamXform xf, NMeshRenderer mr)
         {
             meshOut.Clear();
             NMeshFilter filter = null;
@@ -515,9 +610,6 @@ namespace Cuphead360.Engine
             float depth = xf.Viewport(t.Position).z;
             if (depth < cam.Near || depth > cam.Far) return meshOut;
             var mtx = t.LocalToWorld;
-            // A quad showing a render texture: its camera's items, drawn into the quad (once; not nested).
-            if (nest == 0 && MainTexture(mr.Materials[0]) is RenderTexture rtex && targetCams.TryGetValue(rtex, out var rtCam))
-                return TargetItems(cam, xf, mr, mesh, mtx, depth, rtCam);
             var owner = NewItem();
             var screen = owner.ScreenOf(mesh.Vertices.Length);
             for (int i = 0; i < screen.Length; i++) screen[i] = ToScreen(xf, mtx.MultiplyPoint3x4(mesh.Vertices[i]));
@@ -547,68 +639,6 @@ namespace Cuphead360.Engine
             return meshOut;
         }
         static readonly int ColorId = ShaderProps.Id("_Color");
-        static readonly List<Item> targetOut = new List<Item>();
-        static readonly HashSet<Vector2[]> moved = new HashSet<Vector2[]>(ReferenceEqualityComparer.Instance as IEqualityComparer<Vector2[]>);
-
-        /// <summary>
-        /// What a render texture's camera sees, drawn where a mesh shows the texture, instead of the
-        /// texture: the camera's items in its own order, mapped from its pixels through the mesh's
-        /// texture coordinates onto this camera's pixels, at the mesh's sorting place, tinted by its
-        /// material's colour. Cuphead's render textures are layer 31 drawn by a second camera and
-        /// shown on a quad (Glumstone's geese, Saltbaker's reflection and blur, Howling Aces' and the
-        /// Bishop's backgrounds, the Knight's glow); their own shaders' effects (glow, darkness, blur)
-        /// aren't drawn.
-        /// </summary>
-        static List<Item> TargetItems(NCamera cam, in CamXform xf, NMeshRenderer mr, MeshData mesh, Matrix4x4 mtx, float depth, NCamera rtCam)
-        {
-            targetOut.Clear();
-            var uv0 = mesh.Uv[0];
-            if (uv0 == null || uv0.Length != mesh.Vertices.Length) return targetOut;
-            // The mesh corners nearest uv (0,0), (1,0) and (0,1) give the map (a quad: exact).
-            int Nearest(float u, float v)
-            {
-                int best = 0; float bd = float.MaxValue;
-                for (int i = 0; i < uv0.Length; i++) { float du = uv0[i].x - u, dv = uv0[i].y - v, d = du * du + dv * dv; if (d < bd) { bd = d; best = i; } }
-                return best;
-            }
-            int i00 = Nearest(0, 0), i10 = Nearest(1, 0), i01 = Nearest(0, 1);
-            var u00 = uv0[i00]; float du10 = uv0[i10].x - u00.x, dv01 = uv0[i01].y - u00.y;
-            if (Math.Abs(du10) < 1e-6f || Math.Abs(dv01) < 1e-6f) return targetOut;
-            Vector2 p00 = ToScreen(xf, mtx.MultiplyPoint3x4(mesh.Vertices[i00])), p10 = ToScreen(xf, mtx.MultiplyPoint3x4(mesh.Vertices[i10])), p01 = ToScreen(xf, mtx.MultiplyPoint3x4(mesh.Vertices[i01]));
-            var rp = rtCam.PixelRect;
-            if (rp.width <= 0 || rp.height <= 0) return targetOut;
-            // Texture pixel (x, y) -> uv (x / w, y / h) -> screen; corrected for corners not exactly at 0 and 1.
-            float sx = 1f / (rp.width * du10), sy = 1f / (rp.height * dv01);
-            float m00 = (p10.x - p00.x) * sx, m01 = (p01.x - p00.x) * sy, m10 = (p10.y - p00.y) * sx, m11 = (p01.y - p00.y) * sy;
-            float b0 = p00.x - m00 * u00.x * rp.width - m01 * u00.y * rp.height, b1 = p00.y - m10 * u00.x * rp.width - m11 * u00.y * rp.height;
-            var items = targetScratch; items.Clear();
-            ViewItems(rtCam, CamXform.Of(rtCam), items, 1);
-            var ms = MaterialState.Of(mr.Materials[0]);
-            var tint = ms != null && ms.Vectors.TryGetValue(ColorId, out var c) ? new Color(c.x, c.y, c.z, c.w) : Color.white;
-            int layer = SortingLayers.Index(mr.SortingLayerID);
-            moved.Clear();
-            foreach (var it in items)
-            {
-                if (it.Screen == null)
-                {
-                    // Sprites under the console's host transforms: compose the maps.
-                    float a00 = m00 * it.A00 + m01 * it.A10, a01 = m00 * it.A01 + m01 * it.A11, nb0 = m00 * it.B0 + m01 * it.B1 + b0;
-                    float a10 = m10 * it.A00 + m11 * it.A10, a11 = m10 * it.A01 + m11 * it.A11, nb1 = m10 * it.B0 + m11 * it.B1 + b1;
-                    it.A00 = a00; it.A01 = a01; it.B0 = nb0; it.A10 = a10; it.A11 = a11; it.B1 = nb1;
-                }
-                else if (moved.Add(it.Screen))
-                    for (int k = 0; k < it.Screen.Length; k++)
-                    {
-                        var q = it.Screen[k];
-                        it.Screen[k] = new Vector2(m00 * q.x + m01 * q.y + b0, m10 * q.x + m11 * q.y + b1);
-                    }
-                it.Tint = new Color(it.Tint.r * tint.r, it.Tint.g * tint.g, it.Tint.b * tint.b, it.Tint.a * tint.a);
-                it.Layer = layer; it.Order = mr.SortingOrder; it.Depth = depth;
-                targetOut.Add(it);
-            }
-            return targetOut;
-        }
-        static readonly List<Item> targetScratch = new List<Item>();
 
         static List<Item> CanvasItems(NCamera cam, CamXform xf, NCanvas root)
         {
@@ -724,6 +754,7 @@ namespace Cuphead360.Engine
         }
 
         public static string Path;
+        static readonly float[] capParams = new float[Effects.ParamCount];
         public static HashSet<int> Frames = new HashSet<int>();
         public static int Every;
 
@@ -745,6 +776,10 @@ namespace Cuphead360.Engine
                 sb.Append("{\"camera\":").Append(S(c?.GameObject.Name ?? "<overlay>"))
                   .Append(",\"rect\":[").Append(F(v.PixelRect.x)).Append(',').Append(F(v.PixelRect.y)).Append(',').Append(F(v.PixelRect.width)).Append(',').Append(F(v.PixelRect.height)).Append(']')
                   .Append(",\"clear\":").Append(c == null ? 4 : (int)c.ClearFlags).Append(",\"mask\":").Append(c == null ? -1 : c.CullingMask);
+                if (v.Target != null)
+                    sb.Append(",\"target\":{\"rt\":").Append(Effects.TargetId(v.Target)).Append(",\"name\":").Append(S(Objects.Of(v.Target)?.Name))
+                      .Append(",\"size\":[").Append(Effects.Width(v.Target)).Append(',').Append(Effects.Height(v.Target)).Append("]}");
+                if (v.IsBlit) sb.Append(",\"blit\":true");
                 if (c != null) sb.Append(",\"background\":[").Append(F(c.Background.r)).Append(',').Append(F(c.Background.g)).Append(',').Append(F(c.Background.b)).Append(',').Append(F(c.Background.a)).Append(']');
                 sb.Append(",\"items\":[");
                 for (int ii = 0; ii < v.Items.Count; ii++)
@@ -753,7 +788,10 @@ namespace Cuphead360.Engine
                     if (ii > 0) sb.Append(',');
                     sb.Append("{\"name\":").Append(S(it.Name)).Append(",\"kind\":").Append(S(it.Kind)).Append(",\"goLayer\":").Append(it.GoLayer);
                     var tsrc = (Objects.Of(it.Texture) as NAsset)?.Source;
-                    if (tsrc != null)
+                    if (it.Texture is RenderTexture rtex)
+                        sb.Append(",\"texture\":{\"rt\":").Append(Effects.TargetId(rtex)).Append(",\"name\":").Append(S(Objects.Of(rtex)?.Name))
+                          .Append(",\"size\":[").Append(Effects.Width(rtex)).Append(',').Append(Effects.Height(rtex)).Append("]}");
+                    else if (tsrc != null)
                         sb.Append(",\"texture\":{\"file\":").Append(S(tsrc.File.Path)).Append(",\"path\":").Append(tsrc.PathId)
                           .Append(",\"name\":").Append(S(Tree.Str(tsrc.Tree, "m_Name"))).Append(",\"size\":[").Append(Icalls.TextureWidth(it.Texture)).Append(',').Append(Icalls.TextureHeight(it.Texture)).Append("]}");
                     else if (RuntimePixels.Get(it.Texture) is RuntimePixels.Entry rp)
@@ -771,6 +809,19 @@ namespace Cuphead360.Engine
                         sb.Append('}');
                     }
                     if (it.Stencil != null) sb.Append(",\"stencil\":[").Append(string.Join(",", it.Stencil)).Append(']');
+                    int mode = Effects.ModeOf(it);
+                    if (mode >= Effects.KnightGlow)
+                    {
+                        var p = it.Effect >= 0 ? it.P : capParams;
+                        if (it.Effect < 0) Effects.Params(it, mode, p);
+                        sb.Append(",\"effect\":").Append(mode).Append(",\"p\":[");
+                        for (int k = 0; k < p.Length; k++) { if (k > 0) sb.Append(','); sb.Append(p[k].ToString("0.######", ic)); }
+                        sb.Append(']');
+                        var t2 = (Objects.Of(it.Tex2) as NAsset)?.Source;
+                        if (t2 != null)
+                            sb.Append(",\"tex2\":{\"file\":").Append(S(t2.File.Path)).Append(",\"path\":").Append(t2.PathId)
+                              .Append(",\"name\":").Append(S(Tree.Str(t2.Tree, "m_Name"))).Append(",\"size\":[").Append(Icalls.TextureWidth(it.Tex2)).Append(',').Append(Icalls.TextureHeight(it.Tex2)).Append("]}");
+                    }
                     if (it.SpriteStencil != 0) sb.Append(",\"spriteStencil\":").Append(it.SpriteStencil);
                     sb.Append(",\"tint\":[").Append(F(it.Tint.r)).Append(',').Append(F(it.Tint.g)).Append(',').Append(F(it.Tint.b)).Append(',').Append(F(it.Tint.a)).Append(']')
                       .Append(",\"layer\":").Append(it.Layer).Append(",\"order\":").Append(it.Order).Append(",\"depth\":").Append(F(it.Depth));

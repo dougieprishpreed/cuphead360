@@ -61,14 +61,18 @@ U32 i5_ch3603_pad(wasmModuleInstance* inst, U32 index, U32 state) {
 }
 
 /* ---- the draw list, written here from ConsoleHost's views and items ----
- * draw_view(view): 9 slots, f32 x y w h, u32 clear, f32 r g b a; draw_item
- * (args): 26 slots (ConsoleHost.cs, HostItem): i32 texture, u32 mode, f32
+ * draw_view(view): 13 slots, f32 x y w h, u32 clear, f32 r g b a, u32 target
+ * (0 the screen, else a render texture's number), u32 its width and height,
+ * f32 its clear alpha; draw_item
+ * (args): 44 slots (ConsoleHost.cs, HostItem): i32 texture, u32 mode, f32
  * blend r g b a, u32 flags (1 vertex colours as they are, 2 positions
  * through the affine map, 4 clipped), f32 alpha scale, then (address, count)
  * of the triangles (i32), positions (f32 x y), uvs (f32 u v) and colours (u8
  * r g b a), f32 A00 A01 B0 A10 A11 B1, f32 clip x0 y0 x1 y1, i32 two more
  * textures, f32 three floats (mode 6, the light ray), u32 the sprite masks'
- * stencil (ch360_item.stencil); draw_end() hands the
+ * stencil (ch360_item.stencil), f32 twelve effect values (modes 8-17);
+ * textures at CH360_RT_BASE and up are render textures, passed as they are;
+ * draw_end() hands the
  * frame to the platform layer (ch360_plat_draw).
  *
  * The vertices are written in the host's byte order and the GPU's layout
@@ -115,7 +119,7 @@ static U8 unorm8(float f) {
     return (U8)(f <= 0.0f ? 0 : f >= 1.0f ? 255 : (int)(f * 255.0f + 0.5f));
 }
 
-static void draw_view_add(const float* xywh, unsigned clear, float r, float g, float b) {
+static void draw_view_add(const float* xywh, unsigned clear, float r, float g, float b, unsigned target, unsigned tw, unsigned th, float a) {
     ch360_view* v;
     if (!draw_grow((void**)&draw_views, &draw_view_cap, draw_view_count + 1, sizeof(ch360_view))) return;
     v = &draw_views[draw_view_count++];
@@ -129,6 +133,10 @@ static void draw_view_add(const float* xywh, unsigned clear, float r, float g, f
     v->b = b;
     v->first_item = draw_item_count;
     v->items = 0;
+    v->target = target;
+    v->tw = tw;
+    v->th = th;
+    v->a = a;
 }
 
 /* The item's screen box, from the vertices just written (cached memory, no swaps). */
@@ -327,7 +335,9 @@ static void remap_item(ch360_item* it) {
     float u0, v0, u1, v1;
     unsigned k, n, from, to;
     int page;
-    if (it->texture < 0 || (unsigned)it->texture >= plat_cap || it->mode == 6) return;
+    /* the light ray reads two more textures at its uvs; the Knight's glow and
+     * the Bishop's darkness sample render textures */
+    if (it->texture < 0 || (unsigned)it->texture >= plat_cap || it->mode == 6 || it->mode == 8 || it->mode == 9) return;
     page = page_of_plat[it->texture] - 1;
     if (page < 0) return;
     p = &rm_pages[page];
@@ -369,6 +379,10 @@ static void remap_item(ch360_item* it) {
                 v[k].u = v[k].u * b->su + b->ou;
                 v[k].v = v[k].v * b->sv + b->ov;
             }
+            if (it->mode == 10) { /* the blur's offsets are in the page's uvs */
+                it->params[8] *= b->su;
+                it->params[9] *= b->sv;
+            }
             it->texture = id;
             p->last = bi - p->first;
             return;
@@ -398,17 +412,23 @@ static void draw_item_done(ch360_item* it) {
     draw_views[draw_view_count - 1].items++;
 }
 
+/* A texture as the platform knows it: the player's ids numbered for it,
+ * render textures as they are. */
+static int draw_texture(int id) {
+    return id >= CH360_RT_BASE ? id : plat_id(id);
+}
+
 void i5_ch3609_drawX5Fview(wasmModuleInstance* inst, U32 view) {
     const U8* p;
     float xywh[4];
     (void)inst;
-    if (!srt_mem_ok(view, 36)) return;
+    if (!srt_mem_ok(view, 52)) return;
     p = srt_mem_ptr(view);
     xywh[0] = lef(p);
     xywh[1] = lef(p + 4);
     xywh[2] = lef(p + 8);
     xywh[3] = lef(p + 12);
-    draw_view_add(xywh, le32(p + 16), lef(p + 20), lef(p + 24), lef(p + 28));
+    draw_view_add(xywh, le32(p + 16), lef(p + 20), lef(p + 24), lef(p + 28), le32(p + 36), le32(p + 40), le32(p + 44), lef(p + 48));
 }
 
 /* A corner as floats, for clipping: position, uv, colour and blend 0-255. */
@@ -445,7 +465,7 @@ void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
     ch360_item* it;
     double t0 = draw_now_ms();
     (void)inst;
-    if (draw_view_count == 0 || !srt_mem_ok(args, 32 * 4)) return;
+    if (draw_view_count == 0 || !srt_mem_ok(args, 44 * 4)) return;
     a = srt_mem_ptr(args);
     flags = le32(a + 24);
     ntri = le32(a + 36);
@@ -478,15 +498,12 @@ void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
         !draw_grow((void**)&draw_items, &draw_item_cap, draw_item_count + 1, sizeof(ch360_item)))
         return;
     it = &draw_items[draw_item_count++];
-    it->texture = plat_id((int)le32(a));
+    it->texture = draw_texture((int)le32(a));
     it->mode = (unsigned)mode;
     it->first = draw_vert_count;
-    it->textures[0] = plat_id((int)le32(a + 104));
-    it->textures[1] = plat_id((int)le32(a + 108));
-    it->params[0] = lef(a + 112);
-    it->params[1] = lef(a + 116);
-    it->params[2] = lef(a + 120);
-    it->params[3] = 0.0f;
+    it->textures[0] = draw_texture((int)le32(a + 104));
+    it->textures[1] = draw_texture((int)le32(a + 108));
+    for (k = 0; k < 12; k++) it->params[k] = mode == 6 ? (k < 3 ? lef(a + 112 + 4 * k) : 0.0f) : lef(a + 128 + 4 * k);
     it->stencil = le32(a + 124);
     if (!clipped) {
         ch360_vertex* out = draw_verts + draw_vert_count;
@@ -593,7 +610,7 @@ void i5_ch3606_submit(wasmModuleInstance* inst, U32 data, U32 len) {
         xywh[1] = lef(d + p + 4);
         xywh[2] = lef(d + p + 8);
         xywh[3] = lef(d + p + 12);
-        draw_view_add(xywh, le32(d + p + 16), lef(d + p + 20), lef(d + p + 24), lef(d + p + 28));
+        draw_view_add(xywh, le32(d + p + 16), lef(d + p + 20), lef(d + p + 24), lef(d + p + 28), 0, 0, 0, 1.0f);
         items = le32(d + p + 36);
         p += 40;
         for (i = 0; i < items && p + 28 <= len; i++) {
@@ -618,6 +635,7 @@ void i5_ch3606_submit(wasmModuleInstance* inst, U32 data, U32 len) {
             it->first = draw_vert_count;
             it->textures[0] = it->textures[1] = -1;
             memset(it->params, 0, sizeof(it->params));
+            it->stencil = 0;
             for (k = 0; k < n; k++) {
                 const U8* s = d + p + 28 + k * 20;
                 ch360_vertex* out = &draw_verts[draw_vert_count++];

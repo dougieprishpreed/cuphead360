@@ -268,7 +268,7 @@ namespace Cuphead360.Player
         static void Draw(List<RenderList.View> views)
         {
             if (managedDraw) { DrawManaged(views); return; }
-            float* vh = stackalloc float[9];
+            float* vh = stackalloc float[13];
             int* a = stackalloc int[ItemSlots];
             foreach (var v in views)
             {
@@ -279,6 +279,11 @@ namespace Cuphead360.Player
                 ((uint*)vh)[4] = (clear ? 1u : 0u) | (cam != null && cam.ClearFlags != CameraClearFlags.Nothing ? 2u : 0u);
                 var bg = cam != null ? cam.Background : default;
                 vh[5] = bg.r; vh[6] = bg.g; vh[7] = bg.b; vh[8] = 1f;
+                // The target: 0 the screen, else a render texture (cleared with the camera's alpha).
+                ((uint*)vh)[9] = (uint)Effects.TargetId(v.Target);
+                ((uint*)vh)[10] = (uint)(v.Target != null ? Effects.Width(v.Target) : Icalls.ScreenWidth);
+                ((uint*)vh)[11] = (uint)(v.Target != null ? Effects.Height(v.Target) : Icalls.ScreenHeight);
+                vh[12] = v.Target != null ? bg.a : 1f;
                 DrawView(vh);
                 masks.Clear();
                 lastMaterial = null;
@@ -291,6 +296,7 @@ namespace Cuphead360.Player
         static Material lastMaterial;
         static MaterialState lastState;
         static uint lastMode;
+        static readonly float[] effectParams = new float[Effects.ParamCount];
 
         // draw_item's arguments, 32-bit slots (console/ch360_imports.c reads the same):
         //  0 texture  1 mode  2-5 blend colour (the tint)  6 flags (1 vertex colours as they are, 2 the affine map, 4 clip)
@@ -298,7 +304,8 @@ namespace Cuphead360.Player
         //  16-21 A00 A01 B0 A10 A11 B1  22-25 clip x0 y0 x1 y1
         //  26/27 mode 6's shadow and sky glow textures  28-30 its t, textureWidth, textureSpeed
         //  31 sprite masks' stencil (RenderList.Item.SpriteStencil: 1 add, 2 remove for a mask, mode 7; 3 inside, 4 outside)
-        const int ItemSlots = 32;
+        //  32-43 an effect's values (modes 8-17, Effects.cs); 26 mode 17's overlay texture
+        const int ItemSlots = 44;
         static readonly int shadowTex = ShaderProps.Id("_ShadowTex"), skyGlowTex = ShaderProps.Id("_SkyGlowTex");
         static readonly int rayT = ShaderProps.Id("t"), rayWidth = ShaderProps.Id("textureWidth"), raySpeed = ShaderProps.Id("textureSpeed");
 
@@ -308,18 +315,19 @@ namespace Cuphead360.Player
             bool clipped = MaskClip(it, out var clip, out bool stencilOnly);
             if (stencilOnly) return;
             int tex = -1;
-            if (it.Texture != null && (tex = TextureId(it.Texture)) < 0) return;   // not drawable (render textures)
+            if (it.Texture != null && (tex = TextureId(it.Texture)) < 0) return;   // not drawable
             if (Clock.FrameCount <= NAnimator.WindowUntil && it.Name.StartsWith("Cuphead ["))
                 Console.WriteLine($"EXTRACE frame {Clock.FrameCount} draws {it.Name} texture {tex}, layer {it.Layer} order {it.Order}, {it.Triangles.Length} corners, tint a {it.Tint.a:0.##}");
             if (it.Material == null || !ReferenceEquals(it.Material, lastMaterial))
             {
                 lastMaterial = it.Material;
                 lastState = MaterialState.Of(it.Material);
-                lastMode = ModeOf(lastState?.Shader);
+                lastMode = (uint)Effects.ModeOf(lastState?.Shader);
             }
             var ms = lastState;
-            // A sprite mask writes the stencil only: mode 7 (its sprite's alpha against the cutoff in the tint).
-            uint mode = it.Kind == "mask" ? 7u : lastMode;
+            // A sprite mask writes the stencil only: mode 7 (its sprite's alpha against the cutoff in the tint);
+            // a blit has its own mode.
+            uint mode = it.Effect >= 0 ? (uint)it.Effect : it.Kind == "mask" ? 7u : lastMode;
             var tint = it.Tint;
             bool blend = mode >= 1 && mode <= 3;
             var f = (float*)a;
@@ -333,6 +341,14 @@ namespace Cuphead360.Player
                 f[29] = ms.Floats.TryGetValue(rayWidth, out var rw) ? rw : 1f;
                 f[30] = ms.Floats.TryGetValue(raySpeed, out var rs) ? rs : 0f;
             }
+            if (mode >= Effects.KnightGlow)
+            {
+                var p = it.Effect >= 0 ? it.P : effectParams;
+                if (it.Effect < 0) Effects.Params(it, (int)mode, p);
+                for (int k = 0; k < Effects.ParamCount; k++) f[32 + k] = p[k];
+                if (it.Tex2 != null) a[26] = TextureId(it.Tex2);
+            }
+            else for (int k = 0; k < Effects.ParamCount; k++) f[32 + k] = 0f;
             var pos = it.Screen ?? it.Local;
             a[0] = tex; a[1] = (int)mode;
             f[2] = tint.r; f[3] = tint.g; f[4] = tint.b; f[5] = tint.a;
@@ -406,9 +422,12 @@ namespace Cuphead360.Player
         {
             len = 0;
             U32(0x31464843);   // 'CHF1'
-            U32((uint)views.Count);
+            uint screenViews = 0;
+            foreach (var v in views) if (v.Target == null) screenViews++;
+            U32(screenViews);
             foreach (var v in views)
             {
+                if (v.Target != null) continue;
                 F32(v.PixelRect.x); F32(v.PixelRect.y); F32(v.PixelRect.width); F32(v.PixelRect.height);
                 var cam = v.Camera;
                 bool clear = cam != null && (cam.ClearFlags == CameraClearFlags.SolidColor || cam.ClearFlags == CameraClearFlags.Skybox);
@@ -430,9 +449,11 @@ namespace Cuphead360.Player
             // A UGUI mask's own graphic only writes the stencil (no stencil here yet: its children draw unclipped).
             if (it.Stencil != null && it.Stencil[5] == 0) return false;
             if (it.Kind == "mask") return false;
+            // Render textures and effects are the native path's (this one checks the old list).
+            if (it.Texture is RenderTexture || Effects.ModeOf(it) >= Effects.KnightGlow) return false;
             int tex = -1;
-            if (it.Texture != null && (tex = TextureId(it.Texture)) < 0) return false;   // not drawable (render textures)
-            uint mode = ModeOf(MaterialState.Of(it.Material)?.Shader);
+            if (it.Texture != null && (tex = TextureId(it.Texture)) < 0) return false;   // not drawable
+            uint mode = (uint)Effects.ModeOf(MaterialState.Of(it.Material)?.Shader);
             var tint = it.Tint;
             I32(tex); U32(mode);
             F32(tint.r); F32(tint.g); F32(tint.b); F32(tint.a);
@@ -462,31 +483,17 @@ namespace Cuphead360.Player
             return true;
         }
 
-        // A shader's blend mode, worked out from its name once.
-        static readonly Dictionary<Shader, uint> modes = new Dictionary<Shader, uint>(ReferenceEqualityComparer.Instance as IEqualityComparer<Shader>);
-        static uint ModeOf(Shader sh)
-        {
-            if (sh == null) return 0;
-            if (modes.TryGetValue(sh, out uint mode)) return mode;
-            string shader = Objects.Of(sh)?.Name ?? "";
-            if (shader.Contains("SpriteBlendDynamic/Screen") || shader.EndsWith("/ScreenBlend")) mode = 1;
-            else if (shader.Contains("ScreenIgnoreColor")) mode = 0;
-            else if (shader.Contains("SpriteBlendDynamic/Multiply") || shader.EndsWith("/MultiplyBlend")) mode = 2;
-            else if (shader.Contains("SpriteBlendDynamic/Overlay") || shader.EndsWith("/OverlayBlend")) mode = 3;
-            else if (shader.Contains("Distance Field")) mode = 5;
-            else if (shader.EndsWith("Sprites/LightRay")) mode = 6;
-            modes[sh] = mode;
-            return mode;
-        }
+        /// <summary>Render textures' numbers start here (CH360_RT_BASE, console/ch360_host.h); the player's textures from 0.</summary>
+        const int RtBase = 0x40000000;
 
         static int TextureId(Texture t)
         {
+            if (t is RenderTexture rt) return RtBase | Effects.TargetId(rt);
             if (!ids.TryGetValue(t, out int id))
             {
                 id = ids.Count;
                 ids[t] = id;
                 var src = (Objects.Of(t) as NAsset)?.Source;
-                if (t is RenderTexture) { ids[t] = -1; return -1; }   // not drawn yet (no converted file)
                 if (src != null && RuntimePixels.Get(t) == null)
                 {
                     string k = src.File.Path.Replace('/', '_');

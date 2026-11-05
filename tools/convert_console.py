@@ -285,7 +285,18 @@ def encode_blocks(bl, kind):
     return np.concatenate([alpha_block(bl), color_block_best(bl)], axis=1)
 
 
+# Textures kept smaller than --max-size, by key prefix: the film grain's 127
+# frames (1024x512, a new one every 25 ms) are all in use every few seconds,
+# so the console keeps the 64 the engine shows (Effects.HalfRateSequence) at
+# half size: 8 MB rather than 32. Their grain survives (mean error 1 of 255
+# on a frame drawn over the screen).
+SMALLER = {"bundles_tex_screen_fx_": 512}
+
+
 def convert(src, dst, max_size):
+    for prefix, cap in SMALLER.items():
+        if os.path.basename(src).startswith(prefix):
+            max_size = min(max_size, cap)
     with open(src, "rb") as f:
         head = f.read(28)
         magic, ver, fmt, w, h, mips, n = struct.unpack("<4s6I", head)

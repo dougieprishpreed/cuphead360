@@ -1081,12 +1081,14 @@ namespace Cuphead360.Engine
         public static int TextureWidth(Texture t)
         {
             if (t == null) return 0;
+            if (t is RenderTexture rt) return UnityEngine_RenderTexture__Internal_GetWidth(rt);
             if (runtimeTextures.TryGetValue(t, out var d)) return d[0];
             return (int)Tree.Int((Objects.Of(t) as NAsset)?.Source?.Tree, "m_Width");
         }
         public static int TextureHeight(Texture t)
         {
             if (t == null) return 0;
+            if (t is RenderTexture rt) return UnityEngine_RenderTexture__Internal_GetHeight(rt);
             if (runtimeTextures.TryGetValue(t, out var d)) return d[1];
             return (int)Tree.Int((Objects.Of(t) as NAsset)?.Source?.Tree, "m_Height");
         }
@@ -1122,7 +1124,7 @@ namespace Cuphead360.Engine
             if (e != null) e.Version++;
         }
 
-        // Render textures aren't drawn into yet; their size is kept for the scripts that ask it.
+        // Render textures' sizes: set by scripts and temporaries (Effects.GetTemporary), else the asset's.
         public static int UnityEngine_RenderTexture__Internal_GetWidth(RenderTexture mono)
             => Props.TryGet<int>(mono, "rt.width", out int w) ? w : (int)Tree.Int((Objects.Of(mono) as NAsset)?.Source?.Tree, "m_Width", ScreenWidth);
         public static int UnityEngine_RenderTexture__Internal_GetHeight(RenderTexture mono)

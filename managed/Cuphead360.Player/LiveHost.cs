@@ -116,6 +116,10 @@ namespace Cuphead360.Player
         delegate void RenderbufferStorageFn(uint target, uint fmt, int w, int h);
         delegate void FramebufferRenderbufferFn(uint target, uint attachment, uint rbTarget, uint rb);
         delegate uint CheckFramebufferStatusFn(uint target);
+        delegate void FramebufferTexture2DFn(uint target, uint attachment, uint texTarget, uint tex, int level);
+        delegate void BlendFuncSeparateFn(uint srcRgb, uint dstRgb, uint srcAlpha, uint dstAlpha);
+        delegate void ActiveTextureFn(uint unit);
+        delegate void BlendEquationSeparateFn(uint rgb, uint alpha);
 
         static CreateShaderFn glCreateShader; static ShaderSourceFn glShaderSource; static CompileShaderFn glCompileShader;
         static CreateProgramFn glCreateProgram; static AttachShaderFn glAttachShader; static LinkProgramFn glLinkProgram; static UseProgramFn glUseProgram;
@@ -145,7 +149,17 @@ namespace Cuphead360.Player
         static readonly HashSet<KeyCode> keys = new HashSet<KeyCode>();
         static readonly InputFrame input = new InputFrame();
         static uint program;
-        static int uScreen, uMode, uTint, uTex;
+        static int uScreen, uMode, uTint, uTex, uTex2, uP0, uP1, uP2;
+        static BindFn glBindFramebuffer; static GenFn glGenFramebuffers, glGenRenderbuffers; static BindFn glBindRenderbuffer;
+        static RenderbufferStorageFn glRenderbufferStorage; static FramebufferRenderbufferFn glFramebufferRenderbuffer;
+        static FramebufferTexture2DFn glFramebufferTexture2D; static BlendFuncSeparateFn glBlendFuncSeparate; static ActiveTextureFn glActiveTexture;
+        static BlendEquationSeparateFn glBlendEquationSeparate;
+        const uint GL_FRAMEBUFFER = 0x8D40, GL_RENDERBUFFER = 0x8D41, GL_ONE = 1;
+        /// <summary>The framebuffer the screen's views draw into: the window's (0), or the offscreen one of a hidden run.</summary>
+        static uint screenFb;
+        /// <summary>Render textures by the engine's number: a framebuffer with a colour texture and depth/stencil.</summary>
+        static readonly Dictionary<int, (uint fb, uint tex, int w, int h)> targets = new Dictionary<int, (uint, uint, int, int)>();
+        static readonly float[] effectParams = new float[Effects.ParamCount];
         static readonly Dictionary<string, (uint id, int version)> textures = new Dictionary<string, (uint, int)>();
         static string textureDir;
         static readonly HashSet<string> missingTex = new HashSet<string>();
@@ -294,6 +308,7 @@ namespace Cuphead360.Player
             var storage = Fn<RenderbufferStorageFn>("glRenderbufferStorage"); var attach = Fn<FramebufferRenderbufferFn>("glFramebufferRenderbuffer");
             var status = Fn<CheckFramebufferStatusFn>("glCheckFramebufferStatus");
             genFb(1, out uint fb); bindFb(GL_FRAMEBUFFER, fb);
+            screenFb = fb;
             genRb(1, out uint color); bindRb(GL_RENDERBUFFER, color); storage(GL_RENDERBUFFER, 0x8058 /* RGBA8 */, w, h);
             attach(GL_FRAMEBUFFER, 0x8CE0 /* COLOR_ATTACHMENT0 */, GL_RENDERBUFFER, color);
             genRb(1, out uint ds); bindRb(GL_RENDERBUFFER, ds); storage(GL_RENDERBUFFER, 0x88F0 /* DEPTH24_STENCIL8 */, w, h);
@@ -393,14 +408,93 @@ uniform vec2 uScreen;
 varying vec2 vUv; varying vec4 vCol;
 void main() { vUv = aUv; vCol = aCol; gl_Position = vec4(aPos / uScreen * 2.0 - 1.0, 0.0, 1.0); }";
 
-        // Modes: 0 sprite/UI (tex*col), 1 screen blend, 2 multiply, 3 overlay, 4 alpha-only texture (fonts), 5 SDF text, 6 untextured.
+        // Modes: 0 sprite/UI (tex*col), 1 screen blend, 2 multiply, 3 overlay, 4 alpha-only texture (fonts), 5 SDF text, 6 untextured,
+        // 7 sprite mask; the effects as Effects.cs numbers them (8-10 premultiplied, 11-18 blits), as the console's shaders.
         const string FS = @"#version 120
-uniform sampler2D uTex; uniform int uMode; uniform vec4 uTint;
+uniform sampler2D uTex; uniform sampler2D uTex2; uniform int uMode; uniform vec4 uTint; uniform vec4 uP0; uniform vec4 uP1; uniform vec4 uP2;
 varying vec2 vUv; varying vec4 vCol;
+float outside(vec2 uv) { return 1.0 - step(0.1, texture2D(uTex, uv).a); }
+vec3 blur7(vec2 d) {
+  return texture2D(uTex, vUv).rgb * 0.324 + (texture2D(uTex, vUv - d).rgb + texture2D(uTex, vUv + d).rgb) * 0.232
+       + (texture2D(uTex, vUv - 2.0 * d).rgb + texture2D(uTex, vUv + 2.0 * d).rgb) * 0.0855
+       + (texture2D(uTex, vUv - 3.0 * d).rgb + texture2D(uTex, vUv + 3.0 * d).rgb) * 0.0205;
+}
+vec4 blur7s(vec2 d, vec4 c, float t) {
+  vec4 b = (texture2D(uTex, vUv) * 0.324 + (texture2D(uTex, vUv - d) + texture2D(uTex, vUv + d)) * 0.232
+       + (texture2D(uTex, vUv - 2.0 * d) + texture2D(uTex, vUv + 2.0 * d)) * 0.0855
+       + (texture2D(uTex, vUv - 3.0 * d) + texture2D(uTex, vUv + 3.0 * d)) * 0.0205) * c;
+  float low = step(b.r, uP0.z) * step(b.g, uP0.z) * step(b.b, uP0.z);
+  float a = b.a * (1.0 - uP0.w * low) * t;
+  return vec4(b.rgb * a, a);
+}
+vec3 powc(vec3 x, float g) { return exp2(log2(max(x, vec3(1e-6))) * g); }
 void main() {
   vec4 t = texture2D(uTex, vUv);
   vec4 c = vCol * uTint;
-  if (uMode == 1) { gl_FragColor = vec4(1.0 - (1.0 - t.rgb) * (1.0 - uTint.rgb), t.a * vCol.a); }
+  if (uMode == 8) {
+    vec2 d = vec2(clamp(vUv.x * 4.0 - 2.0, -0.5, 0.5) * uP2.x * uP1.z, uP2.y * uP1.w);
+    float n = outside(vUv + d) + outside(vUv + 2.0 * d) + outside(vUv + 3.0 * d) + outside(vUv + 4.0 * d) + outside(vUv + 5.0 * d);
+    float k = 1.0 - clamp(n * uP1.y, 0.0, uP0.a);
+    gl_FragColor = mix(t, vec4(uP0.rgb * (1.0 - k), 1.0 + k * (uP1.x - 1.0)), step(0.1, t.a));
+  }
+  else if (uMode == 9) { gl_FragColor = vec4(0.0, 0.0, 0.0, t.r * uP0.x); }
+  else if (uMode == 10) {
+    vec2 tx = uP2.xy;
+    float hl = step(1e-20, uP0.y);
+    float k = hl * clamp(uP0.x / max(uP0.y, 1e-20), 0.0, 1.0) + (1.0 - hl) * step(1e-20, uP0.x);
+    vec4 avg = (texture2D(uTex, vUv + tx) + texture2D(uTex, vUv - 0.5 * tx) + texture2D(uTex, vUv + vec2(0.5, -0.5) * tx) + texture2D(uTex, vUv + vec2(-0.5, 0.5) * tx)) * 0.25 * c;
+    vec4 r = mix(t, avg, k);
+    vec4 acc = vec4(r.rgb * r.a, r.a);
+    vec4 v = blur7s(vec2(0.0, tx.y * uP0.x), c, k), h = blur7s(vec2(tx.x * uP0.x, 0.0), c, k);
+    acc = v + (1.0 - v.a) * acc; acc = h + (1.0 - h.a) * acc; acc = h + (1.0 - h.a) * acc; acc = v + (1.0 - v.a) * acc;
+    gl_FragColor = acc;
+  }
+  else if (uMode == 11) { gl_FragColor = t; }
+  else if (uMode == 12) {
+    vec2 tx = uP2.xy;
+    gl_FragColor = (texture2D(uTex, vUv + tx) + texture2D(uTex, vUv - 0.5 * tx) + texture2D(uTex, vUv + vec2(0.5, -0.5) * tx) + texture2D(uTex, vUv + vec2(-0.5, 0.5) * tx)) * 0.25;
+  }
+  else if (uMode == 13) { gl_FragColor = vec4(blur7(uP0.xy), t.a); }
+  else if (uMode == 14) { gl_FragColor = vec4(powc(blur7(uP0.xy), uP0.z), t.a); }
+  else if (uMode == 15) {
+    vec3 b = blur7(uP0.xy); float gb = (b.g + b.b) * 0.5;
+    float g = (1.0 - 0.67 * (1.0 - gb)) * (1.0 - 0.34 * (1.0 - b.r));
+    gl_FragColor = vec4(powc(vec3(b.r, g, gb) * 1.25 - 0.25, uP0.z), t.a);
+  }
+  else if (uMode == 16) {
+    vec3 cc = powc(blur7(uP0.xy), uP0.z);
+    float x = max(dot(cc, vec3(0.2125, 0.7154, 0.0721)), dot(cc, vec3(0.333))) * 1.15 - 0.1;
+    float y = exp2(log2(max(x, 1e-6)) * uP0.z * 0.9);
+    gl_FragColor = vec4(y, y, y, t.a);
+  }
+  else if (uMode == 17) {
+    float r = texture2D(uTex, vUv - uP0.xy).r, g = texture2D(uTex, vUv - uP0.zw).g, b = texture2D(uTex, vUv - uP1.xy).b;
+    vec4 o = texture2D(uTex2, fract(vec2(dot(vUv, uP1.zw), dot(vUv, uP2.xy))));
+    gl_FragColor = vec4(o.rgb * (vec3(r, g, b) + 1.0 - o.a), 1.0);
+  }
+  else if (uMode >= 40 && uMode <= 50) {
+    // The passes of the game's blend and mask shaders (console/xsdk/shaders/am_*, stencilmask, blend*).
+    vec4 tc = t * c; float a = t.a * c.a; float hi = step(0.5, t.r);
+    vec3 hard = a * mix(t.rgb, 2.0 * t.rgb - 1.0, hi);
+    if (uMode == 40) gl_FragColor = vec4(tc.rgb, 1.0 - tc.a);
+    else if (uMode == 41) gl_FragColor = tc;
+    else if (uMode == 42) gl_FragColor = vec4(a * a);
+    else if (uMode == 43) gl_FragColor = vec4(a);
+    else if (uMode == 44) gl_FragColor = vec4(0.0, 0.0, 0.0, c.a);
+    else if (uMode == 45) gl_FragColor = vec4((t.rgb + c.rgb * c.a * uP0.x * (1.0 - t.rgb)) * t.a, t.a);
+    else if (uMode == 46) { if (tc.a < 0.5) discard; gl_FragColor = tc; }
+    else if (uMode == 47) gl_FragColor = vec4(mix(1.0 - a + a * c.rgb * (1.0 - t.rgb), 1.0 - a + hi * 2.0 * a * (1.0 - t.rgb), uP0.x), 1.0);
+    else if (uMode == 48) gl_FragColor = vec4(max(mix(a * c.rgb * t.rgb, hard, uP0.x), vec3(0.0)), a);
+    else if (uMode == 49) gl_FragColor = vec4(max(-hard, vec3(0.0)), 0.0);
+    else gl_FragColor = vec4(tc.rgb * tc.a, tc.a);
+  }
+  else if (uMode == 18) {
+    vec2 d = uP0.xy;
+    gl_FragColor = t * 0.324 + (texture2D(uTex, vUv - d) + texture2D(uTex, vUv + d)) * 0.232
+                 + (texture2D(uTex, vUv - 2.0 * d) + texture2D(uTex, vUv + 2.0 * d)) * 0.0855
+                 + (texture2D(uTex, vUv - 3.0 * d) + texture2D(uTex, vUv + 3.0 * d)) * 0.0205;
+  }
+  else if (uMode == 1) { gl_FragColor = vec4(1.0 - (1.0 - t.rgb) * (1.0 - uTint.rgb), t.a * vCol.a); }
   else if (uMode == 2) { gl_FragColor = vec4(t.rgb * uTint.rgb, t.a * vCol.a); }
   else if (uMode == 3) { vec3 o = mix(2.0 * t.rgb * uTint.rgb, 1.0 - 2.0 * (1.0 - t.rgb) * (1.0 - uTint.rgb), step(0.5, t.rgb)); gl_FragColor = vec4(o, t.a * vCol.a); }
   else if (uMode == 4) { gl_FragColor = vec4(c.rgb, c.a * t.a); }
@@ -421,6 +515,12 @@ void main() {
             glUniform2f = Fn<Uniform2fFn>("glUniform2f"); glUniform4f = Fn<Uniform4fFn>("glUniform4f"); glBindAttribLocation = Fn<BindAttribLocationFn>("glBindAttribLocation");
             glVertexAttribPointer = Fn<VertexAttribPointerFn>("glVertexAttribPointer"); glEnableVertexAttribArray = Fn<EnableVertexAttribArrayFn>("glEnableVertexAttribArray");
             glCompressedTexImage2D = Fn<CompressedTexImage2DFn>("glCompressedTexImage2D"); glGetShaderInfoLog = Fn<GetShaderInfoLogFn>("glGetShaderInfoLog");
+            glBindFramebuffer = Fn<BindFn>("glBindFramebuffer"); glGenFramebuffers = Fn<GenFn>("glGenFramebuffers");
+            glGenRenderbuffers = Fn<GenFn>("glGenRenderbuffers"); glBindRenderbuffer = Fn<BindFn>("glBindRenderbuffer");
+            glRenderbufferStorage = Fn<RenderbufferStorageFn>("glRenderbufferStorage"); glFramebufferRenderbuffer = Fn<FramebufferRenderbufferFn>("glFramebufferRenderbuffer");
+            glFramebufferTexture2D = Fn<FramebufferTexture2DFn>("glFramebufferTexture2D"); glBlendFuncSeparate = Fn<BlendFuncSeparateFn>("glBlendFuncSeparate");
+            glActiveTexture = Fn<ActiveTextureFn>("glActiveTexture");
+            glBlendEquationSeparate = Fn<BlendEquationSeparateFn>("glBlendEquationSeparate");
             try { wglSwapIntervalEXT = Fn<SwapIntervalFn>("wglSwapIntervalEXT"); wglSwapIntervalEXT(Unlocked ? 0 : 1); } catch (InvalidOperationException) { }
             uint vs = Compile(GL_VERTEX_SHADER, VS), fs = Compile(GL_FRAGMENT_SHADER, FS);
             program = glCreateProgram();
@@ -430,10 +530,14 @@ void main() {
             glUseProgram(program);
             uScreen = glGetUniformLocation(program, "uScreen"); uMode = glGetUniformLocation(program, "uMode");
             uTint = glGetUniformLocation(program, "uTint"); uTex = glGetUniformLocation(program, "uTex");
+            uTex2 = glGetUniformLocation(program, "uTex2"); uP0 = glGetUniformLocation(program, "uP0");
+            uP1 = glGetUniformLocation(program, "uP1"); uP2 = glGetUniformLocation(program, "uP2");
             glUniform1i(uTex, 0);
+            glUniform1i(uTex2, 1);
             glEnableVertexAttribArray(0); glEnableVertexAttribArray(1); glEnableVertexAttribArray(2);
             glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            // Straight colour over, alpha accumulated as the console's premultiplied blend does (render textures keep it).
+            glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
             glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         }
 
@@ -455,6 +559,7 @@ void main() {
         {
             mode = 0;
             if (t == null) return 0;
+            if (t is RenderTexture rtex) return targets.TryGetValue(Effects.TargetId(rtex), out var rt) ? rt.tex : 0;
             var rp = RuntimePixels.Get(t);
             if (rp != null)
             {
@@ -569,25 +674,69 @@ void main() {
         static float[] pos = new float[4096], uv = new float[4096];
         static byte[] col = new byte[8192];
 
+        /// <summary>A render texture's framebuffer, made (or remade at a new size) on first use.</summary>
+        static (uint fb, uint tex, int w, int h) Target(RenderTexture rt)
+        {
+            int id = Effects.TargetId(rt), w = Effects.Width(rt), h = Effects.Height(rt);
+            if (targets.TryGetValue(id, out var have) && have.w == w && have.h == h) return have;
+            glGenFramebuffers(1, out uint fb);
+            glBindFramebuffer(GL_FRAMEBUFFER, fb);
+            uint tex; glGenTextures(1, &tex);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            Params();
+            glTexImage2D(GL_TEXTURE_2D, 0, (int)GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, null);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, 0x8CE0 /* COLOR_ATTACHMENT0 */, GL_TEXTURE_2D, tex, 0);
+            glGenRenderbuffers(1, out uint ds); glBindRenderbuffer(GL_RENDERBUFFER, ds); glRenderbufferStorage(GL_RENDERBUFFER, 0x88F0 /* DEPTH24_STENCIL8 */, w, h);
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, 0x821A /* DEPTH_STENCIL_ATTACHMENT */, GL_RENDERBUFFER, ds);
+            return targets[id] = (fb, tex, w, h);
+        }
+
         static void Draw(List<RenderList.View> views, int ww, int wh)
         {
-            float sx = ww / (float)Icalls.ScreenWidth, sy = wh / (float)Icalls.ScreenHeight;
+            glBindFramebuffer(GL_FRAMEBUFFER, screenFb);
             glViewport(0, 0, ww, wh);
             glDisable(GL_SCISSOR_TEST);
             glClearColor(0, 0, 0, 1);
             glClearStencil(0);
             glStencilMask(0xFF);
             glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-            glUniform2f(uScreen, ww, wh);
-            glEnable(GL_SCISSOR_TEST);
+            RenderTexture current = null;
+            bool first = true;
+            float sx = 1, sy = 1;
             foreach (var v in views)
             {
+                // A render texture's run of views starts cleared (transparent); the screen keeps what it has.
+                if (first || !ReferenceEquals(v.Target, current))
+                {
+                    current = v.Target;
+                    glDisable(GL_SCISSOR_TEST);
+                    if (current == null)
+                    {
+                        glBindFramebuffer(GL_FRAMEBUFFER, screenFb);
+                        glViewport(0, 0, ww, wh);
+                        sx = ww / (float)Icalls.ScreenWidth; sy = wh / (float)Icalls.ScreenHeight;
+                        glUniform2f(uScreen, ww, wh);
+                    }
+                    else
+                    {
+                        var t = Target(current);
+                        glBindFramebuffer(GL_FRAMEBUFFER, t.fb);
+                        glViewport(0, 0, t.w, t.h);
+                        sx = sy = 1;
+                        glUniform2f(uScreen, t.w, t.h);
+                        glClearColor(0, 0, 0, 0);
+                        glStencilMask(0xFF);
+                        glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+                    }
+                    glEnable(GL_SCISSOR_TEST);
+                    first = false;
+                }
                 var r = v.PixelRect;
                 glScissor((int)(r.x * sx), (int)(r.y * sy), (int)Math.Ceiling(r.width * sx), (int)Math.Ceiling(r.height * sy));
                 if (v.Camera != null && (v.Camera.ClearFlags == CameraClearFlags.SolidColor || v.Camera.ClearFlags == CameraClearFlags.Skybox))
                 {
                     var bg = v.Camera.Background;
-                    glClearColor(bg.r, bg.g, bg.b, 1);
+                    glClearColor(bg.r, bg.g, bg.b, v.Target != null ? bg.a : 1);
                     glClear(GL_COLOR_BUFFER_BIT);
                 }
                 glStencilMask(0xFF);
@@ -596,6 +745,62 @@ void main() {
             }
             glDisable(GL_STENCIL_TEST);
             glColorMask(true, true, true, true);
+        }
+
+        // The game's blend and mask shaders' passes (console/xsdk/main.cpp, PASSES): program (uMode), blend
+        // (GL factors, colour then alpha, and ops), stencil (0 none, 1 write the value, 2 draw where it is).
+        static readonly (int prog, uint sf, uint df, uint sfa, uint dfa, bool revRgb, bool noColor, int stencil, int sref)[][] passes =
+        {
+            /* 20 */ new[] { (40, 0u, 1u, 1u, 0u, false, false, 0, 0) },
+            /* 21 */ new[] { (40, 0u, 1u, 0x0305u, 1u, false, false, 0, 0), (41, 0x0305u, 0x0304u, 0u, 1u, false, false, 0, 0) },
+            /* 22 */ new[] { (42, 0x0305u, 1u, 0u, 1u, true, false, 0, 0), (50, 0x0305u, 1u, 0u, 1u, false, false, 0, 0) },
+            /* 23 */ new[] { (42, 0x0304u, 1u, 0u, 1u, true, false, 0, 0), (50, 0x0304u, 1u, 0u, 1u, false, false, 0, 0) },
+            /* 24 */ new[] { (42, 0x0305u, 1u, 0u, 1u, true, false, 0, 0), (45, 0x0305u, 1u, 0u, 1u, false, false, 0, 0) },
+            /* 25 */ new[] { (42, 0x0304u, 1u, 0u, 1u, true, false, 0, 0), (45, 0x0304u, 1u, 0u, 1u, false, false, 0, 0) },
+            /* 26 */ new[] { (43, 0x0304u, 1u, 0u, 1u, true, false, 0, 0), (50, 0x0304u, 1u, 0u, 1u, false, false, 0, 0) },
+            /* 27 */ new[] { (44, 0u, 1u, 1u, 0u, false, false, 0, 0) },
+            /* 28 */ new[] { (46, 1u, 0x0303u, 1u, 0x0303u, false, true, 1, 5) },
+            /* 29 */ new[] { (50, 1u, 0x0303u, 1u, 0x0303u, false, false, 2, 5) },
+            /* 30 */ new (int, uint, uint, uint, uint, bool, bool, int, int)[0],
+            /* 31 */ new (int, uint, uint, uint, uint, bool, bool, int, int)[0],
+            /* 32 */ new (int, uint, uint, uint, uint, bool, bool, int, int)[0],
+            /* 33 */ new[] { (47, 0u, 0x0300u, 0u, 1u, false, false, 0, 0), (48, 1u, 1u, 0x0302u, 0x0303u, false, false, 0, 0) },
+            /* 34 */ new[] { (47, 0u, 0x0300u, 0u, 1u, false, false, 0, 0), (48, 1u, 1u, 0x0302u, 0x0303u, false, false, 0, 0),
+                             (49, 1u, 1u, 0u, 1u, true, false, 0, 0) },
+        };
+
+        static void DrawPasses(RenderList.Item it, int mode, int n, uint tex)
+        {
+            var p = effectParams;
+            Effects.Params(it, mode, p);
+            glUniform4f(uP0, p[0], p[1], p[2], p[3]);
+            glUniform4f(uTint, it.Tint.r, it.Tint.g, it.Tint.b, it.Tint.a);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            fixed (float* pp = pos) fixed (float* up = uv) fixed (byte* cp = col)
+            {
+                glVertexAttribPointer(0, 2, GL_FLOAT, false, 0, pp);
+                glVertexAttribPointer(1, 2, GL_FLOAT, false, 0, up);
+                glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, true, 0, cp);
+                foreach (var ps in passes[mode - 20])
+                {
+                    glUniform1i(uMode, ps.prog);
+                    glBlendFuncSeparate(ps.sf, ps.df, ps.sfa, ps.dfa);
+                    glBlendEquationSeparate(ps.revRgb ? 0x800Bu /* FUNC_REVERSE_SUBTRACT */ : 0x8006u /* FUNC_ADD */, 0x8006u);
+                    if (ps.noColor) glColorMask(false, false, false, false);
+                    if (ps.stencil != 0)
+                    {
+                        glEnable(GL_STENCIL_TEST);
+                        glStencilFunc(ps.stencil == 1 ? 0x0207u /* ALWAYS */ : 0x0202u /* EQUAL */, ps.sref, 0xFF);
+                        glStencilOp(0x1E00, 0x1E00, ps.stencil == 1 ? 0x1E01u /* REPLACE */ : 0x1E00u);
+                        glStencilMask(ps.stencil == 1 ? 0xFFu : 0u);
+                    }
+                    glDrawArrays(GL_TRIANGLES, 0, n);
+                    if (ps.noColor) glColorMask(true, true, true, true);
+                    if (ps.stencil != 0) { glDisable(GL_STENCIL_TEST); glStencilMask(0xFF); }
+                }
+            }
+            glBlendEquationSeparate(0x8006u, 0x8006u);
+            glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         }
 
         static void DrawItem(RenderList.Item it, float sx, float sy)
@@ -614,15 +819,21 @@ void main() {
                 var c = it.Colors != null && k < it.Colors.Length ? it.Colors[k] : new Color32(255, 255, 255, 255);
                 col[i * 4] = c.r; col[i * 4 + 1] = c.g; col[i * 4 + 2] = c.b; col[i * 4 + 3] = c.a;
             }
-            string shader = Objects.Of(MaterialState.Of(it.Material)?.Shader)?.Name ?? "";
-            int mode = texMode;
-            if (shader.Contains("SpriteBlendDynamic/Screen") || shader.EndsWith("/ScreenBlend")) mode = 1;
-            else if (shader.Contains("ScreenIgnoreColor")) mode = 0;
-            else if (shader.Contains("SpriteBlendDynamic/Multiply") || shader.EndsWith("/MultiplyBlend")) mode = 2;
-            else if (shader.Contains("SpriteBlendDynamic/Overlay") || shader.EndsWith("/OverlayBlend")) mode = 3;
-            else if (shader.Contains("Distance Field")) mode = 5;
-            if (it.Texture == null) mode = 6;
-            if (it.Kind == "mask") mode = 7;   // a sprite mask: its texels at or above the cutoff (the tint's alpha) mark the stencil
+            int mode = Effects.ModeOf(it);
+            if (mode >= 20 && mode <= 34) { DrawPasses(it, mode, n, tex); return; }
+            if (mode == Effects.Sprite || mode == Effects.LightRay) mode = texMode;   // (the light ray drawn as a sprite here)
+            if (it.Texture == null && mode < Effects.KnightGlow) mode = 6;
+            if (mode >= Effects.KnightGlow)
+            {
+                var p = it.Effect >= 0 ? it.P : effectParams;
+                if (it.Effect < 0) Effects.Params(it, mode, p);
+                glUniform4f(uP0, p[0], p[1], p[2], p[3]); glUniform4f(uP1, p[4], p[5], p[6], p[7]); glUniform4f(uP2, p[8], p[9], p[10], p[11]);
+                glActiveTexture(0x84C1);   // TEXTURE1: the film grain's overlay
+                glBindTexture(GL_TEXTURE_2D, it.Tex2 != null ? Texture(it.Tex2, out _) : 0);
+                glActiveTexture(0x84C0);
+                if (Effects.IsBlit(mode)) glDisable(GL_BLEND);
+                else glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            }
             var tint = it.Tint;
             // UI graphics: the canvas alpha fades blend-mode materials too (Unity folds it into the vertex alpha).
             if (it.Kind == "ui" && mode >= 1 && mode <= 3)
@@ -669,6 +880,11 @@ void main() {
                 glDrawArrays(GL_TRIANGLES, 0, n);
             }
             if (st != null || ss != 0) { glDisable(GL_STENCIL_TEST); glColorMask(true, true, true, true); glStencilMask(0xFF); }
+            if (mode >= Effects.KnightGlow)
+            {
+                glEnable(GL_BLEND);
+                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            }
         }
     }
 }

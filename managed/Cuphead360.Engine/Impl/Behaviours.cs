@@ -81,7 +81,7 @@ namespace Cuphead360.Engine
     {
         public MethodInfo Awake, Start, Update, FixedUpdate, LateUpdate, OnEnable, OnDisable, OnDestroy;
         public MethodInfo OnTriggerEnter2D, OnTriggerStay2D, OnTriggerExit2D, OnCollisionEnter2D, OnCollisionStay2D, OnCollisionExit2D;
-        public MethodInfo OnApplicationQuit, OnLevelWasLoaded, OnBecameVisible, OnBecameInvisible, OnWillRenderObject;
+        public MethodInfo OnApplicationQuit, OnLevelWasLoaded, OnBecameVisible, OnBecameInvisible, OnWillRenderObject, OnRenderImage;
         public bool StartIsCoroutine;
 
         static readonly Dictionary<Type, MessageSet> cache = new Dictionary<Type, MessageSet>();
@@ -99,7 +99,7 @@ namespace Cuphead360.Engine
                 OnCollisionStay2D = Find(t, "OnCollisionStay2D", 1), OnCollisionExit2D = Find(t, "OnCollisionExit2D", 1),
                 OnApplicationQuit = Find(t, "OnApplicationQuit"), OnLevelWasLoaded = Find(t, "OnLevelWasLoaded", 1),
                 OnBecameVisible = Find(t, "OnBecameVisible"), OnBecameInvisible = Find(t, "OnBecameInvisible"),
-                OnWillRenderObject = Find(t, "OnWillRenderObject"),
+                OnWillRenderObject = Find(t, "OnWillRenderObject"), OnRenderImage = Find(t, "OnRenderImage", 2),
             };
             s.StartIsCoroutine = s.Start != null && typeof(IEnumerator).IsAssignableFrom(s.Start.ReturnType);
             cache[t] = s;
