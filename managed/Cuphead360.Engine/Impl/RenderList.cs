@@ -96,6 +96,9 @@ namespace Cuphead360.Engine
             /// </summary>
             public int SpriteStencil;
             public const int MaskAdd = 1, MaskRemove = 2, MaskInside = 3, MaskOutside = 4;
+            /// <summary>A sprite renderer's instance id (0 for other items): the console draws the renderer's last
+            /// sprite whose page it has while a new frame's page loads, rather than wait for it.</summary>
+            public int Key;
             /// <summary>A blit's mode (Effects), fixed when it was recorded; -1: the material's shader's.</summary>
             public int Effect = -1;
             /// <summary>A blit's values (Effects.ParamCount), taken when it was recorded (owned, reused).</summary>
@@ -131,7 +134,7 @@ namespace Cuphead360.Engine
             var it = pool[pooled++];
             it.BaseName = ""; it.Suffix = null; it.SpriteName = null; it.Texture = null; it.Material = null; it.Screen = null; it.Local = null; it.Uv = null; it.Colors = null;
             it.Triangles = null; it.Tint = Color.white; it.Layer = it.Order = 0; it.Depth = 0; it.Sequence = 0; it.Kind = "sprite"; it.GoLayer = 0;
-            it.Stencil = null; it.SpriteStencil = 0; it.Effect = -1; it.Tex2 = null;
+            it.Stencil = null; it.SpriteStencil = 0; it.Effect = -1; it.Tex2 = null; it.Key = 0;
             return it;
         }
 
@@ -675,7 +678,7 @@ namespace Cuphead360.Engine
             it.Material = sr.Materials.Length > 0 ? sr.Materials[0] : null;
             it.Uv = uv; it.Triangles = info.Triangles32; it.Tint = sr.Color;
             it.Layer = SortingLayers.Index(sr.SortingLayerID); it.Order = sr.SortingOrder;
-            it.Depth = depth; it.GoLayer = sr.GameObject.Layer;
+            it.Depth = depth; it.GoLayer = sr.GameObject.Layer; it.Key = sr.InstanceId;
             it.SpriteStencil = sr.MaskInteraction == SpriteMaskInteraction.VisibleInsideMask ? Item.MaskInside
                 : sr.MaskInteraction == SpriteMaskInteraction.VisibleOutsideMask ? Item.MaskOutside : 0;
             return it;

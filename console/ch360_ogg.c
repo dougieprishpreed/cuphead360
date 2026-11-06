@@ -36,9 +36,13 @@ typedef struct ch360_ogg {
     int ended;           /* the decoder has reached the end */
     float* sbuf;         /* the native mixer's frames of it (mix_voice), STREAM_FRAMES of them */
     unsigned sstart, sframes;
+    int pcm_owner;       /* a decoded clip still being decoded from it (pcm_decode), else -1: closed after */
+    int close_asked;     /* ogg_close came while that clip held it */
 } ch360_ogg;
 
 static ch360_ogg oggs[OGG_MAX];
+static void pcm_finish_one(void);   /* a clip still decoding finished, its handle let go */
+static void ogg_close_now(U32 h);
 static const char* ogg_root = ".";
 
 /* Decoding ahead. A streamed clip's Vorbis decoding ran on the game's thread
@@ -250,7 +254,14 @@ U32 i5_ch3608_oggX5Fopen(wasmModuleInstance* inst, U32 path, U32 len, U32 info) 
     if (len == 0 || root + len + 2 > sizeof(full) || !srt_mem_ok(path, len) || !srt_mem_ok(info, 12)) return (U32)-1;
     for (h = 0; h < OGG_MAX && oggs[h].v != NULL; h++) {
     }
+    if (h == OGG_MAX) {   /* clips still decoding hold handles: one finished now lets its go */
+        pcm_finish_one();
+        for (h = 0; h < OGG_MAX && oggs[h].v != NULL; h++) {
+        }
+    }
     if (h == OGG_MAX) return (U32)-1;
+    oggs[h].pcm_owner = -1;
+    oggs[h].close_asked = 0;
     if (audio_pack == -2) audio_pack = ch360_pack_open(ogg_root, "AUDIO");
     oggs[h].file = -1;
     oggs[h].offset = 0;
@@ -380,9 +391,7 @@ U32 i5_ch3608_oggX5Fseek(wasmModuleInstance* inst, U32 h, U32 frame) {
     return ok;
 }
 
-void i5_ch3609_oggX5Fclose(wasmModuleInstance* inst, U32 h) {
-    (void)inst;
-    if (h >= OGG_MAX || oggs[h].v == NULL) return;
+static void ogg_close_now(U32 h) {
     ogg_lock(h);
     stb_vorbis_close(oggs[h].v);
     cache_put(oggs[h].data, oggs[h].size, oggs[h].file, oggs[h].offset);
@@ -392,7 +401,19 @@ void i5_ch3609_oggX5Fclose(wasmModuleInstance* inst, U32 h) {
     oggs[h].sbuf = NULL;
     oggs[h].v = NULL;
     oggs[h].data = NULL;
+    oggs[h].pcm_owner = -1;
+    oggs[h].close_asked = 0;
     ogg_unlock(h);
+}
+
+void i5_ch3609_oggX5Fclose(wasmModuleInstance* inst, U32 h) {
+    (void)inst;
+    if (h >= OGG_MAX || oggs[h].v == NULL) return;
+    if (oggs[h].pcm_owner >= 0) {   /* a clip still decoding from it: closed when it's done */
+        oggs[h].close_asked = 1;
+        return;
+    }
+    ogg_close_now(h);
 }
 
 /* ---- the native mixer ----
@@ -410,8 +431,50 @@ typedef struct ch360_pcm {
     float* data;
     unsigned frames;
     int channels;
+    unsigned decoded;   /* frames decoded so far (the rest come in mix_begin, or as a voice reaches them) */
+    int h;              /* the handle it decodes from while decoded < frames, else -1 */
 } ch360_pcm;
 static ch360_pcm pcms[PCM_MAX];
+/* A clip's first frames are decoded when it's first played, the rest a share each mix: decoding whole
+ * clips at their first play was 22-40 ms of a frame (the twenty-first run: hits, a boss's attacks, with
+ * their sounds), Vorbis on the console ~35 ms a second of sound. */
+enum { PCM_FIRST_FRAMES = 4096, PCM_STEP_FRAMES = 2048 };
+static unsigned pcm_pending;   /* clips not decoded whole yet */
+int ch360_pcm_whole;           /* a check (host_native's CH360_PCM_WHOLE): clips decoded whole at their first play */
+static unsigned pcm_next;      /* where mix_begin's share starts looking */
+
+/* More of a clip decoded, up to frame upto; the handle let go (closed if asked) when it's whole. */
+static void pcm_more(int id, unsigned upto) {
+    ch360_pcm* p = &pcms[id];
+    ch360_ogg* o;
+    unsigned n;
+    if (p->h < 0 || p->data == NULL) return;
+    o = &oggs[p->h];
+    if (upto > p->frames) upto = p->frames;
+    ogg_lock((U32)p->h);
+    while (p->decoded < upto && (n = ogg_take(o, p->data + (size_t)p->decoded * p->channels, upto - p->decoded)) > 0) p->decoded += n;
+    if (p->decoded < upto && o->ended) {   /* what the decoder didn't give is silence */
+        memset(p->data + (size_t)p->decoded * p->channels, 0, (size_t)(p->frames - p->decoded) * p->channels * sizeof(float));
+        p->decoded = p->frames;
+    }
+    ogg_unlock((U32)p->h);
+    if (p->decoded >= p->frames) {
+        int h = p->h;
+        p->h = -1;
+        oggs[h].pcm_owner = -1;
+        if (oggs[h].close_asked) ogg_close_now((U32)h);
+        pcm_pending--;
+    }
+}
+
+static void pcm_finish_one(void) {
+    unsigned id;
+    for (id = 0; id < PCM_MAX; id++)
+        if (pcms[id].h >= 0 && pcms[id].data != NULL) {
+            pcm_more((int)id, pcms[id].frames);
+            return;
+        }
+}
 static float mix_block[MIX_MAX_FRAMES * 2];
 static unsigned mix_frames;
 
@@ -433,14 +496,17 @@ U32 i5_ch36010_pcmX5Fdecode(wasmModuleInstance* inst, U32 h, U32 out) {
     if (length > (1u << 26) / (unsigned)o->channels) return (U32)-1;
     data = (float*)malloc((size_t)(length ? length : 1) * o->channels * sizeof(float));
     if (data == NULL) return (U32)-1;
-    ogg_lock(h);
-    while (got < length && (n = ogg_take(o, data + (size_t)got * o->channels, length - got)) > 0) got += n;
-    ogg_unlock(h);
-    /* what the decoder didn't give is silence, as the engine's whole-clip array was */
-    if (got < length) memset(data + (size_t)got * o->channels, 0, (size_t)(length - got) * o->channels * sizeof(float));
+    (void)got;
+    (void)n;
     pcms[id].data = data;
     pcms[id].frames = length;
     pcms[id].channels = o->channels;
+    pcms[id].decoded = 0;
+    pcms[id].h = (int)h;
+    o->pcm_owner = id;
+    pcm_pending++;
+    /* its first frames now (all of a short clip), the rest as it plays (pcm_more) */
+    pcm_more(id, ch360_pcm_whole || length <= 2 * PCM_FIRST_FRAMES ? length : PCM_FIRST_FRAMES);
     put_u32(srt_mem_ptr(out), length);
     return (U32)id;
 }
@@ -448,7 +514,14 @@ U32 i5_ch36010_pcmX5Fdecode(wasmModuleInstance* inst, U32 h, U32 out) {
 /* pcm_free(id) */
 void i5_ch3608_pcmX5Ffree(wasmModuleInstance* inst, U32 id) {
     (void)inst;
-    if (id >= PCM_MAX) return;
+    if (id >= PCM_MAX || pcms[id].data == NULL) return;
+    if (pcms[id].h >= 0) {   /* still decoding: its handle let go */
+        int h = pcms[id].h;
+        pcms[id].h = -1;
+        oggs[h].pcm_owner = -1;
+        if (oggs[h].close_asked) ogg_close_now((U32)h);
+        pcm_pending--;
+    }
     free(pcms[id].data);
     pcms[id].data = NULL;
 }
@@ -458,6 +531,18 @@ void i5_ch3609_mixX5Fbegin(wasmModuleInstance* inst, U32 frames) {
     (void)inst;
     mix_frames = frames > MIX_MAX_FRAMES ? MIX_MAX_FRAMES : frames;
     memset(mix_block, 0, (size_t)mix_frames * 2 * sizeof(float));
+    /* the clips still decoding: this mix's share, one clip after another */
+    if (pcm_pending > 0) {
+        unsigned left = PCM_STEP_FRAMES, k;
+        for (k = 0; k < PCM_MAX && left > 0 && pcm_pending > 0; k++) {
+            unsigned id = (pcm_next + k) % PCM_MAX, before;
+            if (pcms[id].h < 0 || pcms[id].data == NULL) continue;
+            before = pcms[id].decoded;
+            pcm_more((int)id, before + left);
+            left -= pcms[id].decoded - before < left ? pcms[id].decoded - before : left;
+            pcm_next = id;
+        }
+    }
 }
 
 /* The stream buffer holds frame f0 and, when the clip has it, the next one (the engine's Fill). */
@@ -503,6 +588,12 @@ U32 i5_ch3609_mixX5Fvoice(wasmModuleInstance* inst, U32 kind, U32 id, U32 start,
     if (frames > mix_frames) frames = mix_frames;
     if (kind == 1) {
         if (id < PCM_MAX && pcms[id].data != NULL) {
+            /* the frames this block can reach, decoded now if they weren't yet */
+            if (pcms[id].h >= 0) {
+                unsigned long long reach = (unsigned long long)f0 + (unsigned long long)(frames - (start < frames ? start : frames)) * (istep + 1u) + 2u;
+                if (loop || reach >= pcms[id].frames) pcm_more((int)id, pcms[id].frames);
+                else pcm_more((int)id, (unsigned)reach);
+            }
             pcm = pcms[id].data;
             ch = (unsigned)pcms[id].channels;
             if (total > pcms[id].frames) total = pcms[id].frames;

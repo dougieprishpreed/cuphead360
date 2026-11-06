@@ -637,7 +637,8 @@ namespace Cuphead360.Player
         //  26/27 mode 6's shadow and sky glow textures  28-30 its t, textureWidth, textureSpeed
         //  31 sprite masks' stencil (RenderList.Item.SpriteStencil: 1 add, 2 remove for a mask, mode 7; 3 inside, 4 outside)
         //  32-43 an effect's values (modes 8-17, Effects.cs); 26 mode 17's overlay texture
-        const int ItemSlots = 44;
+        //  44 a sprite renderer's key (RenderList.Item.Key; 0 none)
+        const int ItemSlots = 45;
         static readonly int shadowTex = ShaderProps.Id("_ShadowTex"), skyGlowTex = ShaderProps.Id("_SkyGlowTex");
         static readonly int rayT = ShaderProps.Id("t"), rayWidth = ShaderProps.Id("textureWidth"), raySpeed = ShaderProps.Id("textureSpeed");
 
@@ -690,6 +691,7 @@ namespace Cuphead360.Player
             f[16] = it.A00; f[17] = it.A01; f[18] = it.B0; f[19] = it.A10; f[20] = it.A11; f[21] = it.B1;
             f[22] = clip.x; f[23] = clip.y; f[24] = clip.z; f[25] = clip.w;
             a[31] = it.SpriteStencil;
+            a[44] = it.Key;
             fixed (int* tri = it.Triangles)
             fixed (Vector2* p = pos)
             fixed (Vector2* uv = it.Uv)

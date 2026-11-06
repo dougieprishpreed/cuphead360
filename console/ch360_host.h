@@ -119,8 +119,18 @@ typedef struct ch360_frame {
 void ch360_plat_draw(const ch360_frame* frame);
 /* Texture id is the converted texture <key> (GameData/ctex/<key>.ctx). */
 void ch360_plat_texture_file(int id, const char* key);
-/* Texture id is likely drawn soon: read it ahead if memory allows (never waited for). */
-void ch360_plat_texture_prefetch(int id);
+/* Texture id is likely drawn soon: read it ahead if memory allows (never waited for). wanted: a sprite near
+ * the view or a frame of a clip on screen (room is made from textures not drawn lately); else a guess (an
+ * atlas the game loaded, the other pages of one drawn): only its stored bytes are kept, and only with room. */
+void ch360_plat_texture_prefetch(int id, int wanted);
+/* Whether texture id can be drawn now (loaded; render textures, run-time pixels and textures that can't be
+ * read count as ready): the glue draws a sprite renderer's last frame whose page is loaded while a new
+ * frame's page isn't (ch360_imports.c), asking for it with ch360_plat_texture_need (read as if drawn,
+ * nothing waits for it). */
+int ch360_plat_texture_ready(int id);
+void ch360_plat_texture_need(int id);
+/* Sprites drawn with their last loaded frame so far (the glue's count). */
+extern unsigned ch360_stand_ins;
 /* Texture id's pixels (run-time textures: font atlases), BGRA rows. */
 void ch360_plat_texture_pixels(int id, int width, int height, const unsigned char* bgra);
 /* Mixed audio: frames of 48 kHz stereo, interleaved little-endian floats
@@ -175,6 +185,11 @@ int ch360_pack_find(int pack, const char* key, size_t len, ch360_pack_entry* out
 typedef struct ch360_pack_reader ch360_pack_reader;
 ch360_pack_reader* ch360_pack_reader_new(void);
 int ch360_pack_read_with(ch360_pack_reader* r, const ch360_pack_entry* e, unsigned from, void* dst, unsigned n);
+/* The entry's bytes as stored (e->stored of them: its LZ4 chunks and their table) into dst; 0 on success. */
+int ch360_pack_read_stored(const ch360_pack_entry* e, void* dst);
+/* Bytes from..from+n of the entry out of a copy of its stored bytes (ch360_pack_read_stored) in memory,
+ * the reader's chunk buffer for a chunk taken in part; 0 on success. */
+int ch360_pack_decode_stored(ch360_pack_reader* r, const ch360_pack_entry* e, const unsigned char* stored, unsigned from, void* dst, unsigned n);
 /* Bytes [from, from + n) of the entry into dst: 0, or -1 on a bad read. */
 int ch360_pack_read(const ch360_pack_entry* e, unsigned from, void* dst, unsigned n);
 int ch360_lz4_decode(const unsigned char* src, unsigned srclen, unsigned char* dst, unsigned dstlen);

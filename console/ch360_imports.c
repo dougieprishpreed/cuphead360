@@ -358,7 +358,7 @@ static void remap_prefetch(remap_page* p, int always) {
             if (id < 0) return;
             ch360_plat_texture_file(id, rm_strings + rm_names[t]);
         }
-        ch360_plat_texture_prefetch(rm_plat[t]);
+        ch360_plat_texture_prefetch(rm_plat[t], 0);
     }
 }
 
@@ -638,6 +638,62 @@ static void draw_item_unclipped(ch360_item* it, const U8* tri, U32 ntri, const U
     draw_views[draw_view_count - 1].items++;
 }
 
+/* A sprite renderer's last item drawn with its page loaded, by the item's key (RenderList.Item.Key): drawn
+ * in the new item's place while the new item's page loads, the page asked for as if drawn
+ * (ch360_plat_texture_need). The frame used to wait for the page: a character's next animation on a page of
+ * its own (hit, a boss's attack) held the frame for the drive's 40-180 ms, most of the twentieth and
+ * twenty-first runs' hitches in the levels. A renderer not drawn for STAND_IN_FRAMES has none; one never
+ * drawn still waits (its first page). */
+#define STAND_IN_SLOTS 4096u   /* a power of two */
+#define STAND_IN_FRAMES 60u
+typedef struct stand_in {
+    U32 key, frame;
+    int texture, drawn;   /* the item's texture as given (an atlas page: remapped again when drawn), the page it drew from */
+    U32 npos, nuv, ntri, cap;
+    U8* data;             /* positions, uvs, triangles, as the game gave them */
+} stand_in;
+static stand_in stand_ins[STAND_IN_SLOTS];
+static U32 draw_frame;
+unsigned ch360_stand_ins;
+
+/* The key's slot (linear probing over 16; never emptied, so chains stay whole), or with add the first free
+ * or stale one. */
+static stand_in* stand_in_slot(U32 key, int add) {
+    U32 h = key * 2654435761u, n;
+    stand_in* spare = NULL;
+    for (n = 0; n < 16; n++) {
+        stand_in* s = &stand_ins[(h + n) & (STAND_IN_SLOTS - 1)];
+        if (s->key == key) return s;
+        if (s->key == 0) return add ? (spare ? spare : s) : NULL;
+        if (add && spare == NULL && draw_frame - s->frame > STAND_IN_FRAMES) spare = s;
+    }
+    return add ? (spare ? spare : &stand_ins[h & (STAND_IN_SLOTS - 1)]) : NULL;
+}
+
+static void stand_in_keep(U32 key, int texture, int drawn, const U8* tri, U32 ntri, const U8* pos, U32 npos, const U8* uv, U32 nuv) {
+    stand_in* s = stand_in_slot(key, 1);
+    U32 need = 8 * npos + 8 * nuv + 4 * ntri;
+    if (need > s->cap) {
+        U8* d = (U8*)realloc(s->data, need);
+        if (d == NULL) {
+            s->frame = draw_frame - STAND_IN_FRAMES - 1;   /* stale: not drawn from */
+            return;
+        }
+        s->data = d;
+        s->cap = need;
+    }
+    s->key = key;
+    s->frame = draw_frame;
+    s->texture = texture;
+    s->drawn = drawn;
+    s->npos = npos;
+    s->nuv = nuv;
+    s->ntri = ntri;
+    memcpy(s->data, pos, 8 * npos);
+    if (nuv) memcpy(s->data + 8 * npos, uv, 8 * nuv);
+    memcpy(s->data + 8 * npos + 8 * nuv, tri, 4 * ntri);
+}
+
 void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
     static const U8 white[4] = { 255, 255, 255, 255 };
     const U8 *a, *tri, *pos, *uv = NULL, *col = NULL;
@@ -689,7 +745,30 @@ void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
     for (k = 0; k < 12; k++) it->params[k] = mode == 6 ? (k < 3 ? lef(a + 112 + 4 * k) : 0.0f) : lef(a + 128 + 4 * k);
     it->stencil = le32(a + 124);
     if (!clipped) {
+        U32 key = mode == 0 && affine && srt_mem_ok(args, 45 * 4) ? le32(a + 176) : 0;
+        int given = it->texture;
+        unsigned kept = draw_item_count, from = draw_vert_count;
         draw_item_unclipped(it, tri, ntri, pos, npos, uv, nuv, col, ncol, affine ? m : NULL, blend);
+        if (key != 0 && draw_item_count == kept) {
+            if (ch360_plat_texture_ready(it->texture)) {
+                stand_in_keep(key, given, it->texture, tri, ntri, pos, npos, uv, nuv);
+            } else {
+                stand_in* s = stand_in_slot(key, 0);
+                if (s != NULL && draw_frame - s->frame <= STAND_IN_FRAMES && s->drawn != it->texture && ch360_plat_texture_ready(s->drawn) &&
+                    draw_grow((void**)&draw_verts, &draw_vert_cap, from + s->ntri, sizeof(ch360_vertex))) {
+                    int missing = it->texture;
+                    /* the item taken back, the kept one drawn through the new item's map */
+                    draw_vert_count = from;
+                    draw_views[draw_view_count - 1].items--;
+                    it->texture = s->texture;
+                    it->first = from;
+                    draw_item_unclipped(it, s->data + 8 * s->npos + 8 * s->nuv, s->ntri, s->data, s->npos, s->nuv ? s->data + 8 * s->npos : NULL, s->nuv,
+                                        col, ncol, m, blend);
+                    ch360_plat_texture_need(missing);
+                    ch360_stand_ins++;
+                }
+            }
+        }
         draw_build_ms += draw_now_ms() - t0;
         return;
     } else {
@@ -760,6 +839,7 @@ void i5_ch3608_drawX5Fend(wasmModuleInstance* inst) {
     ch360_plat_draw(&f);
     draw_view_count = draw_item_count = draw_vert_count = 0;
     draw_build_ms = 0;
+    draw_frame++;
 }
 
 /* The draw list ConsoleHost writes itself (CH360_DRAW=managed, a PC check),
@@ -846,7 +926,7 @@ void i5_ch36016_textureX5Fprefetch(wasmModuleInstance* inst, U32 id) {
     if (p < 0) return;
     page = page_of_plat[p] - 1;
     if (page >= 0 && rm_pages[page].count > 0) remap_prefetch(&rm_pages[page], 1);
-    else ch360_plat_texture_prefetch(p);
+    else ch360_plat_texture_prefetch(p, 0);
 }
 
 /* A sprite the game expects to draw soon (near the view, a frame of a clip on screen): the page holding its
@@ -859,13 +939,13 @@ void i5_ch36013_textureX5Fahead(wasmModuleInstance* inst, U32 id, F32 u0, F32 v0
     if (p < 0) return;
     page = page_of_plat[p] - 1;
     if (page < 0 || rm_pages[page].count == 0) {
-        ch360_plat_texture_prefetch(p);
+        ch360_plat_texture_prefetch(p, 1);
         return;
     }
     bi = remap_find(&rm_pages[page], u0, v0, u1, v1);
     if (bi >= 0) {
         int t = remap_target_id(&rm_pages[page], &rm_boxes[bi]);
-        if (t >= 0) ch360_plat_texture_prefetch(t);
+        if (t >= 0) ch360_plat_texture_prefetch(t, 1);
     }
 }
 

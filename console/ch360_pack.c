@@ -251,6 +251,49 @@ static int load_table(ch360_pack_reader* r, const ch360_pack_entry* e) {
     return 0;
 }
 
+int ch360_pack_read_stored(const ch360_pack_entry* e, void* dst) {
+    if (e->file < 0 || e->file >= file_count) return -1;
+    return read_at(files[e->file].f, e->offset, dst, e->stored);
+}
+
+/* A copy of the stored bytes in memory: textures kept that way decode again without the drive (the
+ * console's USB reads ran at ~11 MB/s, most of a page's load). */
+int ch360_pack_decode_stored(ch360_pack_reader* r, const ch360_pack_entry* e, const unsigned char* stored, unsigned from, void* dst_v, unsigned n) {
+    unsigned char* dst = (unsigned char*)dst_v;
+    unsigned count, k, last, at;
+    if (from > e->size || n > e->size - from) return -1;
+    if (n == 0) return 0;
+    if (e->stored == e->size) {
+        memcpy(dst, stored + from, n);
+        return 0;
+    }
+    if (r->chunk_buf == NULL) return -1;   /* made by ch360_pack_reader_new */
+    count = rd32(stored);
+    if (count == 0 || count != (e->size + PACK_CHUNK - 1) / PACK_CHUNK || 4 + 4 * count > e->stored) return -1;
+    at = 4 + 4 * count;
+    k = from / PACK_CHUNK;
+    last = (from + n - 1) / PACK_CHUNK;
+    {
+        unsigned i;
+        for (i = 0; i < k; i++) at += rd32(stored + 4 + 4 * i);
+    }
+    for (; k <= last; k++) {
+        unsigned len_in = rd32(stored + 4 + 4 * k);
+        unsigned c0 = k * PACK_CHUNK, len = e->size - c0 < PACK_CHUNK ? e->size - c0 : PACK_CHUNK;
+        unsigned lo = from > c0 ? from - c0 : 0, hi = from + n - c0 < len ? from + n - c0 : len;
+        if (at + len_in > e->stored) return -1;
+        if (lo == 0 && hi == len) {
+            if (ch360_lz4_decode(stored + at, len_in, dst + (c0 - from), len) != (int)len) return -1;
+        } else {
+            r->chunk_file = -1;
+            if (ch360_lz4_decode(stored + at, len_in, r->chunk_buf, len) != (int)len) return -1;
+            memcpy(dst + (c0 + lo - from), r->chunk_buf + lo, hi - lo);
+        }
+        at += len_in;
+    }
+    return 0;
+}
+
 int ch360_pack_read(const ch360_pack_entry* e, unsigned from, void* dst_v, unsigned n) {
     return ch360_pack_read_with(&default_reader, e, from, dst_v, n);
 }

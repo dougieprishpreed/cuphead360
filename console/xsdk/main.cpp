@@ -193,6 +193,10 @@ const unsigned MEMORY_FLOOR_MB = 24;
 // never from what the screen showed lately; a sprite page is 4 MB at most (tools/cluster_console.py).
 const unsigned AHEAD_AGE = 180;
 const size_t PAGE_MAX = 4u << 20;
+// Pages' stored bytes (LZ4, about a quarter of their size) kept in memory: a page evicted and drawn again,
+// or read ahead, decodes without the drive (USB reads ran at ~11 MB/s: 40-180 ms a page, the waits behind
+// most hitches in the levels of the twentieth and twenty-first runs; a decode is a few ms a MB).
+const size_t STORED_BUDGET = 32u << 20;
 
 
 enum { MODE_SPRITE, MODE_SCREEN, MODE_MULTIPLY, MODE_OVERLAY, MODE_SDF, MODE_COLOROVERLAY, MODE_LIGHTRAY,
@@ -271,8 +275,11 @@ struct LoadJob {
     int id;
     std::string key;
     ch360_pack_entry e;
-    unsigned char* data;   // the texture's bytes after the 28-byte header
+    unsigned char* data;   // the texture's bytes after the 28-byte header (NULL: its stored bytes only)
+    unsigned char* stored; // the entry's stored bytes: the texture's own copy, or read into here (fresh)
+    bool fresh;            // stored is this job's to read (and the texture's to keep after)
     unsigned n, fmt, w, h;
+    size_t bytes;          // the job's buffers
     int state;             // 0 read, 1 bad header, 2 bad read
     bool pre;              // a prefetch (nothing drew it yet)
     double queued, read_ms;
@@ -303,13 +310,19 @@ void* texture_loader(void*) {
         double t0 = now_ms();
         unsigned char head[28];
         j->state = 1;
-        if (ch360_pack_read_with(g_load_reader, &j->e, 0, head, sizeof(head)) == 0 && ch360_u32(head) == 0x31585443u) {
-            j->fmt = ch360_u32(head + 4);
-            j->w = ch360_u32(head + 8);
-            j->h = ch360_u32(head + 12);
-            unsigned n = ch360_u32(head + 24);
-            if (j->w && j->h && j->w <= 8192 && j->h <= 8192 && n == j->n)
-                j->state = ch360_pack_read_with(g_load_reader, &j->e, 28, j->data, j->n) == 0 ? 0 : 2;
+        if (j->stored && j->fresh && ch360_pack_read_stored(&j->e, j->stored) != 0) j->state = 2;
+        else if (j->stored && !j->data) j->state = 0;   // its stored bytes only
+        else if (j->stored ? ch360_pack_decode_stored(g_load_reader, &j->e, j->stored, 0, head, sizeof(head)) == 0
+                           : ch360_pack_read_with(g_load_reader, &j->e, 0, head, sizeof(head)) == 0) {
+            if (ch360_u32(head) == 0x31585443u) {
+                j->fmt = ch360_u32(head + 4);
+                j->w = ch360_u32(head + 8);
+                j->h = ch360_u32(head + 12);
+                unsigned n = ch360_u32(head + 24);
+                if (j->w && j->h && j->w <= 8192 && j->h <= 8192 && n == j->n)
+                    j->state = (j->stored ? ch360_pack_decode_stored(g_load_reader, &j->e, j->stored, 28, j->data, j->n)
+                                          : ch360_pack_read_with(g_load_reader, &j->e, 28, j->data, j->n)) == 0 ? 0 : 2;
+            }
         }
         j->read_ms = now_ms() - t0;
         pthread_mutex_lock(&g_load_lock);
@@ -338,9 +351,12 @@ struct Tex {
     bool prefetching;    // that job is a prefetch
     bool pre_wanted;     // waiting in the prefetch backlog
     bool unused_pre;     // prefetched and not drawn yet: the first to make room
+    bool soft_wanted;    // waiting in the guessed read-ahead's backlog
+    unsigned char* stored;   // the pack entry's stored bytes, kept (STORED_BUDGET)
+    unsigned stored_n, stored_used;
     Tex() : image(VK_NULL_HANDLE), mem(VK_NULL_HANDLE), view(VK_NULL_HANDLE), set(VK_NULL_HANDLE), w(0), h(0),
             format(VK_FORMAT_UNDEFINED), bytes(0), last_used(0), retry_at(0), failed(false), pinned(false), loading(false), prefetching(false),
-            pre_wanted(false), unused_pre(false) {}
+            pre_wanted(false), unused_pre(false), soft_wanted(false), stored(NULL), stored_n(0), stored_used(0) {}
 };
 
 struct Garbage {
@@ -381,7 +397,12 @@ public:
     void texture_pixels(int id, int w, int h, const unsigned char* bgra);
     size_t texture_bytes() const { return texture_bytes_; }
     // Frees textures not drawn lately for the player's memory (the commit wrap).
-    size_t make_room(size_t bytes) { return release_unused(bytes); }
+    size_t stored_bytes() const { return stored_bytes_; }
+    // The player's memory grows: textures not drawn lately go, then kept stored bytes.
+    size_t make_room(size_t bytes) {
+        size_t freed = release_unused(bytes);
+        return freed < bytes ? freed + release_stored(bytes - freed) : freed;
+    }
     double gpu_wait_ms, present_ms;
     double host_ms_[8];
     HostStats stats_;
@@ -417,9 +438,13 @@ private:
     void load_packed(int id, Tex& t);
     void take_loads(bool all = false);
     void finish_waits();
-    bool queue_load(int id, Tex& t, bool pre);
+    bool queue_load(int id, Tex& t, bool pre, bool stored_only = false);
     void feed_prefetch();
+    size_t release_stored(size_t want);
+    void forget_stored(Tex& t);
     std::deque<int> pre_backlog_;   // prefetches asked for, queued as the loader and memory have room
+    std::deque<int> soft_backlog_;  // guessed read-ahead: stored bytes only, while there is room
+    size_t stored_bytes_;           // the textures' kept stored bytes
     std::vector<LoadJob*> taken_;   // done jobs past this frame's upload budget
     std::vector<int> waiting_;      // textures this frame's items draw that the loader still has
     unsigned load_jobs_;            // jobs made and not yet taken back
@@ -427,7 +452,9 @@ private:
     double wait_ms_;
 public:
     void start_loader();
-    void prefetch(int id);
+    void prefetch(int id, bool wanted);
+    bool ready(int id);
+    void need(int id);
 private:
     void evict();
     size_t release_unused(size_t want);
@@ -1147,7 +1174,8 @@ bool Renderer::make_image(Tex& t, VkFormat format, int w, int h, VkImageUsageFla
     memory_mb(&free_mb, &total_mb);
     unsigned need_mb = MEMORY_FLOOR_MB + (unsigned)(size >> 20) + 1;
     if (free_mb < need_mb) {
-        release_unused((size_t)(need_mb - free_mb) << 20);
+        size_t want = (size_t)(need_mb - free_mb) << 20, freed = release_unused(want);
+        if (freed < want) release_stored(want - freed);
         memory_mb(&free_mb, &total_mb);
     }
     VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -1487,6 +1515,7 @@ void Renderer::free_targets() {
 void Renderer::texture_file(int id, const char* key) {
     Tex* t = tex(id);
     if (t) {
+        if (t->key != key && !t->loading) forget_stored(*t);
         t->key = key;
         t->failed = false;
         // The film grain shows its 64 frames in turn, each every two seconds: evicted as the least
@@ -1576,6 +1605,7 @@ void Renderer::load(int id, Tex& t) {
 void Renderer::start_loader() {
     load_jobs_ = 0;
     load_bytes_ = pre_bytes_ = 0;
+    stored_bytes_ = 0;
     wait_ms_ = 0;
     if (ch360_ctex_pack < 0) return;
     g_load_reader = ch360_pack_reader_new();
@@ -1601,7 +1631,23 @@ void Renderer::take_loads(bool all) {
         LoadJob* j = taken_[k];
         used += j->n;
         Tex* t = tex(j->id);
-        if (t && t->key == j->key && t->loading && !t->image) {
+        bool ours = t && t->key == j->key && t->loading && !t->image;
+        if (j->fresh) {
+            // The stored bytes read: the texture's to keep (if still its key and the read was good).
+            if (ours && j->state == 0 && !t->stored) {
+                t->stored = j->stored;
+                t->stored_n = j->e.stored;
+                t->stored_used = frame_no_;
+            } else {
+                free(j->stored);
+                stored_bytes_ -= j->e.stored;
+            }
+        }
+        if (ours && !j->data) {   // stored bytes only
+            t->loading = false;
+            t->prefetching = false;
+            if (j->state != 0) t->retry_at = frame_no_ + 600;
+        } else if (ours) {
             t->loading = false;
             t->prefetching = false;
             if (j->state != 0) {
@@ -1628,13 +1674,14 @@ void Renderer::take_loads(bool all) {
                     record_copy(*t, buf, off);
                     t->unused_pre = j->pre;
                     g_texture_bytes = texture_bytes_;
-                    if (loads_logged_ < 400) {
+                    if (loads_logged_ < 1500) {
                         ++loads_logged_;
                         unsigned free_mb, total_mb;
                         memory_mb(&free_mb, &total_mb);
-                        logf("texture %s: format %u, %ux%u, %u KB (%u KB stored), read and decode %u ms on the loader, %s %u ms after the ask; "
+                        logf("texture %s: format %u, %ux%u, %u KB (%u KB stored), %s %u ms on the loader, %s %u ms after the ask; "
                              "%u MB free, textures %u MB", j->key.c_str(), j->fmt, j->w, j->h, j->n >> 10, j->e.stored >> 10,
-                             (unsigned)j->read_ms, j->pre ? "prefetched, ready" : "ready", (unsigned)(now_ms() - j->queued), free_mb,
+                             j->stored && !j->fresh ? "decoded from memory in" : "read and decode", (unsigned)j->read_ms,
+                             j->pre ? "prefetched, ready" : "ready", (unsigned)(now_ms() - j->queued), free_mb,
                              (unsigned)(texture_bytes_ >> 20));
                     }
                 }
@@ -1644,8 +1691,8 @@ void Renderer::take_loads(bool all) {
             t->loading = false;
             t->prefetching = false;
         }
-        if (j->pre) pre_bytes_ -= j->n;
-        load_bytes_ -= j->n;
+        if (j->pre) pre_bytes_ -= j->bytes;
+        load_bytes_ -= j->bytes;
         --load_jobs_;
         free(j->data);
         delete j;
@@ -1681,9 +1728,20 @@ void Renderer::finish_waits() {
 // uploads its textures: the logo's 48 MB of pages were read one by one as its first frames reached them),
 // the other animations' pages of an atlas page just drawn. Read ahead, behind every texture a frame waits
 // for, while memory has room: the backlog feeds the loader as it does.
-void Renderer::prefetch(int id) {
+void Renderer::prefetch(int id, bool wanted) {
     if (!g_loader || ch360_ctex_pack < 0) return;
     Tex* t = tex(id);
+    if (!wanted) {
+        // A guess (an atlas the game loaded, a drawn page's siblings): its stored bytes, while there is room,
+        // never making room from what was drawn (the twenty-first run's Forest Follies began with 60 MB of the
+        // maps' atlases read ahead in full, the level's own pages evicted for them).
+        if (!t || t->image || t->stored || t->loading || t->failed || t->key.empty() || t->soft_wanted || t->pre_wanted) return;
+        if (soft_backlog_.size() >= 2048) return;
+        t->soft_wanted = true;
+        soft_backlog_.push_back(id);
+        feed_prefetch();
+        return;
+    }
     if (t && t->image && frame_no_ - t->last_used > 3) {
         // Loaded and wanted soon (a sprite near the camera, the clip it plays): kept as if drawn lately,
         // so making room takes older textures first (but not as drawn: the GPU isn't using it).
@@ -1695,6 +1753,23 @@ void Renderer::prefetch(int id) {
     t->pre_wanted = true;
     pre_backlog_.push_back(id);
     feed_prefetch();
+}
+
+// Drawable now: loaded, or nothing to load (render textures, run-time pixels, textures that can't be read).
+bool Renderer::ready(int id) {
+    if (id < 0 || id >= CH360_RT_BASE) return true;
+    Tex* t = tex(id);
+    if (!t || t->image || t->key.empty() || t->failed) return true;
+    return false;
+}
+
+// A page a sprite will draw as soon as it's loaded (the glue drew its last loaded frame meanwhile): read as
+// if drawn (the drawn ring, room made as for a drawn one), without the frame waiting for it.
+void Renderer::need(int id) {
+    if (!g_loader || id < 0 || id >= CH360_RT_BASE) return;
+    Tex* t = tex(id);
+    if (!t || t->image || t->failed || t->key.empty() || frame_no_ < t->retry_at) return;
+    if (!t->loading || t->prefetching) queue_load(id, *t, false);
 }
 
 void Renderer::feed_prefetch() {
@@ -1724,12 +1799,47 @@ void Renderer::feed_prefetch() {
         t->pre_wanted = false;
         pre_backlog_.pop_front();
     }
+    while (!soft_backlog_.empty()) {
+        Tex* t = tex(soft_backlog_.front());
+        if (!t || t->image || t->stored || t->loading || t->failed || t->key.empty() || frame_no_ < t->retry_at) {
+            if (t) t->soft_wanted = false;
+            soft_backlog_.pop_front();
+            continue;
+        }
+        if (pre_bytes_ > (4u << 20) || stored_bytes_ + load_bytes_ > STORED_BUDGET) return;
+        if (free_mb < MEMORY_FLOOR_MB + 32 + (unsigned)(load_bytes_ >> 20)) return;
+        if (!queue_load(soft_backlog_.front(), *t, true, true) && !t->failed) return;
+        t->soft_wanted = false;
+        soft_backlog_.pop_front();
+    }
+}
+
+// Kept stored bytes go, least recently used first (none a job is reading), until want bytes are freed.
+size_t Renderer::release_stored(size_t want) {
+    std::vector<std::pair<unsigned, size_t> > order;
+    for (size_t i = 0; i < textures_.size(); ++i)
+        if (textures_[i].stored && !textures_[i].loading) order.push_back(std::make_pair(textures_[i].stored_used, i));
+    std::sort(order.begin(), order.end());
+    size_t freed = 0;
+    for (size_t k = 0; k < order.size() && freed < want; ++k) {
+        freed += textures_[order[k].second].stored_n;
+        forget_stored(textures_[order[k].second]);
+    }
+    return freed;
+}
+
+void Renderer::forget_stored(Tex& t) {
+    if (!t.stored) return;
+    free(t.stored);
+    stored_bytes_ -= t.stored_n;
+    t.stored = NULL;
+    t.stored_n = 0;
 }
 
 // A job for the loader thread: the drawn ring, or the prefetch ring (read when nothing drawn waits). A drawn
 // texture whose prefetch is still queued moves to the drawn ring. False when the in-flight cap (8 MB of
 // buffers) keeps it back, or it can't be read.
-bool Renderer::queue_load(int id, Tex& t, bool pre) {
+bool Renderer::queue_load(int id, Tex& t, bool pre, bool stored_only) {
     if (t.loading && t.prefetching && !pre) {
         pthread_mutex_lock(&g_load_lock);
         for (unsigned k = g_pre_in_head; k != g_pre_in_tail; ++k) {
@@ -1748,6 +1858,7 @@ bool Renderer::queue_load(int id, Tex& t, bool pre) {
         return true;
     }
     if (t.loading) return true;
+    if (stored_only && t.stored) return true;
     if (load_jobs_ >= LOAD_RING - 1 || load_bytes_ > (8u << 20)) return false;
     // The prefetch ring also holds the empty slots of prefetches moved to the drawn ring until the loader
     // passes them (the loader moves its head; a stale read only holds a prefetch back a frame).
@@ -1759,8 +1870,19 @@ bool Renderer::queue_load(int id, Tex& t, bool pre) {
         return false;
     }
     unsigned n = pe.size - 28;
-    unsigned char* data = (unsigned char*)malloc(n ? n : 1);
-    if (!data) {
+    // The stored bytes: the texture's kept copy, or read into a buffer kept after (room made from the
+    // least recently used); without it, read from the pack as before.
+    unsigned char* stored = t.stored;
+    bool fresh = false;
+    if (!stored && pe.stored <= PAGE_MAX + (1u << 20)) {
+        if (stored_bytes_ + pe.stored > STORED_BUDGET) release_stored(stored_bytes_ + pe.stored - STORED_BUDGET);
+        if (stored_bytes_ + pe.stored <= STORED_BUDGET && (stored = (unsigned char*)malloc(pe.stored)) != NULL) fresh = true;
+    }
+    if (stored_only && !stored) return false;
+    if (t.stored) t.stored_used = frame_no_;
+    unsigned char* data = stored_only ? NULL : (unsigned char*)malloc(n ? n : 1);
+    if (!stored_only && !data) {
+        if (fresh) free(stored);
         t.retry_at = frame_no_ + 120;
         return false;
     }
@@ -1769,15 +1891,19 @@ bool Renderer::queue_load(int id, Tex& t, bool pre) {
     j->key = t.key;
     j->e = pe;
     j->data = data;
-    j->n = n;
+    j->stored = stored;
+    j->fresh = fresh;
+    j->n = stored_only ? 0 : n;
+    j->bytes = (stored_only ? 0 : n) + (fresh ? pe.stored : 0);
     j->fmt = j->w = j->h = 0;
     j->state = 1;
     j->pre = pre;
     j->queued = now_ms();
     j->read_ms = 0;
     ++load_jobs_;
-    load_bytes_ += n;
-    if (pre) pre_bytes_ += n;
+    load_bytes_ += j->bytes;
+    if (pre) pre_bytes_ += j->bytes;
+    if (fresh) stored_bytes_ += pe.stored;   // counted from now: its buffer is made
     t.loading = true;
     t.prefetching = pre;
     pthread_mutex_lock(&g_load_lock);
@@ -2369,7 +2495,9 @@ Renderer* g_renderer = NULL;
 // LoadingScreen) are kept, and while the game thread is held up past REPLAY_AFTER_MS a thread on
 // hardware thread 3 draws them again until the game draws, the kept frame nearest where the
 // hourglass's animation would be by then (the game sends where it is in its cycle with each frame;
-// the twentieth run's guess at the cycle from repeated frames looped a few frames too fast): a scene's activation
+// the twentieth run's guess at the cycle from repeated frames looped a few frames too fast). The frames
+// are kept one per slot of the cycle, from every cycle the screen has shown: the last 96 frames held
+// 12-67 of a 2.2 s cycle, so a long hold-up drew its first part over and over (the twenty-first run): a scene's activation
 // (its Awakes and Starts) and the full collections of a load held the hourglass still for 0.7-2.2 s
 // (the eighteenth and nineteenth runs). The renderer is used by one thread at a time (g_gpu_lock).
 pthread_mutex_t g_gpu_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -2377,16 +2505,22 @@ struct GpuLock {
     GpuLock() { pthread_mutex_lock(&g_gpu_lock); }
     ~GpuLock() { pthread_mutex_unlock(&g_gpu_lock); }
 };
-const unsigned RECORD = 96;            // frames kept (the hourglass's cycle is shorter)
+const unsigned RECORD = 64;            // slots over the hourglass's cycle (~35 ms each for its 2.2 s)
 const double REPLAY_AFTER_MS = 50;
 struct Recorded {
+    bool kept;
     unsigned phase;                    // where the hourglass was in its cycle, ms
     std::vector<ch360_view> views;
     std::vector<ch360_item> items;
     std::vector<ch360_vertex> verts;
 };
 Recorded g_rec[RECORD];
-unsigned g_rec_count = 0, g_rec_head = 0;   // frames kept, the next slot
+unsigned g_rec_count = 0, g_rec_head = 0;   // slots holding a frame, the newest frame's slot
+
+void forget_loading() {
+    for (unsigned k = 0; k < RECORD; ++k) g_rec[k].kept = false;
+    g_rec_count = 0;
+}
 bool g_loading_screen = false;               // the last frame the game drew was the loading screen
 unsigned g_rec_period = 0;                   // the hourglass's cycle, ms (0: not known, the newest frame is drawn)
 double g_last_draw_ms = 0;
@@ -2394,30 +2528,33 @@ double g_last_draw_ms = 0;
 // After the game's draw (g_gpu_lock held).
 void record_loading(const ch360_frame* f) {
     if (!f->loading || f->item_count > 256 || f->vertex_count > 16384) {
-        g_rec_count = 0;
+        if (g_rec_count) forget_loading();
         g_loading_screen = false;
         return;
     }
     unsigned period = (f->loading >> 16) & 0x7FFF;
-    if (period != g_rec_period) g_rec_count = 0;
+    if (period != g_rec_period) forget_loading();
     g_rec_period = period;
-    Recorded& r = g_rec[g_rec_head];
-    r.phase = period ? (f->loading & 0xFFFF) % period : 0;
+    unsigned phase = period ? (f->loading & 0xFFFF) % period : 0;
+    unsigned slot = period ? (unsigned)((unsigned long long)phase * RECORD / period) : 0;
+    Recorded& r = g_rec[slot];
+    if (!r.kept) ++g_rec_count;
+    r.kept = true;
+    r.phase = phase;
     r.views.assign(f->views, f->views + f->view_count);
     r.items.assign(f->items, f->items + f->item_count);
     r.verts.assign(f->vertices, f->vertices + f->vertex_count);
-    g_rec_head = (g_rec_head + 1) % RECORD;
-    if (g_rec_count < RECORD) ++g_rec_count;
+    g_rec_head = slot;
     g_loading_screen = true;
 }
 
 // The kept frame to draw when the hourglass is at phase ms of its cycle: the newest of those
 // nearest before it (the newest frame if the cycle isn't known).
 unsigned replay_pick(unsigned phase) {
-    unsigned newest = (g_rec_head + RECORD - 1) % RECORD, best = newest, gap = ~0u;
-    if (!g_rec_period) return newest;
-    for (unsigned k = 0; k < g_rec_count; ++k) {
-        unsigned i = (newest + RECORD - k) % RECORD;
+    unsigned best = g_rec_head, gap = ~0u;
+    if (!g_rec_period) return g_rec_head;
+    for (unsigned i = 0; i < RECORD; ++i) {
+        if (!g_rec[i].kept) continue;
         unsigned d = (phase + g_rec_period - g_rec[i].phase) % g_rec_period;
         if (d < gap) { gap = d; best = i; }
     }
@@ -2437,7 +2574,7 @@ void* replay_thread(void*) {
         bool stalled = g_renderer && g_loading_screen && g_rec_count >= 8 && t - g_last_draw_ms >= REPLAY_AFTER_MS;
         if (stalled) {
             if (!replaying) {
-                from_phase = g_rec[(g_rec_head + RECORD - 1) % RECORD].phase;
+                from_phase = g_rec[g_rec_head].phase;
                 drawn = 0;
                 last = ~0u;
                 stall_from = g_last_draw_ms;
@@ -2464,7 +2601,7 @@ void* replay_thread(void*) {
             ++drawn;
         } else if (replaying) {
             replaying = false;
-            logf("HOST loading screen: %u frames drawn again over a %u ms hold-up (a cycle of %u ms, %u frames kept)", drawn,
+            logf("HOST loading screen: %u frames drawn again over a %u ms hold-up (a cycle of %u ms, %u of 64 slots kept)", drawn,
                  (unsigned)(g_last_draw_ms - stall_from), g_rec_period, g_rec_count);
         }
         pthread_mutex_unlock(&g_gpu_lock);
@@ -2582,10 +2719,10 @@ extern "C" int ch360_plat_frame_begin(void) {
         memory_mb(&f, &tot);
         // Times in tenths of a millisecond (integers only in the log).
         logf("frame %u: %u ms/frame x10 (worst %u, %u over 17.5); gpu wait %u, present %u; memory %u MB free of %u, player %u MB, "
-             "textures %u MB (%u uploads, %u evicted); audio underruns %u",
+             "textures %u MB (%u uploads, %u evicted), stored %u MB; %u sprites drawn with their last loaded frame; audio underruns %u",
              g_frames, (unsigned)(g_logic_ms / 60), (unsigned)(g_worst_ms * 10), g_slow, (unsigned)(g_renderer->gpu_wait_ms / 60),
              (unsigned)(g_renderer->present_ms / 60), f, tot, ch360_memory_kb() / 1024, (unsigned)(g_renderer->texture_bytes() >> 20),
-             g_renderer->uploads, g_renderer->evictions, g_audio_underruns);
+             g_renderer->uploads, g_renderer->evictions, (unsigned)(g_renderer->stored_bytes() >> 20), ch360_stand_ins, g_audio_underruns);
         g_logic_ms = g_worst_ms = 0;
         g_slow = 0;
         g_renderer->gpu_wait_ms = g_renderer->present_ms = 0;
@@ -2643,9 +2780,17 @@ extern "C" void ch360_plat_texture_file(int id, const char* key) {
     GpuLock lock;
     g_renderer->texture_file(id, key);
 }
-extern "C" void ch360_plat_texture_prefetch(int id) {
+extern "C" int ch360_plat_texture_ready(int id) {
     GpuLock lock;
-    g_renderer->prefetch(id);
+    return g_renderer->ready(id) ? 1 : 0;
+}
+extern "C" void ch360_plat_texture_need(int id) {
+    GpuLock lock;
+    g_renderer->need(id);
+}
+extern "C" void ch360_plat_texture_prefetch(int id, int wanted) {
+    GpuLock lock;
+    g_renderer->prefetch(id, wanted != 0);
 }
 
 extern "C" void ch360_plat_texture_pixels(int id, int width, int height, const unsigned char* bgra) {
