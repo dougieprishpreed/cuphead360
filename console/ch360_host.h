@@ -111,7 +111,8 @@ typedef struct ch360_frame {
     const ch360_vertex* vertices;
     unsigned vertex_count;
     double build_ms; /* the glue's time writing it */
-    int loading;     /* the game's loading screen, its hourglass faded in (the host may draw it again while the game is held up) */
+    unsigned loading; /* the game's loading screen, its hourglass faded in (the host may draw it again while the game is held up):
+                         0 if not, else 0x80000000 | the hourglass's cycle in ms << 16 | where it is in its cycle, ms */
 } ch360_frame;
 
 /* The frame's draw list (valid during the call). */

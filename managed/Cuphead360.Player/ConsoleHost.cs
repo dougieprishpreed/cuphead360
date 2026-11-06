@@ -44,8 +44,10 @@ namespace Cuphead360.Player
         static extern void TexturePixels(int id, int width, int height, byte* bgra);
         [DllImport("ch360", EntryPoint = "texture_prefetch"), WasmImportLinkage]
         static extern void TexturePrefetch(int id);
+        [DllImport("ch360", EntryPoint = "texture_ahead"), WasmImportLinkage]
+        static extern void TextureAhead(int id, float u0, float v0, float u1, float v1);
         [DllImport("ch360", EntryPoint = "loading_screen"), WasmImportLinkage]
-        static extern void LoadingScreenFlag(int on);
+        static extern void LoadingScreenFlag(uint state);
         [DllImport("ch360", EntryPoint = "audio"), WasmImportLinkage]
         static extern void AudioOut(float* samples, int frames);
         [DllImport("ch360", EntryPoint = "ogg_open"), WasmImportLinkage]
@@ -400,6 +402,13 @@ namespace Cuphead360.Player
             Console.WriteLine($"CONSOLE audio mixed by the {(Audio.HostMixer != null ? "host" : "engine")}");
             // An atlas the game loads: its pages read ahead (the boot's preload of the title's atlases readies the logo).
             Atlases.Prefetch = src => TexturePrefetch(FileTextureId(src));
+            // Sprites near the view and the clips those on screen play: their pages read ahead (converted ones only).
+            RenderList.ReadAhead = (t, box) =>
+            {
+                if (RuntimePixels.Get(t) != null) return;
+                int id = TextureId(t);
+                if (id >= 0) TextureAhead(id, box.x, box.y, box.z, box.w);
+            };
             Console.WriteLine("CONSOLE host loop");
             int n = 0;
             long last = System.Diagnostics.Stopwatch.GetTimestamp(), hz = System.Diagnostics.Stopwatch.Frequency;
@@ -546,9 +555,11 @@ namespace Cuphead360.Player
         /// <summary>
         /// The loading screen with the hourglass faded in on a black screen (SceneLoader loading, its fader
         /// and icon opaque): the host keeps these frames and draws them again while the game is held up
-        /// (an activation's Awakes and Starts, a full collection), so the hourglass keeps turning.
+        /// (an activation's Awakes and Starts, a full collection), so the hourglass keeps turning. 0 if not;
+        /// else 0x80000000 | the hourglass animation's cycle in ms &lt;&lt; 16 | where it is in it, ms (the host
+        /// draws the kept frame nearest where the animation would be; 0 for the cycle if it isn't known).
         /// </summary>
-        static bool LoadingScreen()
+        static uint LoadingScreen()
         {
             if (!loaderLooked)
             {
@@ -561,18 +572,32 @@ namespace Cuphead360.Player
                 loaderIcon = t?.GetField("icon", any);
                 loaderFader = t?.GetField("fader", any);
             }
-            if (loaderLoading == null || loaderInstance == null || loaderIcon == null || loaderFader == null) return false;
-            if (!(loaderLoading.GetValue(null) is bool loading) || !loading) return false;
+            if (loaderLoading == null || loaderInstance == null || loaderIcon == null || loaderFader == null) return 0;
+            if (!(loaderLoading.GetValue(null) is bool loading) || !loading) return 0;
             var inst = loaderInstance.GetValue(null) as UnityEngine.Object;
-            if (inst == null) return false;
+            if (inst == null) return 0;
             var icon = loaderIcon.GetValue(inst) as UnityEngine.UI.Graphic;
             var fader = loaderFader.GetValue(inst) as UnityEngine.UI.Graphic;
-            return icon != null && fader != null && icon.isActiveAndEnabled && icon.color.a >= 0.99f && fader.color.a >= 0.99f;
+            if (icon == null || fader == null || !icon.isActiveAndEnabled || icon.color.a < 0.99f || fader.color.a < 0.99f) return 0;
+            uint state = 0x80000000u;
+            var animator = icon.GetComponent<Animator>();
+            if (animator != null && animator.isActiveAndEnabled)
+            {
+                var info = animator.GetCurrentAnimatorStateInfo(0);
+                float speed = Math.Abs(info.speed * info.speedMultiplier);
+                float cycle = speed > 0f ? info.length / speed * 1000f : 0f;
+                if (cycle >= 1f && cycle < 32768f)
+                {
+                    float at = info.normalizedTime - (float)Math.Floor(info.normalizedTime);
+                    state |= (uint)cycle << 16 | (uint)(at * cycle) & 0xFFFF;
+                }
+            }
+            return state;
         }
 
         static void Draw(List<RenderList.View> views)
         {
-            LoadingScreenFlag(LoadingScreen() ? 1 : 0);
+            LoadingScreenFlag(LoadingScreen());
             if (managedDraw) { DrawManaged(views); return; }
             float* vh = stackalloc float[13];
             int* a = stackalloc int[ItemSlots];

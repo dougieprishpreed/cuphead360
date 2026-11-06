@@ -89,6 +89,8 @@ namespace Cuphead360.Engine
         public virtual void CopyFrom(NComponent src, Dictionary<NObject, NObject> map) { }
         public virtual void Added() { }
         public virtual void Activated(bool on) { }
+        /// <summary>The component itself turned on or off (Behaviour.enabled) on an active object; Activated by default.</summary>
+        public virtual void Toggled(bool on) => Activated(on);
         public virtual void Removed() { }
     }
 

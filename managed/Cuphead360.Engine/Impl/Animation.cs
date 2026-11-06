@@ -24,6 +24,8 @@ namespace Cuphead360.Engine
         public Binding[] Bindings = new Binding[0];
         public UObject[] PPtrs = new UObject[0];
         public Event[] Events = new Event[0];
+        /// <summary>The frame its sprites' textures were last asked to be read ahead (RenderList.ReadAhead).</summary>
+        public int AheadFrame = int.MinValue / 2;
         // Streamed: per curve, key times and cubic coefficients.
         float[][] keyTimes = new float[0][];
         float[][] keyCoeffs = new float[0][];
@@ -558,6 +560,21 @@ namespace Cuphead360.Engine
                 Log.Line($"TRACE animator {GameObject.Name} off frame {Clock.FrameCount}, sprite {FirstSprite(GameObject.Transform)?.Sprite?.name ?? "-"}");
         }
 
+        /// <summary>
+        /// The component turned off and on again (Animator.enabled) is a pause: Unity's animator keeps its
+        /// states, parameters and a Play asked for before; only its object's activation starts it over. The
+        /// super's hit pause (DamageReceiver.pauseAnim_cr) turned a Hilda Berg enemy's animator off in the
+        /// frame its death played Enemy_Explode, and the rebind on enable dropped that: the enemy idled,
+        /// dead and out of reach, waiting for the explosion to end.
+        /// </summary>
+        public override void Toggled(bool on)
+        {
+            if (on && !Initialized) { Activated(true); return; }
+            Animators.Register(this);
+            if (!on && TraceName != null && GameObject != null && GameObject.Name.Contains(TraceName))
+                Log.Line($"TRACE animator {GameObject.Name} disabled frame {Clock.FrameCount}, sprite {FirstSprite(GameObject.Transform)?.Sprite?.name ?? "-"}");
+        }
+
         static NSpriteRenderer FirstSprite(NTransform t)
         {
             foreach (var c in t.GameObject.Components) if (c is NSpriteRenderer sr) return sr;
@@ -976,6 +993,7 @@ namespace Cuphead360.Engine
             public UObject DefaultObj;
             public float[] Value = new float[4];
             public UObject Obj;
+            public ClipData Clip;   // the clip the object came from (a sprite's: the render list reads its pages ahead)
             public bool Written;
             public string Unbound;
             // Generic property access (script fields, RectTransform, CanvasGroup, ...).
@@ -1253,7 +1271,7 @@ namespace Cuphead360.Engine
                 if (b.IsPPtr)
                 {
                     int idx = (int)Math.Floor(clip.Sample(b.FirstCurve, t) + 0.0001f);
-                    if (!tg.Written || weight >= 0.5f) tg.Obj = idx >= 0 && idx < clip.PPtrs.Length ? clip.PPtrs[idx] : null;
+                    if (!tg.Written || weight >= 0.5f) { tg.Obj = idx >= 0 && idx < clip.PPtrs.Length ? clip.PPtrs[idx] : null; tg.Clip = clip; }
                 }
                 else
                 {
@@ -1336,7 +1354,7 @@ namespace Cuphead360.Engine
                 case 212:
                     {
                         var sr = (NSpriteRenderer)tg.Component;
-                        if (b.IsPPtr) { if (tg.Obj is Sprite s || tg.Obj == null) { sr.Sprite = tg.Obj as Sprite; if (sr.Sprite != null) Atlases.Touch(sr.Sprite); } }
+                        if (b.IsPPtr) { if (tg.Obj is Sprite s || tg.Obj == null) { sr.Sprite = tg.Obj as Sprite; sr.Clip = tg.Clip; if (sr.Sprite != null) Atlases.Touch(sr.Sprite); } }
                         else if (b.Attribute == EnabledHash) sr.Enabled = v[0] > 0.5f;
                         else
                         {

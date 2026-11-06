@@ -189,6 +189,10 @@ const size_t STAGING_RING = 8u << 20;
 // Free memory kept for the player's linear memory (it grows during scene
 // loads), the kernel and the driver: textures are not loaded into it.
 const unsigned MEMORY_FLOOR_MB = 24;
+// Read-ahead makes room from textures not drawn for this many frames (behind the camera, a phase gone by),
+// never from what the screen showed lately; a sprite page is 4 MB at most (tools/cluster_console.py).
+const unsigned AHEAD_AGE = 180;
+const size_t PAGE_MAX = 4u << 20;
 
 
 enum { MODE_SPRITE, MODE_SCREEN, MODE_MULTIPLY, MODE_OVERLAY, MODE_SDF, MODE_COLOROVERLAY, MODE_LIGHTRAY,
@@ -427,6 +431,7 @@ public:
 private:
     void evict();
     size_t release_unused(size_t want);
+    size_t release_aged(size_t want, unsigned age);
     Tex* tex(int id);
     void load_for(int id);
 
@@ -1679,6 +1684,12 @@ void Renderer::finish_waits() {
 void Renderer::prefetch(int id) {
     if (!g_loader || ch360_ctex_pack < 0) return;
     Tex* t = tex(id);
+    if (t && t->image && frame_no_ - t->last_used > 3) {
+        // Loaded and wanted soon (a sprite near the camera, the clip it plays): kept as if drawn lately,
+        // so making room takes older textures first (but not as drawn: the GPU isn't using it).
+        t->last_used = frame_no_ - 3;
+        t->unused_pre = false;
+    }
     if (!t || t->image || t->loading || t->failed || t->key.empty() || t->pre_wanted || frame_no_ < t->retry_at) return;
     if (pre_backlog_.size() >= 1024) return;
     t->pre_wanted = true;
@@ -1697,8 +1708,18 @@ void Renderer::feed_prefetch() {
             pre_backlog_.pop_front();
             continue;
         }
-        if (pre_bytes_ > (8u << 20) || texture_bytes_ + load_bytes_ > TEXTURE_BUDGET * 3 / 4) return;
-        if (free_mb < MEMORY_FLOOR_MB + 48 + (unsigned)(load_bytes_ >> 20)) return;
+        if (pre_bytes_ > (8u << 20)) return;
+        // Room from textures not drawn for a while; none, and the read-ahead waits. (It needed 48 MB free
+        // above the floor and the set under 3/4 of the budget: in the levels, 37-43 MB free, it never ran,
+        // and every page coming into view was read while its frame waited: the twentieth run's hitches.)
+        size_t want = texture_bytes_ + load_bytes_ + PAGE_MAX;
+        if (want > TEXTURE_BUDGET && (release_aged(want - TEXTURE_BUDGET, AHEAD_AGE), texture_bytes_ + load_bytes_ + PAGE_MAX > TEXTURE_BUDGET)) return;
+        unsigned need_mb = MEMORY_FLOOR_MB + 8 + (unsigned)(load_bytes_ >> 20) + (unsigned)(PAGE_MAX >> 20);
+        if (free_mb < need_mb) {
+            if (!release_aged((size_t)(need_mb - free_mb) << 20, AHEAD_AGE)) return;
+            memory_mb(&free_mb, &total_mb);
+            if (free_mb < need_mb) return;
+        }
         if (!queue_load(pre_backlog_.front(), *t, true) && !t->failed) return;   // the rings or the in-flight cap: next frame
         t->pre_wanted = false;
         pre_backlog_.pop_front();
@@ -1836,6 +1857,24 @@ size_t Renderer::release_unused(size_t want) {
     for (size_t i = 0; i < textures_.size(); ++i)
         if (textures_[i].image && !textures_[i].key.empty() && !textures_[i].pinned && frame_no_ - textures_[i].last_used > 2)
             order.push_back(std::make_pair(textures_[i].unused_pre ? 0u : textures_[i].last_used, i));
+    std::sort(order.begin(), order.end());
+    size_t freed = 0;
+    for (size_t k = 0; k < order.size() && freed < want; ++k) {
+        Tex& t = textures_[order[k].second];
+        freed += t.bytes;
+        destroy(t, true);
+        ++evictions;
+    }
+    return freed;
+}
+
+// Frees textures not drawn (or, read ahead, not wanted) for more than age frames, oldest first, until want
+// bytes are freed: room for read-ahead.
+size_t Renderer::release_aged(size_t want, unsigned age) {
+    std::vector<std::pair<unsigned, size_t> > order;
+    for (size_t i = 0; i < textures_.size(); ++i)
+        if (textures_[i].image && !textures_[i].key.empty() && !textures_[i].pinned && frame_no_ - textures_[i].last_used > age)
+            order.push_back(std::make_pair(textures_[i].last_used, i));
     std::sort(order.begin(), order.end());
     size_t freed = 0;
     for (size_t k = 0; k < order.size() && freed < want; ++k) {
@@ -2328,7 +2367,9 @@ Renderer* g_renderer = NULL;
 
 // Frames the game marks as its loading screen (the hourglass faded in on a black screen: ConsoleHost's
 // LoadingScreen) are kept, and while the game thread is held up past REPLAY_AFTER_MS a thread on
-// hardware thread 3 draws the hourglass's last cycle again until the game draws: a scene's activation
+// hardware thread 3 draws them again until the game draws, the kept frame nearest where the
+// hourglass's animation would be by then (the game sends where it is in its cycle with each frame;
+// the twentieth run's guess at the cycle from repeated frames looped a few frames too fast): a scene's activation
 // (its Awakes and Starts) and the full collections of a load held the hourglass still for 0.7-2.2 s
 // (the eighteenth and nineteenth runs). The renderer is used by one thread at a time (g_gpu_lock).
 pthread_mutex_t g_gpu_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -2339,6 +2380,7 @@ struct GpuLock {
 const unsigned RECORD = 96;            // frames kept (the hourglass's cycle is shorter)
 const double REPLAY_AFTER_MS = 50;
 struct Recorded {
+    unsigned phase;                    // where the hourglass was in its cycle, ms
     std::vector<ch360_view> views;
     std::vector<ch360_item> items;
     std::vector<ch360_vertex> verts;
@@ -2346,6 +2388,7 @@ struct Recorded {
 Recorded g_rec[RECORD];
 unsigned g_rec_count = 0, g_rec_head = 0;   // frames kept, the next slot
 bool g_loading_screen = false;               // the last frame the game drew was the loading screen
+unsigned g_rec_period = 0;                   // the hourglass's cycle, ms (0: not known, the newest frame is drawn)
 double g_last_draw_ms = 0;
 
 // After the game's draw (g_gpu_lock held).
@@ -2355,7 +2398,11 @@ void record_loading(const ch360_frame* f) {
         g_loading_screen = false;
         return;
     }
+    unsigned period = (f->loading >> 16) & 0x7FFF;
+    if (period != g_rec_period) g_rec_count = 0;
+    g_rec_period = period;
     Recorded& r = g_rec[g_rec_head];
+    r.phase = period ? (f->loading & 0xFFFF) % period : 0;
     r.views.assign(f->views, f->views + f->view_count);
     r.items.assign(f->items, f->items + f->item_count);
     r.verts.assign(f->vertices, f->vertices + f->vertex_count);
@@ -2364,27 +2411,22 @@ void record_loading(const ch360_frame* f) {
     g_loading_screen = true;
 }
 
-// The hourglass's cycle among the kept frames: from the frame after the newest's last earlier twin
-// (the same vertices) to the newest; all of them, oldest first, without a twin.
-void replay_cycle(unsigned* start, unsigned* len) {
-    unsigned newest = (g_rec_head + RECORD - 1) % RECORD;
-    const Recorded& n = g_rec[newest];
-    for (unsigned k = 1; k < g_rec_count; ++k) {
-        const Recorded& r = g_rec[(newest + RECORD - k) % RECORD];
-        if (r.verts.size() == n.verts.size() && r.items.size() == n.items.size() &&
-            (n.verts.empty() || memcmp(&r.verts[0], &n.verts[0], n.verts.size() * sizeof(ch360_vertex)) == 0)) {
-            *start = (newest + RECORD - k + 1) % RECORD;
-            *len = k;
-            return;
-        }
+// The kept frame to draw when the hourglass is at phase ms of its cycle: the newest of those
+// nearest before it (the newest frame if the cycle isn't known).
+unsigned replay_pick(unsigned phase) {
+    unsigned newest = (g_rec_head + RECORD - 1) % RECORD, best = newest, gap = ~0u;
+    if (!g_rec_period) return newest;
+    for (unsigned k = 0; k < g_rec_count; ++k) {
+        unsigned i = (newest + RECORD - k) % RECORD;
+        unsigned d = (phase + g_rec_period - g_rec[i].phase) % g_rec_period;
+        if (d < gap) { gap = d; best = i; }
     }
-    *start = (g_rec_head + RECORD - g_rec_count) % RECORD;
-    *len = g_rec_count;
+    return best;
 }
 
 void* replay_thread(void*) {
     xsdk_thread_move(3);
-    unsigned start = 0, len = 0, at = 0, drawn = 0;
+    unsigned from_phase = 0, drawn = 0, last = ~0u;
     double stall_from = 0;
     bool replaying = false;
     for (;;) {
@@ -2395,13 +2437,20 @@ void* replay_thread(void*) {
         bool stalled = g_renderer && g_loading_screen && g_rec_count >= 8 && t - g_last_draw_ms >= REPLAY_AFTER_MS;
         if (stalled) {
             if (!replaying) {
-                replay_cycle(&start, &len);
-                at = drawn = 0;
+                from_phase = g_rec[(g_rec_head + RECORD - 1) % RECORD].phase;
+                drawn = 0;
+                last = ~0u;
                 stall_from = g_last_draw_ms;
                 replaying = true;
             }
-            const Recorded& r = g_rec[(start + at) % RECORD];
-            at = (at + 1) % len;
+            unsigned phase = g_rec_period ? (unsigned)((from_phase + (unsigned long long)(t - stall_from)) % g_rec_period) : 0;
+            unsigned pick = replay_pick(phase);
+            if (pick == last) {   // the same picture: wait
+                pthread_mutex_unlock(&g_gpu_lock);
+                continue;
+            }
+            last = pick;
+            const Recorded& r = g_rec[pick];
             ch360_frame f;
             memset(&f, 0, sizeof(f));
             f.views = r.views.empty() ? NULL : &r.views[0];
@@ -2410,13 +2459,13 @@ void* replay_thread(void*) {
             f.item_count = (unsigned)r.items.size();
             f.vertices = r.verts.empty() ? NULL : &r.verts[0];
             f.vertex_count = (unsigned)r.verts.size();
-            f.loading = 1;
+            f.loading = 0x80000000u;
             g_renderer->frame(&f);   // presents at the next vblank
             ++drawn;
         } else if (replaying) {
             replaying = false;
-            logf("HOST loading screen: %u frames drawn again over a %u ms hold-up (a cycle of %u)", drawn,
-                 (unsigned)(g_last_draw_ms - stall_from), len);
+            logf("HOST loading screen: %u frames drawn again over a %u ms hold-up (a cycle of %u ms, %u frames kept)", drawn,
+                 (unsigned)(g_last_draw_ms - stall_from), g_rec_period, g_rec_count);
         }
         pthread_mutex_unlock(&g_gpu_lock);
     }

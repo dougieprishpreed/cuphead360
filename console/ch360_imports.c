@@ -376,7 +376,8 @@ static remap_page* remap_page_for(const ch360_item* it) {
 /* Moves an item whose uvs span the box (u0, v0)-(u1, v1) onto the sprite page
  * holding that box: the item's texture and its taps' offsets; the box found
  * maps its uvs (NULL: none holds it, the item stays on the atlas page). */
-static const remap_box* remap_lookup(remap_page* p, ch360_item* it, float u0, float v0, float u1, float v1) {
+/* The index in rm_boxes of the page's box holding (u0, v0)-(u1, v1), or -1. */
+static int remap_find(remap_page* p, float u0, float v0, float u1, float v1) {
     unsigned n, from, to;
     if (p->grid == NULL) p->grid = remap_grid(p);
     /* the box last matched, then those of the cell holding the uv box's corner
@@ -396,26 +397,42 @@ static const remap_box* remap_lookup(remap_page* p, ch360_item* it, float u0, fl
         else bi = p->first + (p->grid != NULL ? p->grid[from + n - 1] : from + n - 1);
         b = &rm_boxes[bi];
         if (u0 >= b->u0 && u1 <= b->u1 && v0 >= b->v0 && v1 <= b->v1) {
-            int id = b->target < rm_target_count ? rm_plat[b->target] : -1;
-            if (id < 0 && b->target < rm_target_count) {
-                id = rm_plat[b->target] = new_plat();
-                if (id >= 0) {
-                    ch360_plat_texture_file(id, rm_strings + rm_names[b->target]);
-                    remap_prefetch(p, 0);
-                }
-            }
-            if (id < 0) return NULL;
-            if (it->mode == 10 || it->mode == 35) { /* their taps' offsets are in the page's uvs */
-                it->params[8] *= b->su;
-                it->params[9] *= b->sv;
-            }
-            it->texture = id;
             p->last = bi - p->first;
-            return b;
+            return (int)bi;
         }
     }
-    rm_misses++;
-    return NULL;
+    return -1;
+}
+
+/* A box's sprite page's id, given to the host the first time (its siblings read ahead then). */
+static int remap_target_id(remap_page* p, const remap_box* b) {
+    int id = b->target < rm_target_count ? rm_plat[b->target] : -1;
+    if (id < 0 && b->target < rm_target_count) {
+        id = rm_plat[b->target] = new_plat();
+        if (id >= 0) {
+            ch360_plat_texture_file(id, rm_strings + rm_names[b->target]);
+            remap_prefetch(p, 0);
+        }
+    }
+    return id;
+}
+
+static const remap_box* remap_lookup(remap_page* p, ch360_item* it, float u0, float v0, float u1, float v1) {
+    int bi = remap_find(p, u0, v0, u1, v1), id;
+    const remap_box* b;
+    if (bi < 0) {
+        rm_misses++;
+        return NULL;
+    }
+    b = &rm_boxes[bi];
+    id = remap_target_id(p, b);
+    if (id < 0) return NULL;
+    if (it->mode == 10 || it->mode == 35) { /* their taps' offsets are in the page's uvs */
+        it->params[8] *= b->su;
+        it->params[9] *= b->sv;
+    }
+    it->texture = id;
+    return b;
 }
 
 /* Moves an item drawn from an atlas page onto its sprite's full-size page. */
@@ -721,11 +738,12 @@ void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
     draw_build_ms += draw_now_ms() - t0;
 }
 
-/* ConsoleHost: this frame is the loading screen with its hourglass faded in. */
-static int draw_loading;
+/* ConsoleHost: this frame is the loading screen with its hourglass faded in (0 if not; else
+ * 0x80000000 | the hourglass's cycle in ms << 16 | where it is in it, ms: ch360_frame.loading). */
+static unsigned draw_loading;
 void i5_ch36014_loadingX5Fscreen(wasmModuleInstance* inst, U32 on) {
     (void)inst;
-    draw_loading = on != 0;
+    draw_loading = on;
 }
 
 void i5_ch3608_drawX5Fend(wasmModuleInstance* inst) {
@@ -829,6 +847,26 @@ void i5_ch36016_textureX5Fprefetch(wasmModuleInstance* inst, U32 id) {
     page = page_of_plat[p] - 1;
     if (page >= 0 && rm_pages[page].count > 0) remap_prefetch(&rm_pages[page], 1);
     else ch360_plat_texture_prefetch(p);
+}
+
+/* A sprite the game expects to draw soon (near the view, a frame of a clip on screen): the page holding its
+ * uv box (u0, v0)-(u1, v1) on its atlas page read ahead (the host decides by memory), not all the atlas
+ * page's sprite pages. */
+void i5_ch36013_textureX5Fahead(wasmModuleInstance* inst, U32 id, F32 u0, F32 v0, F32 u1, F32 v1) {
+    int p, page, bi;
+    (void)inst;
+    p = plat_id((int)id);
+    if (p < 0) return;
+    page = page_of_plat[p] - 1;
+    if (page < 0 || rm_pages[page].count == 0) {
+        ch360_plat_texture_prefetch(p);
+        return;
+    }
+    bi = remap_find(&rm_pages[page], u0, v0, u1, v1);
+    if (bi >= 0) {
+        int t = remap_target_id(&rm_pages[page], &rm_boxes[bi]);
+        if (t >= 0) ch360_plat_texture_prefetch(t);
+    }
 }
 
 void i5_ch36014_textureX5Fpixels(wasmModuleInstance* inst, U32 id, U32 w, U32 h, U32 bgra) {

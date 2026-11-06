@@ -268,6 +268,7 @@ namespace Cuphead360.Engine
         public static void OnAdded(NComponent c) => c.Added();
         public static void OnDestroyed(NComponent c) => c.Removed();
         public static void OnActivated(NComponent c, bool on) => c.Activated(on);
+        public static void OnToggled(NComponent c, bool on) => c.Toggled(on);
         /// <summary>Instantiate: engine state of a built-in component (src -> copy).</summary>
         public static void CopyState(NComponent src, NComponent dst, Dictionary<NObject, NObject> map)
         {

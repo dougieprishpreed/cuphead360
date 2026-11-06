@@ -611,14 +611,19 @@ namespace Cuphead360.Engine
         {
             if (s.Pts.Length == 1) return (p - s.Pts[0]).magnitude - s.R;
             if (s.Pts.Length == 2) return SegDist(p, s.Pts[0], s.Pts[1]) - s.R;
-            bool inside = true; float best = float.MaxValue;
+            // Inside when p is on the same side of every edge, either winding: a mirrored collider's
+            // points run clockwise (the counter-clockwise test let Forest Follies' lobbed bombs fall
+            // through flipped ground once their centres were past its edge).
+            bool left = true, right = true; float best = float.MaxValue;
             for (int i = 0; i < s.Pts.Length; i++)
             {
                 var a = s.Pts[i]; var b = s.Pts[(i + 1) % s.Pts.Length];
-                if (Cross(b - a, p - a) < 0) inside = false;
+                float c = Cross(b - a, p - a);
+                if (c < 0) left = false;
+                if (c > 0) right = false;
                 best = Math.Min(best, SegDist(p, a, b));
             }
-            return (inside ? -best : best) - s.R;
+            return (left || right ? -best : best) - s.R;
         }
 
         static float SegDist(Vector2 p, Vector2 a, Vector2 b)
@@ -901,6 +906,8 @@ namespace Cuphead360.Engine
             // hierarchy per pair, every step); nothing here changes the hierarchy.
             var cols = Colliders();
             foreach (var c in cols) c.Shapes();
+            if (TraceContact != null)
+                foreach (var c in cols) if (Traced(c)) Log.Line($"TRACE contact frame {Clock.FrameCount} collider {Describe(c)}");
             var bodyOf = BodiesOf(cols);
             var now = new Dictionary<(NCollider2D, NCollider2D), Contact>();
             // Sort and sweep on the boxes' x ranges: only pairs whose ranges meet are looked at (every pair,
@@ -943,6 +950,8 @@ namespace Cuphead360.Engine
                     if (Ignored(a, b)) continue;
                     bool touch = false;
                     foreach (var sa in a.World) { foreach (var sb in b.World) if (Geometry.Overlap(sa, sb)) { touch = true; break; } if (touch) break; }
+                    if (TraceContact != null && (Traced(a) || Traced(b)))
+                        Log.Line($"TRACE contact frame {Clock.FrameCount} {(touch ? "touch" : "boxes meet, shapes don't")}: {Describe(a)} / {Describe(b)}");
                     if (!touch) continue;
                     var key = Key(a, b);
                     now[key] = new Contact { A = key.Item1, B = key.Item2, Trigger = trigger };
@@ -1028,6 +1037,22 @@ namespace Cuphead360.Engine
             if (t.Parent == null) t.LocalPosition = new Vector3(p.x, p.y, z);
             else { MathX.Invert(t.Parent.LocalToWorld, out var inv); t.LocalPosition = inv.MultiplyPoint3x4(new Vector3(p.x, p.y, z)); }
             t.Invalidate();
+        }
+
+        // CH360_TRACE_CONTACT=NAME: each step's pairs whose boxes meet, for colliders on objects whose name has NAME.
+        public static readonly string TraceContact = Environment.GetEnvironmentVariable("CH360_TRACE_CONTACT");
+        static bool Traced(NCollider2D c) => c.GameObject != null && c.GameObject.Name.Contains(TraceContact);
+        static string Describe(NCollider2D c)
+        {
+            var go = c.GameObject;
+            var sb = new System.Text.StringBuilder();
+            sb.Append(go.Name).Append(" [").Append(go.Tag).Append(", layer ").Append(go.Layer).Append(c.IsTrigger ? ", trigger" : "").Append("]");
+            foreach (var s in c.World)
+            {
+                sb.Append(s.Pts.Length == 1 ? " circle r=" + s.R.ToString("0.###") : " " + s.Pts.Length + "-gon");
+                foreach (var p in s.Pts) sb.Append(" (").Append(p.x.ToString("0.##")).Append(',').Append(p.y.ToString("0.##")).Append(')');
+            }
+            return sb.ToString();
         }
 
         static readonly string[] triggerNames = { "OnTriggerEnter2D", "OnTriggerStay2D", "OnTriggerExit2D" };

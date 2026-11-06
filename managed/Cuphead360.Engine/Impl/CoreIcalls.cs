@@ -162,7 +162,7 @@ namespace Cuphead360.Engine
         {
             var c = Objects.Comp(self);
             if (c is NBehaviour b) Behaviours.SetEnabled(b, value);
-            else if (c != null && c.Enabled != value) { c.Enabled = value; Builtins.OnActivated(c, value && c.GameObject.ActiveInHierarchy); }
+            else if (c != null && c.Enabled != value) { c.Enabled = value; Builtins.OnToggled(c, value && c.GameObject.ActiveInHierarchy); }
         }
         public static bool UnityEngine_Behaviour__get_isActiveAndEnabled(Behaviour self)
         {

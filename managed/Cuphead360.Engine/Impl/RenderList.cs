@@ -314,6 +314,42 @@ namespace Cuphead360.Engine
             return !(sx + rx < px.x || sx - rx > px.x + px.width || sy + ry < px.y || sy - ry > px.y + px.height);
         }
 
+        /// <summary>
+        /// The host's read-ahead of a texture (the console's: ConsoleHost): the pages of sprites within half a
+        /// screen of a camera's view, and of every frame of the clip a sprite on screen plays. Pages were read
+        /// as they came into view, their frames waiting (most of the twentieth run's hitches in the levels).
+        /// </summary>
+        /// <remarks>The texture and the sprite's uv box (min u, min v, max u, max v): the host reads the sprite
+        /// page holding it (an atlas page's sprites have pages of their own on the console).</remarks>
+        public static Action<Texture2D, Vector4> ReadAhead;
+        const int ClipAheadFrames = 120;   // a clip's pages asked again after this (still wanted: kept ahead of older ones)
+        const int SpriteAheadFrames = 30;  // a sprite near the view asked again after this
+
+        static void Ahead(Sprite s)
+        {
+            var info = s != null ? Sprites.Of(s) : null;
+            if (info == null || Clock.FrameCount - info.AheadFrame < SpriteAheadFrames) return;
+            info.AheadFrame = Clock.FrameCount;
+            var tex = Sprites.BoundTexture(s);
+            if (tex == null) return;
+            var uv = Sprites.RenderUvs(s);
+            if (uv.Length == 0) return;
+            var box = new Vector4(uv[0].x, uv[0].y, uv[0].x, uv[0].y);
+            for (int i = 1; i < uv.Length; i++)
+            {
+                if (uv[i].x < box.x) box.x = uv[i].x; else if (uv[i].x > box.z) box.z = uv[i].x;
+                if (uv[i].y < box.y) box.y = uv[i].y; else if (uv[i].y > box.w) box.w = uv[i].y;
+            }
+            ReadAhead(tex, box);
+        }
+
+        static void AheadClip(ClipData clip)
+        {
+            if (clip == null || Clock.FrameCount - clip.AheadFrame < ClipAheadFrames) return;
+            clip.AheadFrame = Clock.FrameCount;
+            foreach (var o in clip.PPtrs) if (o is Sprite s) Ahead(s);
+        }
+
         public static List<View> Build()
         {
             pooled = 0; viewsUsed = 0;
@@ -605,7 +641,14 @@ namespace Cuphead360.Engine
                 float sx = a00 * cx + a01 * cy + b0, rx = Math.Abs(a00) * ex + Math.Abs(a01) * ey + 1f;
                 float sy = a10 * cx + a11 * cy + b1, ry = Math.Abs(a10) * ex + Math.Abs(a11) * ey + 1f;
                 var px = xf.Pixel;
-                if (sx + rx < px.x || sx - rx > px.x + px.width || sy + ry < px.y || sy - ry > px.y + px.height) return null;
+                if (sx + rx < px.x || sx - rx > px.x + px.width || sy + ry < px.y || sy - ry > px.y + px.height)
+                {
+                    float mx = 0.5f * px.width, my = 0.5f * px.height;
+                    if (ReadAhead != null && !(sx + rx < px.x - mx || sx - rx > px.x + px.width + mx || sy + ry < px.y - my || sy - ry > px.y + px.height + my))
+                        Ahead(sr.Sprite);
+                    return null;
+                }
+                if (ReadAhead != null) AheadClip(sr.Clip);
             }
             if (!Sprites.Binding(sr.Sprite, out var tex, out _, out _)) tex = null;
             var uv = Sprites.RenderUvs(sr.Sprite);

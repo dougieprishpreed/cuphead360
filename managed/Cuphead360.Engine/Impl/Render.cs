@@ -154,6 +154,7 @@ namespace Cuphead360.Engine
     public sealed class NSpriteRenderer : NRenderer
     {
         public Sprite Sprite;
+        public ClipData Clip;   // the animation clip that set the sprite last, if any
         public Color Color = Color.white;
         public bool FlipX, FlipY;
         public SpriteDrawMode DrawMode;
@@ -246,6 +247,7 @@ namespace Cuphead360.Engine
         public sealed class Info
         {
             public string Name = "";
+            public int AheadFrame = int.MinValue / 2;   // last asked to be read ahead (RenderList.ReadAhead)
             public Rect Rect;
             public Vector2 Pivot = new Vector2(0.5f, 0.5f);   // normalized
             public float PixelsPerUnit = 100f;
@@ -424,6 +426,15 @@ namespace Cuphead360.Engine
             // sprite the UI code set: the map's ingredient cards) asks when it's drawn.
             Atlases.Touch(s);
             return false;
+        }
+
+        /// <summary>The texture a sprite draws from now, if it has one, without asking for its atlas (read-ahead).</summary>
+        public static Texture2D BoundTexture(Sprite s)
+        {
+            var i = Of(s);
+            if (i == null) return null;
+            if (i.Texture != null) return i.Texture;
+            return Atlases.Bound(i, out var tex, out _, out _, out _) ? tex : null;
         }
 
         /// <summary>Texture coordinates (0..1, Unity orientation) of a sprite's vertices.</summary>
