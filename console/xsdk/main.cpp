@@ -2324,6 +2324,105 @@ void Renderer::frame(const ch360_frame* f) {
 
 Renderer* g_renderer = NULL;
 
+// ------------------------------------------------------------ the loading screen kept moving
+
+// Frames the game marks as its loading screen (the hourglass faded in on a black screen: ConsoleHost's
+// LoadingScreen) are kept, and while the game thread is held up past REPLAY_AFTER_MS a thread on
+// hardware thread 3 draws the hourglass's last cycle again until the game draws: a scene's activation
+// (its Awakes and Starts) and the full collections of a load held the hourglass still for 0.7-2.2 s
+// (the eighteenth and nineteenth runs). The renderer is used by one thread at a time (g_gpu_lock).
+pthread_mutex_t g_gpu_lock = PTHREAD_MUTEX_INITIALIZER;
+struct GpuLock {
+    GpuLock() { pthread_mutex_lock(&g_gpu_lock); }
+    ~GpuLock() { pthread_mutex_unlock(&g_gpu_lock); }
+};
+const unsigned RECORD = 96;            // frames kept (the hourglass's cycle is shorter)
+const double REPLAY_AFTER_MS = 50;
+struct Recorded {
+    std::vector<ch360_view> views;
+    std::vector<ch360_item> items;
+    std::vector<ch360_vertex> verts;
+};
+Recorded g_rec[RECORD];
+unsigned g_rec_count = 0, g_rec_head = 0;   // frames kept, the next slot
+bool g_loading_screen = false;               // the last frame the game drew was the loading screen
+double g_last_draw_ms = 0;
+
+// After the game's draw (g_gpu_lock held).
+void record_loading(const ch360_frame* f) {
+    if (!f->loading || f->item_count > 256 || f->vertex_count > 16384) {
+        g_rec_count = 0;
+        g_loading_screen = false;
+        return;
+    }
+    Recorded& r = g_rec[g_rec_head];
+    r.views.assign(f->views, f->views + f->view_count);
+    r.items.assign(f->items, f->items + f->item_count);
+    r.verts.assign(f->vertices, f->vertices + f->vertex_count);
+    g_rec_head = (g_rec_head + 1) % RECORD;
+    if (g_rec_count < RECORD) ++g_rec_count;
+    g_loading_screen = true;
+}
+
+// The hourglass's cycle among the kept frames: from the frame after the newest's last earlier twin
+// (the same vertices) to the newest; all of them, oldest first, without a twin.
+void replay_cycle(unsigned* start, unsigned* len) {
+    unsigned newest = (g_rec_head + RECORD - 1) % RECORD;
+    const Recorded& n = g_rec[newest];
+    for (unsigned k = 1; k < g_rec_count; ++k) {
+        const Recorded& r = g_rec[(newest + RECORD - k) % RECORD];
+        if (r.verts.size() == n.verts.size() && r.items.size() == n.items.size() &&
+            (n.verts.empty() || memcmp(&r.verts[0], &n.verts[0], n.verts.size() * sizeof(ch360_vertex)) == 0)) {
+            *start = (newest + RECORD - k + 1) % RECORD;
+            *len = k;
+            return;
+        }
+    }
+    *start = (g_rec_head + RECORD - g_rec_count) % RECORD;
+    *len = g_rec_count;
+}
+
+void* replay_thread(void*) {
+    xsdk_thread_move(3);
+    unsigned start = 0, len = 0, at = 0, drawn = 0;
+    double stall_from = 0;
+    bool replaying = false;
+    for (;;) {
+        struct timespec ts = { 0, 4000000 };
+        nanosleep(&ts, NULL);
+        pthread_mutex_lock(&g_gpu_lock);
+        double t = now_ms();
+        bool stalled = g_renderer && g_loading_screen && g_rec_count >= 8 && t - g_last_draw_ms >= REPLAY_AFTER_MS;
+        if (stalled) {
+            if (!replaying) {
+                replay_cycle(&start, &len);
+                at = drawn = 0;
+                stall_from = g_last_draw_ms;
+                replaying = true;
+            }
+            const Recorded& r = g_rec[(start + at) % RECORD];
+            at = (at + 1) % len;
+            ch360_frame f;
+            memset(&f, 0, sizeof(f));
+            f.views = r.views.empty() ? NULL : &r.views[0];
+            f.view_count = (unsigned)r.views.size();
+            f.items = r.items.empty() ? NULL : &r.items[0];
+            f.item_count = (unsigned)r.items.size();
+            f.vertices = r.verts.empty() ? NULL : &r.verts[0];
+            f.vertex_count = (unsigned)r.verts.size();
+            f.loading = 1;
+            g_renderer->frame(&f);   // presents at the next vblank
+            ++drawn;
+        } else if (replaying) {
+            replaying = false;
+            logf("HOST loading screen: %u frames drawn again over a %u ms hold-up (a cycle of %u)", drawn,
+                 (unsigned)(g_last_draw_ms - stall_from), len);
+        }
+        pthread_mutex_unlock(&g_gpu_lock);
+    }
+    return NULL;
+}
+
 // ------------------------------------------------------------ audio
 
 // The player mixes 48 kHz stereo each frame (ch360_plat_audio); a thread
@@ -2403,6 +2502,7 @@ static void probe_on_thread(int hw, size_t stack, const char* where) {
 // The host's tallies since the last call, for the player's per-scene summaries (u32s: counts, ms x 100, fill x 100).
 extern "C" void ch360_plat_host_stats(unsigned* out, int n) {
     if (!g_renderer || n <= 0) return;
+    GpuLock lock;
     HostStats& s = g_renderer->stats_;
     static unsigned underruns_seen = 0;
     unsigned f, tot;
@@ -2428,6 +2528,7 @@ extern "C" int ch360_plat_frame_begin(void) {
     }
     g_frame_start = t;
     if (g_frames > 0 && g_frames % 600 == 0) {
+        GpuLock lock;
         unsigned f, tot;
         memory_mb(&f, &tot);
         // Times in tenths of a millisecond (integers only in the log).
@@ -2480,15 +2581,27 @@ extern "C" int ch360_plat_pad(int index, ch360_pad* out) {
 }
 
 extern "C" void ch360_plat_draw(const ch360_frame* f) {
-    g_renderer->frame(f);
+    {
+        GpuLock lock;
+        g_renderer->frame(f);
+        record_loading(f);
+        g_last_draw_ms = now_ms();
+    }
     g_stage = "game";
 }
 
-extern "C" void ch360_plat_texture_file(int id, const char* key) { g_renderer->texture_file(id, key); }
-extern "C" void ch360_plat_texture_prefetch(int id) { g_renderer->prefetch(id); }
+extern "C" void ch360_plat_texture_file(int id, const char* key) {
+    GpuLock lock;
+    g_renderer->texture_file(id, key);
+}
+extern "C" void ch360_plat_texture_prefetch(int id) {
+    GpuLock lock;
+    g_renderer->prefetch(id);
+}
 
 extern "C" void ch360_plat_texture_pixels(int id, int width, int height, const unsigned char* bgra) {
     Stage stage("vk: run-time texture");
+    GpuLock lock;
     g_renderer->texture_pixels(id, width, height, bgra);
 }
 
@@ -2581,13 +2694,24 @@ extern "C" int __wrap_srt_plat_commit(void* base, unsigned long long from, unsig
              (unsigned)(to >> 20), g_frames_seen, (const char*)g_stage, free_mb, (unsigned)(g_texture_bytes >> 20));
         unsigned need_mb = (unsigned)((to - from) >> 20) + 1 + MEMORY_FLOOR_MB;
         if (free_mb < need_mb) {
-            size_t freed = g_renderer->make_room((size_t)(need_mb - free_mb) << 20);
+            size_t freed;
+            {
+                GpuLock lock;
+                freed = g_renderer->make_room((size_t)(need_mb - free_mb) << 20);
+            }
             logf("memory: the player grows to %u MB with %u MB free; %u KB of textures let go", (unsigned)(to >> 20), free_mb,
                  (unsigned)(freed >> 10));
         }
     }
     int r = __real_srt_plat_commit(base, from, to);
-    if (r != 0 && g_renderer && g_renderer->make_room((size_t)(to - from) * 2) > 0) r = __real_srt_plat_commit(base, from, to);
+    if (r != 0 && g_renderer) {
+        size_t freed;
+        {
+            GpuLock lock;
+            freed = g_renderer->make_room((size_t)(to - from) * 2);
+        }
+        if (freed > 0) r = __real_srt_plat_commit(base, from, to);
+    }
     if (r != 0) logf("memory: the player couldn't grow to %u MB", (unsigned)(to >> 20));
     return r;
 }
@@ -2631,6 +2755,10 @@ int main() {
         return 1;
     }
     renderer.start_loader();
+    {
+        pthread_t rth;
+        pthread_create(&rth, NULL, replay_thread, NULL);
+    }
     if (xsdk_audio_open(0) == 0) {
         g_audio_open = true;
         pthread_t ath;

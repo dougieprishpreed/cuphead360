@@ -84,6 +84,9 @@ namespace Cuphead360.Engine
         {
             get
             {
+                // The search below drops destroyed listeners newer than the live one only: older ones (every
+                // scene's camera) stayed, and held what they reached (3,900 destroyed records after six levels).
+                if (made.Count > 32) made.RemoveAll(l => l.Destroyed);
                 for (int i = made.Count - 1; i >= 0; i--)
                 {
                     var l = made[i];

@@ -404,6 +404,7 @@ namespace Cuphead360.Engine
         static readonly List<NSpriteMask> spriteMasks = new List<NSpriteMask>();
         static readonly List<NMeshRenderer> meshRenderers = new List<NMeshRenderer>();
         static int dirty;   // bit per list holding destroyed records
+        static readonly int[] dead = new int[8];   // destroyed records per list since it was last cleaned
 
         public static List<NCollider2D> Colliders => Clean(colliders, 1);
         public static List<NSpriteRenderer> SpriteRenderers => Clean(spriteRenderers, 2);
@@ -419,9 +420,37 @@ namespace Cuphead360.Engine
             if ((dirty & bit) != 0)
             {
                 dirty &= ~bit;
+                dead[System.Numerics.BitOperations.TrailingZeroCount(bit)] = 0;
                 list.RemoveAll(x => x.Destroyed);
             }
             return list;
+        }
+
+        /// <summary>
+        /// At a frame's start (no list is being walked): lists that gathered many destroyed records drop
+        /// them. They were dropped only when read, and the GameObject and sprite renderer lists are read
+        /// rarely, so every destroyed scene's objects stayed reachable through them with everything they
+        /// held: after six DLC and Inkwell Hell levels 56,000 destroyed records (the UI's rects, the
+        /// bullets) and the heap 30 MB larger on the same map.
+        /// </summary>
+        public static void Sweep()
+        {
+            if (dirty == 0) return;
+            SweepList(colliders, 1);
+            SweepList(spriteRenderers, 2);
+            SweepList(canvases, 4);
+            SweepList(cameras, 8);
+            SweepList(behaviours, 16);
+            SweepList(gameObjects, 32);
+            SweepList(spriteMasks, 64);
+            SweepList(meshRenderers, 128);
+        }
+
+        // 256 destroyed records, or half of a short list (the sprite masks': 50 held 2,000 records)
+        static void SweepList<T>(List<T> list, int bit) where T : NObject
+        {
+            int n = dead[System.Numerics.BitOperations.TrailingZeroCount(bit)];
+            if (n >= 256 || (n > 0 && n * 2 >= list.Count)) Clean(list, bit);
         }
 
         public static void Add(NObject r)
@@ -446,14 +475,14 @@ namespace Cuphead360.Engine
         {
             switch (r)
             {
-                case NCollider2D c: dirty |= 1; QueryIndex.Dirty(c); break;
-                case NSpriteRenderer: dirty |= 2; break;
-                case NCanvas: dirty |= 4; break;
-                case NCamera: dirty |= 8; break;
-                case NBehaviour: dirty |= 16; break;
-                case NGameObject: dirty |= 32; break;
-                case NSpriteMask: dirty |= 64; break;
-                case NMeshRenderer: dirty |= 128; break;
+                case NCollider2D c: dirty |= 1; dead[0]++; QueryIndex.Dirty(c); break;
+                case NSpriteRenderer: dirty |= 2; dead[1]++; break;
+                case NCanvas: dirty |= 4; dead[2]++; break;
+                case NCamera: dirty |= 8; dead[3]++; break;
+                case NBehaviour: dirty |= 16; dead[4]++; break;
+                case NGameObject: dirty |= 32; dead[5]++; break;
+                case NSpriteMask: dirty |= 64; dead[6]++; break;
+                case NMeshRenderer: dirty |= 128; dead[7]++; break;
                 case NRigidbody2D: NTransform.HierarchyVersion++; break;
             }
         }

@@ -75,6 +75,8 @@ namespace Cuphead360.Player
         {
             var seen = new HashSet<object>(new RefEq());
             var byRoot = new Dictionary<string, (long bytes, long n)>();
+            // Destroyed engine objects each root still reaches (what a destroyed scene leaves held), by type
+            var deadByRoot = new Dictionary<string, Dictionary<string, long>>();
             var byType = new Dictionary<Type, (long bytes, long n)>();
             var stack = new Stack<object>();
             long total = 0, objects = 0;
@@ -98,6 +100,7 @@ namespace Cuphead360.Player
                         try { v = f.GetValue(null); } catch { continue; }
                         if (v == null || seen.Contains(v)) continue;
                         long rb = 0, rn = 0;
+                        Dictionary<string, long> dead = null;
                         seen.Add(v); stack.Push(v);
                         while (stack.Count > 0)
                         {
@@ -105,6 +108,12 @@ namespace Cuphead360.Player
                             long sz = Size(o);
                             rb += sz; rn++;
                             var ot = o.GetType();
+                            if (o is Cuphead360.Engine.NObject no && no.Destroyed)
+                            {
+                                dead ??= new Dictionary<string, long>();
+                                string dk = ot.Name + " " + (no is Cuphead360.Engine.NComponent nc ? nc.Managed?.GetType().Name : no.Name);
+                                dead.TryGetValue(dk, out long dn); dead[dk] = dn + 1;
+                            }
                             byType.TryGetValue(ot, out var bt);
                             byType[ot] = (bt.bytes + sz, bt.n + 1);
                             if (o is string) continue;
@@ -127,6 +136,7 @@ namespace Cuphead360.Player
                         total += rb; objects += rn;
                         string key = (t.FullName ?? t.Name) + "::" + f.Name;
                         byRoot[key] = (rb, rn);
+                        if (dead != null) deadByRoot[key] = dead;
                     }
                 }
             }
@@ -135,6 +145,9 @@ namespace Cuphead360.Player
                 Console.WriteLine($"HEAP root {kv.Value.bytes / 1048576.0,8:0.00} MB {kv.Value.n,9}  {kv.Key}");
             foreach (var kv in byType.OrderByDescending(k => k.Value.bytes).Take(50))
                 Console.WriteLine($"HEAP type {kv.Value.bytes / 1048576.0,8:0.00} MB {kv.Value.n,9}  {kv.Key.FullName}");
+            foreach (var kv in deadByRoot.OrderByDescending(k => k.Value.Values.Sum()).Take(20))
+                Console.WriteLine($"HEAP dead {kv.Value.Values.Sum(),7} destroyed objects held by {kv.Key}: "
+                    + string.Join(", ", kv.Value.OrderByDescending(x => x.Value).Take(8).Select(x => $"{x.Key} {x.Value}")));
         }
 
         static void Children(object o, HashSet<object> seen, Stack<object> stack)

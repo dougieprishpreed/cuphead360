@@ -554,7 +554,15 @@ namespace Cuphead360.Engine
         {
             Animators.Register(this);
             if (on) Rebind(keepState: false);
-            else RestoreDefaults();
+            else if (TraceName != null && GameObject != null && GameObject.Name.Contains(TraceName))
+                Log.Line($"TRACE animator {GameObject.Name} off frame {Clock.FrameCount}, sprite {FirstSprite(GameObject.Transform)?.Sprite?.name ?? "-"}");
+        }
+
+        static NSpriteRenderer FirstSprite(NTransform t)
+        {
+            foreach (var c in t.GameObject.Components) if (c is NSpriteRenderer sr) return sr;
+            foreach (var ch in t.Children) { var s = FirstSprite(ch); if (s != null) return s; }
+            return null;
         }
         public override void Removed() { }
 
@@ -1371,23 +1379,9 @@ namespace Cuphead360.Engine
             }
         }
 
-        /// <summary>
-        /// An animator disabled (or its object deactivated) writes back the values its properties had
-        /// when it was bound, as Unity's does, before its children's OnDisable (values first, then
-        /// what it turns on or off).
-        /// </summary>
-        void RestoreDefaults()
-        {
-            for (int pass = 0; pass < 2; pass++)
-                foreach (var tg in controlled)
-                {
-                    if (Toggles(tg) != (pass == 1)) continue;
-                    if ((tg.Component != null && tg.Component.Destroyed) || (tg.Transform != null && tg.Transform.Destroyed)) continue;
-                    Array.Copy(tg.Default, tg.Value, 4);
-                    tg.Obj = tg.DefaultObj;
-                    Write(tg);
-                }
-        }
+        // A disabled animator keeps what it last wrote, as Unity's does: the parry's hit pause disables the
+        // player's animator and swaps its current sprite for the pink one (LevelPlayerParryAnimator); the
+        // bound defaults written back there showed Cuphead's standing pose (the nineteenth run).
 
         // ---------------------------------------------------------------- events
 

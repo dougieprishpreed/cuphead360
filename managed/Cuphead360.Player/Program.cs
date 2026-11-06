@@ -205,7 +205,15 @@ namespace Cuphead360.Player
                 PlayerLoop.Frame(f >= stepFrom ? step : 1f / 60f);
                 if (f == censusAt) HeapCensus.Run(f);
                 if (dumpAt.Contains(f)) DumpState(f);
-                if (PlayerLoop.Profile && f % 600 == 0) Console.WriteLine($"frame {f} " + PlayerLoop.ProfileReport(600));
+                if (PlayerLoop.Profile && f % 600 == 0)
+                {
+                    Console.WriteLine($"frame {f} " + PlayerLoop.ProfileReport(600));
+                    var ticks = new Dictionary<Type, long>();
+                    var bytes = new Dictionary<Type, long>();
+                    PlayerLoop.DrainScriptTicks(ticks, null, bytes);
+                    Console.WriteLine($"TOP {f - 599}-{f} ms/frame:{PlayerLoop.TopOf(ticks, 600, 12, out _)}");
+                    Console.WriteLine($"ALLOC {f - 599}-{f} KB/frame:{PlayerLoop.TopBytesOf(bytes, 600, 12)}");
+                }
                 if (report > 0 && f % report == 0)
                     Console.WriteLine($"FRAME {f} t={UnityEngine.Time.time:0.00} scene={Cuphead360.Engine.Scenes.Active?.Name} objects={Objects.LiveCount} exceptions={Exceptions.Count} missing={Icall.MissingCount}");
                     if (Environment.GetEnvironmentVariable("CH360_OBJECTS_AT") == f.ToString())

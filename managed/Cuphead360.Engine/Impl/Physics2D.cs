@@ -658,8 +658,13 @@ namespace Cuphead360.Engine
         /// <summary>Do two shapes overlap (touching counts)?</summary>
         public static bool Overlap(Shape a, Shape b)
         {
-            // Point-in-Minkowski-difference: origin inside (a - b).
             if (Apart(a, b, 1e-3f)) return false;
+            // A circle meets a shape when its centre is within its radius of it: exact, where the hull
+            // below took the circle as an inscribed 16-gon and sorted the sum's points (Overlap's
+            // hulls were 2.6% of a Forest Follies frame on host_native: its projectiles and enemies).
+            if (a.Pts.Length == 1) return Distance(b, a.Pts[0]) <= a.R + 1e-5f;
+            if (b.Pts.Length == 1) return Distance(a, b.Pts[0]) <= b.R + 1e-5f;
+            // Point-in-Minkowski-difference: origin inside (a - b).
             var md = Minkowski(a, Negated(b));
             if (md.Length == 1) return md[0].sqrMagnitude <= 1e-10f;
             if (md.Length == 2) return SegDist(Vector2.zero, md[0], md[1]) <= 1e-5f;

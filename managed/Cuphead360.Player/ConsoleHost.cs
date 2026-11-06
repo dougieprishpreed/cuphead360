@@ -44,6 +44,8 @@ namespace Cuphead360.Player
         static extern void TexturePixels(int id, int width, int height, byte* bgra);
         [DllImport("ch360", EntryPoint = "texture_prefetch"), WasmImportLinkage]
         static extern void TexturePrefetch(int id);
+        [DllImport("ch360", EntryPoint = "loading_screen"), WasmImportLinkage]
+        static extern void LoadingScreenFlag(int on);
         [DllImport("ch360", EntryPoint = "audio"), WasmImportLinkage]
         static extern void AudioOut(float* samples, int frames);
         [DllImport("ch360", EntryPoint = "ogg_open"), WasmImportLinkage]
@@ -184,13 +186,13 @@ namespace Cuphead360.Player
             {
                 public readonly int[] Hist = new int[Bins];
                 public readonly double[] Phase = new double[PlayerLoop.PhaseMs.Length + 2];   // phases, list, submit
-                public readonly Dictionary<Type, long> Scripts = new Dictionary<Type, long>();
+                public readonly Dictionary<Type, long> Scripts = new Dictionary<Type, long>(), Bytes = new Dictionary<Type, long>();
                 public double Game, Period, Decode;
                 public int Frames, Periods, Hitches, Unsaid;
                 public long Gc0, Gc1, Gc2, PauseMs, Alloc, DecodeAt;
                 public void Start()
                 {
-                    Array.Clear(Hist); Array.Clear(Phase); Scripts.Clear();
+                    Array.Clear(Hist); Array.Clear(Phase); Scripts.Clear(); Bytes.Clear();
                     Game = Period = Decode = 0; Frames = Periods = Hitches = Unsaid = 0;
                     Gc0 = GC.CollectionCount(0); Gc1 = GC.CollectionCount(1); Gc2 = GC.CollectionCount(2);
                     PauseMs = (long)GC.GetTotalPauseDuration().TotalMilliseconds; Alloc = Allocated(); DecodeAt = Audio.DecodeTicks;
@@ -254,6 +256,15 @@ namespace Cuphead360.Player
             }
 
             /// <summary>A frame done: its game time (the player loop's phases, the draw list and its hand-over).</summary>
+            // What each phase allocated over the window (bytes): the scripts' messages within theirs.
+            readonly double[] windowBytes = new double[PlayerLoop.PhaseBytes.Length + 2];
+            public void Allocs(long[] ph, long list, long submit)
+            {
+                for (int i = 0; i < ph.Length; i++) windowBytes[i] += ph[i];
+                windowBytes[ph.Length] += list;
+                windowBytes[ph.Length + 1] += submit;
+            }
+
             public void Frame(int n, double game, double[] ph, double list, double submit)
             {
                 long g0 = GC.CollectionCount(0), g1 = GC.CollectionCount(1), g2 = GC.CollectionCount(2);
@@ -331,13 +342,22 @@ namespace Cuphead360.Player
 
             void Window(int n)
             {
-                PlayerLoop.DrainScriptTicks(window.Scripts, scene.Scripts);
+                PlayerLoop.DrainScriptTicks(window.Scripts, scene.Scripts, window.Bytes, scene.Bytes);
                 string top = PlayerLoop.TopOf(window.Scripts, Math.Max(1, window.Frames), 12, out double scripts);
                 int f = Math.Max(1, window.Frames);
                 Console.WriteLine($"FRAMES {windowStart}-{n}: {window.Game / f:0.0} ms/frame; {Phases(window)}; audio decode {(Audio.DecodeTicks - window.DecodeAt) * 1000.0 / hz / f:0.0} ms/frame, "
                     + $"{Audio.VoiceCount} voices; {Spread(window)}; scripts {scripts:0.0} ms/frame; {Gc(window)}; hitches {window.Hitches}"
                     + (window.Unsaid > 0 ? $" ({window.Unsaid} not said)" : "") + $"; {windowScenes}");
                 Console.WriteLine($"TOP {windowStart}-{n} ms/frame:{top}");
+                // What each phase allocated, then the scripts' top allocators (each message and coroutine step)
+                if (!noAlloc && PlayerLoop.Profile)
+                {
+                    var sb = new StringBuilder();
+                    for (int i = 0; i < windowBytes.Length; i++)
+                        sb.Append(i == 0 ? "" : " ").Append(i < phases ? PlayerLoop.PhaseNames[i] : i == phases ? "list" : "submit").Append('=').Append((windowBytes[i] / 1024.0 / f).ToString("0.0"));
+                    Array.Clear(windowBytes);
+                    Console.WriteLine($"ALLOC {windowStart}-{n} KB/frame: {sb}; scripts{PlayerLoop.TopBytesOf(window.Bytes, f, 12)}");
+                }
                 windowStart = n + 1;
                 windowScenes = sceneName ?? "";
                 window.Start();
@@ -345,7 +365,7 @@ namespace Cuphead360.Player
 
             void SceneSummary()
             {
-                PlayerLoop.DrainScriptTicks(window.Scripts, scene.Scripts);
+                PlayerLoop.DrainScriptTicks(window.Scripts, scene.Scripts, window.Bytes, scene.Bytes);
                 string top = PlayerLoop.TopOf(scene.Scripts, Math.Max(1, scene.Frames), 16, out double scripts);
                 int f = Math.Max(1, scene.Frames);
                 double secs = scene.Period / 1000.0;
@@ -360,6 +380,7 @@ namespace Cuphead360.Player
                     + $"{host[11]} textures loaded), fence {host[6] / 100.0 / hf:0.0}, present {host[7] / 100.0 / hf:0.0}; {host[19]} slow host parts; audio underruns {host[16]}; "
                     + $"textures {host[17]} MB, {host[18]} MB free");
                 Console.WriteLine($"SCENE TOP {sceneName} ms/frame:{top}");
+                if (!noAlloc) Console.WriteLine($"SCENE ALLOC {sceneName} KB/frame:{PlayerLoop.TopBytesOf(scene.Bytes, Math.Max(1, scene.Frames), 16)}");
             }
         }
 
@@ -396,13 +417,15 @@ namespace Cuphead360.Player
                 PollPads();
                 if (!frame(++n)) break;
                 if (n % 60 == 1) NoKeyboard();
-                long built = System.Diagnostics.Stopwatch.GetTimestamp();
+                long built = System.Diagnostics.Stopwatch.GetTimestamp(), allocBuilt = PlayerLoop.Profile ? GC.GetAllocatedBytesForCurrentThread() : 0;
                 var views = RenderList.Build();
-                long listed = System.Diagnostics.Stopwatch.GetTimestamp();
+                long listed = System.Diagnostics.Stopwatch.GetTimestamp(), allocListed = PlayerLoop.Profile ? GC.GetAllocatedBytesForCurrentThread() : 0;
                 Draw(views);
-                long drawn = System.Diagnostics.Stopwatch.GetTimestamp();
+                long drawn = System.Diagnostics.Stopwatch.GetTimestamp(), allocDrawn = PlayerLoop.Profile ? GC.GetAllocatedBytesForCurrentThread() : 0;
                 perf.Frame(n, (drawn - now) * 1000.0 / hz, PlayerLoop.PhaseMs, (listed - built) * 1000.0 / hz, (drawn - listed) * 1000.0 / hz);
+                perf.Allocs(PlayerLoop.PhaseBytes, allocListed - allocBuilt, allocDrawn - allocListed);
                 Array.Clear(PlayerLoop.PhaseMs);
+                Array.Clear(PlayerLoop.PhaseBytes);
                 if (n % 600 == 0)
                     Console.WriteLine($"CONSOLE frame {n} scene={Cuphead360.Engine.Scenes.Active?.Name} heap {GC.GetTotalMemory(false) >> 20} MB exceptions {Exceptions.Count}; "
                         + $"GCs {GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)} (gen0/1/2), paused {(long)GC.GetTotalPauseDuration().TotalMilliseconds} ms in all; "
@@ -515,8 +538,41 @@ namespace Cuphead360.Player
         /// native code transforms, clips and writes the vertices (as managed
         /// code here they were most of a world map frame on the console).
         /// </summary>
+        // SceneLoader's state, read for the host: its loading flag, and its icon (the hourglass) and fader images.
+        static System.Reflection.PropertyInfo loaderLoading;
+        static System.Reflection.FieldInfo loaderInstance, loaderIcon, loaderFader;
+        static bool loaderLooked;
+
+        /// <summary>
+        /// The loading screen with the hourglass faded in on a black screen (SceneLoader loading, its fader
+        /// and icon opaque): the host keeps these frames and draws them again while the game is held up
+        /// (an activation's Awakes and Starts, a full collection), so the hourglass keeps turning.
+        /// </summary>
+        static bool LoadingScreen()
+        {
+            if (!loaderLooked)
+            {
+                loaderLooked = true;
+                var t = Type.GetType("SceneLoader, Assembly-CSharp");
+                const System.Reflection.BindingFlags any = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                    | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Instance;
+                loaderLoading = t?.GetProperty("CurrentlyLoading", any);
+                loaderInstance = t?.GetField("_instance", any);
+                loaderIcon = t?.GetField("icon", any);
+                loaderFader = t?.GetField("fader", any);
+            }
+            if (loaderLoading == null || loaderInstance == null || loaderIcon == null || loaderFader == null) return false;
+            if (!(loaderLoading.GetValue(null) is bool loading) || !loading) return false;
+            var inst = loaderInstance.GetValue(null) as UnityEngine.Object;
+            if (inst == null) return false;
+            var icon = loaderIcon.GetValue(inst) as UnityEngine.UI.Graphic;
+            var fader = loaderFader.GetValue(inst) as UnityEngine.UI.Graphic;
+            return icon != null && fader != null && icon.isActiveAndEnabled && icon.color.a >= 0.99f && fader.color.a >= 0.99f;
+        }
+
         static void Draw(List<RenderList.View> views)
         {
+            LoadingScreenFlag(LoadingScreen() ? 1 : 0);
             if (managedDraw) { DrawManaged(views); return; }
             float* vh = stackalloc float[13];
             int* a = stackalloc int[ItemSlots];

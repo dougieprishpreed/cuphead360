@@ -35,7 +35,7 @@ namespace Cuphead360.Engine
         public int YieldFrame, YieldFixedStep;   // when it last yielded
         public long YieldSeq;                    // the order of its last yield among all coroutines' (Unity resumes in that order)
         public bool YieldInFixed;
-        public long ProfTicks;        // its steps' time since the last PlayerLoop.TopReport
+        public long ProfTicks, ProfBytes;   // its steps' time since the last PlayerLoop.TopReport, and what they allocated
         public readonly List<CoroutineState> Waiters = new List<CoroutineState>();
     }
 
@@ -144,6 +144,7 @@ namespace Cuphead360.Engine
             Clock.UnscaledTime += realDelta;
             Clock.DeltaTime = dt * Clock.TimeScale;
             Clock.Time += Clock.DeltaTime;
+            Typed.Sweep();
 
             P(0); SceneLoader.Pump();
             Atlases.Flush();
@@ -199,14 +200,16 @@ namespace Cuphead360.Engine
         public static bool Profile = Environment.GetEnvironmentVariable("CH360_PROFILE") == "1";
         public static readonly string[] PhaseNames = { "pump", "fixed", "physics", "update", "animators", "late", "ui", "end", "audio" };
         public static readonly double[] PhaseMs = new double[9];
+        /// <summary>What each phase allocated (bytes, with Profile on): the engine's share of the GC's work beside the scripts'.</summary>
+        public static readonly long[] PhaseBytes = new long[9];
         static int phase = -1;
-        static long phaseStart;
+        static long phaseStart, phaseAlloc;
         static void P(int next)
         {
             if (!Profile) return;
-            long now = System.Diagnostics.Stopwatch.GetTimestamp();
-            if (phase >= 0) PhaseMs[phase] += (now - phaseStart) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-            phase = next; phaseStart = now;
+            long now = System.Diagnostics.Stopwatch.GetTimestamp(), alloc = GC.GetAllocatedBytesForCurrentThread();
+            if (phase >= 0) { PhaseMs[phase] += (now - phaseStart) * 1000.0 / System.Diagnostics.Stopwatch.Frequency; PhaseBytes[phase] += alloc - phaseAlloc; }
+            phase = next; phaseStart = now; phaseAlloc = alloc;
         }
         /// <summary>
         /// With Profile on: a script call's time (Stopwatch ticks, which TopReport
@@ -227,7 +230,8 @@ namespace Cuphead360.Engine
             return ticks;
         }
 
-        internal static readonly Dictionary<Type, long> FinishedTicks = new Dictionary<Type, long>();   // coroutines done since the report
+        // coroutines done since the report: their time, and what they allocated
+        internal static readonly Dictionary<Type, long> FinishedTicks = new Dictionary<Type, long>(), FinishedBytes = new Dictionary<Type, long>();
 
         /// <summary>
         /// The script types that took most time since the last report (every
@@ -245,26 +249,44 @@ namespace Cuphead360.Engine
         /// The script time since the last drain by type (every message to a behaviour of the type, and its
         /// coroutines' steps), added to each tally given (a report's window, a scene's); clears what it drains.
         /// </summary>
-        public static void DrainScriptTicks(Dictionary<Type, long> a, Dictionary<Type, long> b = null)
+        public static void DrainScriptTicks(Dictionary<Type, long> a, Dictionary<Type, long> b = null,
+                                            Dictionary<Type, long> bytesA = null, Dictionary<Type, long> bytesB = null)
         {
-            void Add(Type t, long ticks)
+            static void Add(Dictionary<Type, long> x, Dictionary<Type, long> y, Type t, long n)
             {
-                if (ticks <= 0) return;
-                a.TryGetValue(t, out long v); a[t] = v + ticks;
-                if (b != null) { b.TryGetValue(t, out long w); b[t] = w + ticks; }
+                if (n <= 0) return;
+                if (x != null) { x.TryGetValue(t, out long v); x[t] = v + n; }
+                if (y != null) { y.TryGetValue(t, out long w); y[t] = w + n; }
             }
-            foreach (var kv in FinishedTicks) Add(kv.Key, kv.Value);
+            foreach (var kv in FinishedTicks) Add(a, b, kv.Key, kv.Value);
+            foreach (var kv in FinishedBytes) Add(bytesA, bytesB, kv.Key, kv.Value);
             FinishedTicks.Clear();
+            FinishedBytes.Clear();
             foreach (var bh in tracked)
             {
-                if (bh.Managed != null) Add(bh.Managed.GetType(), bh.ProfTicks);
-                bh.ProfTicks = 0;
+                if (bh.Managed != null) { Add(a, b, bh.Managed.GetType(), bh.ProfTicks); Add(bytesA, bytesB, bh.Managed.GetType(), bh.ProfBytes); }
+                bh.ProfTicks = bh.ProfBytes = 0;
                 foreach (var c in bh.Coroutines)
                 {
-                    if (c.Routine != null) Add(c.Routine.GetType(), c.ProfTicks);
-                    c.ProfTicks = 0;
+                    if (c.Routine != null) { Add(a, b, c.Routine.GetType(), c.ProfTicks); Add(bytesA, bytesB, c.Routine.GetType(), c.ProfBytes); }
+                    c.ProfTicks = c.ProfBytes = 0;
                 }
             }
+        }
+
+        /// <summary>A tally of bytes allocated by type: the most, KB a frame over frames.</summary>
+        public static string TopBytesOf(Dictionary<Type, long> byType, int frames, int top)
+        {
+            var list = new List<KeyValuePair<Type, long>>(byType);
+            list.Sort((x, y) => y.Value.CompareTo(x.Value));
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < list.Count && i < top; i++)
+            {
+                var t = list[i].Key;
+                string name = t.DeclaringType != null ? t.DeclaringType.Name + "." + t.Name : t.Name;
+                sb.Append(i == 0 ? " " : ", ").Append(name).Append(' ').Append((list[i].Value / 1024.0 / Math.Max(1, frames)).ToString("0.0"));
+            }
+            return sb.ToString();
         }
 
         /// <summary>A tally's costliest types, ms a frame over frames; totalMs: all its script time a frame.</summary>
@@ -496,9 +518,10 @@ namespace Cuphead360.Engine
             if (c.Done) return;
             bool more;
             long t0 = PlayerLoop.Profile ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            long a0 = t0 != 0 ? GC.GetAllocatedBytesForCurrentThread() : 0;
             try { more = c.Routine.MoveNext(); }
             catch (Exception e) { Exceptions.Report(e, c.Owner, "coroutine " + c.Routine.GetType().Name); more = false; }
-            if (t0 != 0) c.ProfTicks += PlayerLoop.SlowCall(t0, c.Routine.GetType(), null, "MoveNext");
+            if (t0 != 0) { c.ProfTicks += PlayerLoop.SlowCall(t0, c.Routine.GetType(), null, "MoveNext"); c.ProfBytes += GC.GetAllocatedBytesForCurrentThread() - a0; }
             if (!more) { Finish(c); return; }
             object y = c.Routine.Current;
             c.Waiting = y; c.FixedWait = false; c.EndOfFrameWait = false; c.WaitOn = null;
@@ -537,6 +560,12 @@ namespace Cuphead360.Engine
                 PlayerLoop.FinishedTicks.TryGetValue(c.Routine.GetType(), out long v);
                 PlayerLoop.FinishedTicks[c.Routine.GetType()] = v + c.ProfTicks;
                 c.ProfTicks = 0;
+            }
+            if (c.ProfBytes > 0 && c.Routine != null)
+            {
+                PlayerLoop.FinishedBytes.TryGetValue(c.Routine.GetType(), out long v);
+                PlayerLoop.FinishedBytes[c.Routine.GetType()] = v + c.ProfBytes;
+                c.ProfBytes = 0;
             }
             if (c.Handle != null) handles.Remove(c.Handle);
             foreach (var w in c.Waiters)

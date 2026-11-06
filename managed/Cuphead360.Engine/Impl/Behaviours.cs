@@ -20,8 +20,8 @@ namespace Cuphead360.Engine
         public bool InInvokers, CoroutinesDirty;
         public readonly List<InvokeState> Invokes = new List<InvokeState>();
         public long Order;
-        /// <summary>Its messages' time since the last PlayerLoop.TopReport (with Profile on).</summary>
-        public long ProfTicks;
+        /// <summary>Its messages' time since the last PlayerLoop.TopReport (with Profile on), and what they allocated.</summary>
+        public long ProfTicks, ProfBytes;
         /// <summary>Messages without arguments, bound to this behaviour (reflection's Invoke is slow and allocates).</summary>
         public Dictionary<MethodInfo, Action> Calls;
         /// <summary>
@@ -173,6 +173,7 @@ namespace Cuphead360.Engine
         {
             if (m == null) return null;
             long t0 = PlayerLoop.Profile ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            long a0 = t0 != 0 ? GC.GetAllocatedBytesForCurrentThread() : 0;
             try
             {
                 var bound = Bound(b, m);
@@ -196,7 +197,7 @@ namespace Cuphead360.Engine
             }
             catch (TargetInvocationException e) { Exceptions.Report(e.InnerException, b, m.Name); }
             catch (Exception e) { Exceptions.Report(e, b, m.Name); }
-            finally { if (t0 != 0) b.ProfTicks += PlayerLoop.SlowCall(t0, b.Managed, m); }
+            finally { if (t0 != 0) { b.ProfTicks += PlayerLoop.SlowCall(t0, b.Managed, m); b.ProfBytes += GC.GetAllocatedBytesForCurrentThread() - a0; } }
             return null;
         }
 

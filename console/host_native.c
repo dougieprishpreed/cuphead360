@@ -20,6 +20,7 @@ static unsigned long draw_items, draw_vertices, views_seen, bad_lists, textures_
 static unsigned long audio_frames;
 static FILE* wav;
 static clock_t started;
+static unsigned long loading_frames;   /* frames marked the loading screen (the console's host draws these again during a hold-up) */
 
 /* CH360_TRACE_TEX=<ctex dir>: the textures each frame draws and what they
  * cost the console (their .ctx sizes, runtime ones at 4 bytes a pixel), with
@@ -94,9 +95,9 @@ int ch360_plat_frame_begin(void) {
     if (frame_no > 0 && frame_no % 600 == 0) {
         double secs = (double)(clock() - started) / CLOCKS_PER_SEC;
         printf("[host] frame %ld: %.1f fps; last frame %lu views, %lu items, %lu vertices; textures %lu files, %lu runtime; "
-               "audio %.1f s; memory %u MB; bad lists %lu; items off the sprite pages %u\n",
+               "audio %.1f s; memory %u MB; bad lists %lu; items off the sprite pages %u; loading-screen frames %lu\n",
                frame_no, frame_no / (secs > 0 ? secs : 1), views_seen, draw_items, draw_vertices, textures_files,
-               textures_pixels, audio_frames / 48000.0, ch360_memory_kb() / 1024, bad_lists, ch360_remap_misses());
+               textures_pixels, audio_frames / 48000.0, ch360_memory_kb() / 1024, bad_lists, ch360_remap_misses(), loading_frames);
         fflush(stdout);
     }
     frame_no++;
@@ -126,6 +127,7 @@ static long dump_every;
 
 void ch360_plat_draw(const ch360_frame* f) {
     unsigned v, i;
+    if (f->loading) ++loading_frames;
     views_seen = f->view_count;
     draw_items = draw_vertices = 0;
     if (dump_file && dump_every > 0 && frame_no % dump_every == 0) {

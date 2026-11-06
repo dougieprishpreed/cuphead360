@@ -721,9 +721,17 @@ void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
     draw_build_ms += draw_now_ms() - t0;
 }
 
+/* ConsoleHost: this frame is the loading screen with its hourglass faded in. */
+static int draw_loading;
+void i5_ch36014_loadingX5Fscreen(wasmModuleInstance* inst, U32 on) {
+    (void)inst;
+    draw_loading = on != 0;
+}
+
 void i5_ch3608_drawX5Fend(wasmModuleInstance* inst) {
     ch360_frame f;
     (void)inst;
+    f.loading = draw_loading;
     f.views = draw_views;
     f.view_count = draw_view_count;
     f.items = draw_items;
@@ -875,7 +883,10 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
      * converted files' bytes are large objects, loaded and let go each scene):
      * the long route's linear memory peaked at 184 MB against 200, pauses as
      * before; smaller segments (GCSegmentSize 4-12 MB) saved 16-40 MB more but
-     * doubled the gen2s and their pause (2026-11-05). */
+     * doubled the gen2s and their pause (2026-11-05). A hard limit (GCHeapHardLimit
+     * 160 MB) or kept segments (GCRetainVM): the nineteenth run's route peaked at
+     * 199-200 or 215-216 MB from run to run with either setting and without
+     * (scene builds sliced by the clock), so neither is set (2026-11-05). */
     static const char* const env[6] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCConserveMemory=0",
                                         "CH360_TREE_BUDGET_MB=4", "DOTNET_GCgen0size=100000", "DOTNET_GCLOHCompact=1" };
     srt_config cfg;
