@@ -2831,6 +2831,10 @@ extern "C" int ch360_plat_frame_begin(void) {
              (unsigned)(g_renderer->present_ms / 60), f, tot, ch360_memory_kb() / 1024, (unsigned)(g_renderer->texture_bytes() >> 20),
              g_renderer->uploads, g_renderer->evictions, (unsigned)(g_renderer->stored_bytes() >> 20), (unsigned)(mi.arena >> 20),
              (unsigned)(mi.uordblks >> 20), g_renderer->ring_drops, g_audio_underruns);
+        unsigned am[7];
+        ch360_audio_memory(am);
+        logf("audio memory: %u clips decoded %u KB (peak %u), compressed %u KB open + %u KB kept, stream buffers %u KB, %u decoders",
+             am[0], am[1], am[2], am[3], am[4], am[5], am[6]);
         g_logic_ms = g_worst_ms = 0;
         g_slow = 0;
         g_renderer->gpu_wait_ms = g_renderer->present_ms = 0;

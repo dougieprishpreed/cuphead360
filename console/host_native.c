@@ -95,10 +95,14 @@ int ch360_plat_frame_begin(void) {
     }
     if (frame_no > 0 && frame_no % 600 == 0) {
         double secs = (double)(clock() - started) / CLOCKS_PER_SEC;
+        unsigned am[7];
+        ch360_audio_memory(am);
         printf("[host] frame %ld: %.1f fps; last frame %lu views, %lu items, %lu vertices; textures %lu files, %lu runtime; "
-               "audio %.1f s; memory %u MB; bad lists %lu; items off the sprite pages %u; loading-screen frames %lu (%lu recorded ahead)\n",
+               "audio %.1f s; memory %u MB; bad lists %lu; items off the sprite pages %u; loading-screen frames %lu (%lu recorded ahead); "
+               "audio memory: %u clips decoded %u KB (peak %u), compressed %u KB open + %u KB kept, stream buffers %u KB, %u decoders\n",
                frame_no, frame_no / (secs > 0 ? secs : 1), views_seen, draw_items, draw_vertices, textures_files,
-               textures_pixels, audio_frames / 48000.0, ch360_memory_kb() / 1024, bad_lists, ch360_remap_misses(), loading_frames, ahead_frames);
+               textures_pixels, audio_frames / 48000.0, ch360_memory_kb() / 1024, bad_lists, ch360_remap_misses(), loading_frames, ahead_frames,
+               am[0], am[1], am[2], am[3], am[4], am[5], am[6]);
         fflush(stdout);
     }
     frame_no++;

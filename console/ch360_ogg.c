@@ -440,6 +440,7 @@ static ch360_pcm pcms[PCM_MAX];
  * their sounds), Vorbis on the console ~35 ms a second of sound. */
 enum { PCM_FIRST_FRAMES = 4096, PCM_STEP_FRAMES = 2048 };
 static unsigned pcm_pending;   /* clips not decoded whole yet */
+static size_t pcm_live, pcm_peak;   /* decoded clips' bytes now, and their highest */
 int ch360_pcm_whole;           /* a check (host_native's CH360_PCM_WHOLE): clips decoded whole at their first play */
 static unsigned pcm_next;      /* where mix_begin's share starts looking */
 
@@ -501,6 +502,8 @@ U32 i5_ch36010_pcmX5Fdecode(wasmModuleInstance* inst, U32 h, U32 out) {
     pcms[id].data = data;
     pcms[id].frames = length;
     pcms[id].channels = o->channels;
+    pcm_live += (size_t)(length ? length : 1) * o->channels * sizeof(float);
+    if (pcm_live > pcm_peak) pcm_peak = pcm_live;
     pcms[id].decoded = 0;
     pcms[id].h = (int)h;
     o->pcm_owner = id;
@@ -522,8 +525,33 @@ void i5_ch3608_pcmX5Ffree(wasmModuleInstance* inst, U32 id) {
         if (oggs[h].close_asked) ogg_close_now((U32)h);
         pcm_pending--;
     }
+    pcm_live -= (size_t)(pcms[id].frames ? pcms[id].frames : 1) * pcms[id].channels * sizeof(float);
     free(pcms[id].data);
     pcms[id].data = NULL;
+}
+
+/* The audio's memory (the frame lines): out[0] decoded clips, [1] their KB (32-bit floats), [2] the most
+ * they reached, [3] KB of open clips' compressed bytes, [4] KB of closed ones kept for their next play,
+ * [5] KB of the streams' buffers, [6] open decoders (stb_vorbis's own state not counted). */
+void ch360_audio_memory(unsigned out[7]) {
+    unsigned k, clips = 0, decoders = 0;
+    size_t open = 0, bufs = 0;
+    for (k = 0; k < PCM_MAX; k++)
+        if (pcms[k].data != NULL) clips++;
+    for (k = 0; k < OGG_MAX; k++) {
+        if (oggs[k].v == NULL) continue;
+        decoders++;
+        open += (size_t)oggs[k].size;
+        if (oggs[k].ring != NULL) bufs += (size_t)AHEAD_FRAMES * oggs[k].channels * sizeof(float);
+        if (oggs[k].sbuf != NULL) bufs += (size_t)STREAM_FRAMES * oggs[k].channels * sizeof(float);
+    }
+    out[0] = clips;
+    out[1] = (unsigned)(pcm_live >> 10);
+    out[2] = (unsigned)(pcm_peak >> 10);
+    out[3] = (unsigned)(open >> 10);
+    out[4] = cache_bytes >> 10;
+    out[5] = (unsigned)(bufs >> 10);
+    out[6] = decoders;
 }
 
 /* mix_begin(frames): the block to mix into, silent. */
