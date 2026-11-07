@@ -21,7 +21,7 @@ static unsigned long audio_frames;
 static FILE* wav;
 static clock_t started;
 static unsigned long loading_frames;   /* frames marked the loading screen (the console's host draws these again during a hold-up) */
-static unsigned long late_textures;    /* CH360_TEXTURE_LATE: textures made late (ch360_plat_texture_ready) */
+static unsigned long ahead_frames;     /* the hourglass's frames recorded ahead (not drawn) */
 
 /* CH360_TRACE_TEX=<ctex dir>: the textures each frame draws and what they
  * cost the console (their .ctx sizes, runtime ones at 4 bytes a pixel), with
@@ -96,11 +96,9 @@ int ch360_plat_frame_begin(void) {
     if (frame_no > 0 && frame_no % 600 == 0) {
         double secs = (double)(clock() - started) / CLOCKS_PER_SEC;
         printf("[host] frame %ld: %.1f fps; last frame %lu views, %lu items, %lu vertices; textures %lu files, %lu runtime; "
-               "audio %.1f s; memory %u MB; bad lists %lu; items off the sprite pages %u; loading-screen frames %lu; "
-               "late textures %lu\n",
+               "audio %.1f s; memory %u MB; bad lists %lu; items off the sprite pages %u; loading-screen frames %lu (%lu recorded ahead)\n",
                frame_no, frame_no / (secs > 0 ? secs : 1), views_seen, draw_items, draw_vertices, textures_files,
-               textures_pixels, audio_frames / 48000.0, ch360_memory_kb() / 1024, bad_lists, ch360_remap_misses(), loading_frames,
-               late_textures);
+               textures_pixels, audio_frames / 48000.0, ch360_memory_kb() / 1024, bad_lists, ch360_remap_misses(), loading_frames, ahead_frames);
         fflush(stdout);
     }
     frame_no++;
@@ -130,6 +128,10 @@ static long dump_every;
 
 void ch360_plat_draw(const ch360_frame* f) {
     unsigned v, i;
+    if (f->loading & 0x40000000u) {   /* the console keeps these, it doesn't draw them */
+        ++ahead_frames;
+        return;
+    }
     if (f->loading) ++loading_frames;
     views_seen = f->view_count;
     draw_items = draw_vertices = 0;
@@ -159,28 +161,6 @@ void ch360_plat_draw(const ch360_frame* f) {
     }
     if (trace_dir) trace_frame();
 }
-
-/* CH360_TEXTURE_LATE=N: a texture is ready only N frames after it was first asked about, and again each time
- * after CH360_TEXTURE_FORGET frames unasked (as if evicted): the console's loads, so the glue's stand-ins
- * (a sprite's last loaded frame) run on PC. */
-static int late_frames = -2, forget_frames = 0;
-static long late_asked[TRACE_IDS], late_last[TRACE_IDS];
-int ch360_plat_texture_ready(int id) {
-    if (late_frames == -2) {
-        const char* v = getenv("CH360_TEXTURE_LATE");
-        const char* f = getenv("CH360_TEXTURE_FORGET");
-        late_frames = v ? atoi(v) : -1;
-        forget_frames = f ? atoi(f) : 0;
-    }
-    if (late_frames < 0 || id < 0 || id >= TRACE_IDS || tex_key[id] == NULL) return 1;
-    if (late_asked[id] == 0 || (forget_frames > 0 && frame_no - late_last[id] > forget_frames)) {
-        late_asked[id] = frame_no + 1;
-        late_textures++;
-    }
-    late_last[id] = frame_no;
-    return frame_no + 1 - late_asked[id] >= late_frames;
-}
-void ch360_plat_texture_need(int id) { (void)id; }
 
 /* CH360_TRACE_PREFETCH=1: each read-ahead asked for, with the frame (the console's loader reads them). */
 static int trace_prefetch = -1;

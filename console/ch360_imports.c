@@ -909,26 +909,6 @@ void i5_ch36013_textureX5Fahead(wasmModuleInstance* inst, U32 id, F32 u0, F32 v0
     }
 }
 
-/* ConsoleHost, before a sprite's item: whether the page holding its uv box (u0, v0)-(u1, v1) on texture id can
- * be drawn now (1), else 0 and, with want, the page asked for as if drawn without a frame waiting for it
- * (ch360_plat_texture_need). Not ready, ConsoleHost draws the renderer's last frame whose page was. */
-U32 i5_ch36013_textureX5Fready(wasmModuleInstance* inst, U32 id, F32 u0, F32 v0, F32 u1, F32 v1, U32 want) {
-    int p, page, bi, t;
-    (void)inst;
-    p = plat_id((int)id);
-    if (p < 0) return 1;
-    page = page_of_plat[p] - 1;
-    t = p;
-    if (page >= 0 && rm_pages[page].count > 0) {
-        bi = remap_find(&rm_pages[page], u0, v0, u1, v1);
-        if (bi >= 0) t = remap_target_id(&rm_pages[page], &rm_boxes[bi]);
-        if (t < 0) return 1;
-    }
-    if (ch360_plat_texture_ready(t)) return 1;
-    if (want) ch360_plat_texture_need(t);
-    return 0;
-}
-
 void i5_ch36014_textureX5Fpixels(wasmModuleInstance* inst, U32 id, U32 w, U32 h, U32 bgra) {
     (void)inst;
     if (w == 0 || h == 0 || w > 8192 || h > 8192 || !srt_mem_ok(bgra, w * h * 4)) return;

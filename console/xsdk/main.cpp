@@ -14,6 +14,7 @@
 // Pad: the game's own controls. Back writes the log now; hold Back + Start
 // to quit to the dashboard.
 #include <fcntl.h>
+#include <malloc.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -198,9 +199,14 @@ const unsigned MEMORY_FLOOR_MB = 24;
 const unsigned AHEAD_AGE = 180;
 const size_t PAGE_MAX = 4u << 20;
 // Pages' stored bytes (LZ4, about a quarter of their size) kept in memory: a page evicted and drawn again,
-// or read ahead, decodes without the drive (USB reads ran at ~11 MB/s: 40-180 ms a page, the waits behind
-// most hitches in the levels of the twentieth and twenty-first runs; a decode is a few ms a MB).
-const size_t STORED_BUDGET = 16u << 20;
+// or read ahead, decodes without the drive (USB reads ran at ~11 MB/s: 40-180 ms a page). Off: each was a
+// malloc of its own, and newlib's heap never gives back what it grew to (the twenty-second and twenty-third
+// runs: ~35 MB more of the console's memory not counted anywhere, textures squeezed to 41 MB and refused).
+// Back only with a fixed arena of its own.
+const size_t STORED_BUDGET = 0;
+// The loader's buffers (a job's decoded texture until it's copied to staging) come from one block made at
+// start, not malloc: a malloc of up to 4 MB a texture load left newlib's heap at its highest.
+const size_t LOAD_ARENA = 12u << 20;
 
 
 enum { MODE_SPRITE, MODE_SCREEN, MODE_MULTIPLY, MODE_OVERLAY, MODE_SDF, MODE_COLOROVERLAY, MODE_LIGHTRAY,
@@ -289,6 +295,44 @@ struct LoadJob {
     double queued, read_ms;
 };
 const unsigned LOAD_RING = 64;
+
+// The loader's arena: free ranges by offset, first fit, merged when given back (main thread only).
+unsigned char* g_arena = NULL;
+std::vector<std::pair<size_t, size_t> > g_arena_free;   // (offset, size), by offset
+
+unsigned char* arena_take(size_t n) {
+    n = (n + 127) & ~(size_t)127;
+    for (size_t i = 0; i < g_arena_free.size(); ++i)
+        if (g_arena_free[i].second >= n) {
+            unsigned char* p = g_arena + g_arena_free[i].first;
+            g_arena_free[i].first += n;
+            g_arena_free[i].second -= n;
+            if (g_arena_free[i].second == 0) g_arena_free.erase(g_arena_free.begin() + (long)i);
+            return p;
+        }
+    return NULL;
+}
+
+// A buffer back to the arena, or free() when it came from malloc (none fitted).
+void arena_give(unsigned char* p, size_t n) {
+    if (!p) return;
+    if (!g_arena || p < g_arena || p >= g_arena + LOAD_ARENA) {
+        free(p);
+        return;
+    }
+    n = (n + 127) & ~(size_t)127;
+    size_t off = (size_t)(p - g_arena), i = 0;
+    while (i < g_arena_free.size() && g_arena_free[i].first < off) ++i;
+    g_arena_free.insert(g_arena_free.begin() + (long)i, std::make_pair(off, n));
+    if (i + 1 < g_arena_free.size() && g_arena_free[i].first + g_arena_free[i].second == g_arena_free[i + 1].first) {
+        g_arena_free[i].second += g_arena_free[i + 1].second;
+        g_arena_free.erase(g_arena_free.begin() + (long)i + 1);
+    }
+    if (i > 0 && g_arena_free[i - 1].first + g_arena_free[i - 1].second == g_arena_free[i].first) {
+        g_arena_free[i - 1].second += g_arena_free[i].second;
+        g_arena_free.erase(g_arena_free.begin() + (long)i);
+    }
+}
 LoadJob* g_load_in[LOAD_RING];    // textures items draw this frame
 LoadJob* g_pre_in[LOAD_RING];     // prefetches (read only when no drawn one waits)
 LoadJob* g_load_out[LOAD_RING];
@@ -457,8 +501,6 @@ private:
 public:
     void start_loader();
     void prefetch(int id, bool wanted);
-    bool ready(int id);
-    void need(int id);
 private:
     void evict();
     size_t release_unused(size_t want);
@@ -540,6 +582,9 @@ private:
     bool staging_cached_;                                          // staging in the CPU's cached memory
     std::vector<unsigned char> on_view_;                           // per item of the frame's list
     bool overflow_logged_;
+public:
+    unsigned ring_drops;   // items left out for the vertex ring
+private:
     unsigned loads_logged_;
 };
 
@@ -614,6 +659,7 @@ bool Renderer::init() {
     texture_bytes_ = 0;
     upload_open_ = false;
     overflow_logged_ = false;
+    ring_drops = 0;
     loads_logged_ = 0;
     const char* iexts[2] = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_DISPLAY_EXTENSION_NAME };
     VkApplicationInfo app;
@@ -1612,6 +1658,8 @@ void Renderer::start_loader() {
     stored_bytes_ = 0;
     wait_ms_ = 0;
     if (ch360_ctex_pack < 0) return;
+    g_arena = (unsigned char*)malloc(LOAD_ARENA);
+    if (g_arena) g_arena_free.push_back(std::make_pair((size_t)0, LOAD_ARENA));
     g_load_reader = ch360_pack_reader_new();
     if (!g_load_reader) return;
     pthread_t th;
@@ -1698,7 +1746,7 @@ void Renderer::take_loads(bool all) {
         if (j->pre) pre_bytes_ -= j->bytes;
         load_bytes_ -= j->bytes;
         --load_jobs_;
-        free(j->data);
+        arena_give(j->data, j->n ? j->n : 1);
         delete j;
     }
     taken_.erase(taken_.begin(), taken_.begin() + (long)k);
@@ -1736,6 +1784,7 @@ void Renderer::prefetch(int id, bool wanted) {
     if (!g_loader || ch360_ctex_pack < 0) return;
     Tex* t = tex(id);
     if (!wanted) {
+        if (STORED_BUDGET == 0) return;   // stored bytes off: a guess isn't read
         // A guess (an atlas the game loaded, a drawn page's siblings): its stored bytes, while there is room,
         // never making room from what was drawn (the twenty-first run's Forest Follies began with 60 MB of the
         // maps' atlases read ahead in full, the level's own pages evicted for them).
@@ -1757,23 +1806,6 @@ void Renderer::prefetch(int id, bool wanted) {
     t->pre_wanted = true;
     pre_backlog_.push_back(id);
     feed_prefetch();
-}
-
-// Drawable now: loaded, or nothing to load (render textures, run-time pixels, textures that can't be read).
-bool Renderer::ready(int id) {
-    if (id < 0 || id >= CH360_RT_BASE) return true;
-    Tex* t = tex(id);
-    if (!t || t->image || t->key.empty() || t->failed) return true;
-    return false;
-}
-
-// A page a sprite will draw as soon as it's loaded (the glue drew its last loaded frame meanwhile): read as
-// if drawn (the drawn ring, room made as for a drawn one), without the frame waiting for it.
-void Renderer::need(int id) {
-    if (!g_loader || id < 0 || id >= CH360_RT_BASE) return;
-    Tex* t = tex(id);
-    if (!t || t->image || t->failed || t->key.empty() || frame_no_ < t->retry_at) return;
-    if (!t->loading || t->prefetching) queue_load(id, *t, false);
 }
 
 void Renderer::feed_prefetch() {
@@ -1884,7 +1916,8 @@ bool Renderer::queue_load(int id, Tex& t, bool pre, bool stored_only) {
     }
     if (stored_only && !stored) return false;
     if (t.stored) t.stored_used = frame_no_;
-    unsigned char* data = stored_only ? NULL : (unsigned char*)malloc(n ? n : 1);
+    unsigned char* data = NULL;
+    if (!stored_only && (data = arena_take(n ? n : 1)) == NULL) data = (unsigned char*)malloc(n ? n : 1);
     if (!stored_only && !data) {
         if (fresh) free(stored);
         t.retry_at = frame_no_ + 120;
@@ -2140,6 +2173,31 @@ void Renderer::frame(const ch360_frame* f) {
     vkCmdBindVertexBuffers(cmd, 0, 1, &vbuf_, &base);
     ch360_vertex* ring = (ch360_vertex*)(vmap_ + base);
     size_t used = 0, cap = VERTEX_RING / sizeof(ch360_vertex);
+    // More vertices than the ring holds: the largest items (a sky's or a cloud bank's layers, meshes of
+    // thousands of triangles) are left out until the rest fits. The ring used to stop at the first item
+    // that didn't fit, so everything drawn after Hilda Berg's night sky went (the twenty-second run).
+    size_t drop_from = ~(size_t)0;
+    unsigned drop_left = 0;
+    {
+        size_t need = 0;
+        for (unsigned i = 0; i < f->item_count; ++i) need += f->items[i].count;
+        if (need > cap) {
+            size_t wanted = need;
+            std::vector<unsigned> big;
+            for (unsigned i = 0; i < f->item_count; ++i)
+                if (f->items[i].count >= 3000) big.push_back(f->items[i].count);
+            std::sort(big.begin(), big.end());
+            while (need > cap && !big.empty()) {
+                need -= big.back();
+                drop_from = big.back();
+                ++drop_left;
+                big.pop_back();
+            }
+            if (!overflow_logged_)
+                logf("vk: a frame wanted %u vertices of the ring's %u: its %u largest items left out", (unsigned)wanted, (unsigned)cap, drop_left);
+            overflow_logged_ = true;
+        }
+    }
 
     // Pass 2: record the views' draws, consecutive items of one pipeline and
     // texture batched into one draw; each item's vertices are copied as the
@@ -2322,10 +2380,16 @@ void Renderer::frame(const ch360_frame* f) {
                 pipe = pipeline(m, it.stencil == 3 ? STENCIL_INSIDE : it.stencil == 4 ? STENCIL_OUTSIDE : STENCIL_NONE);
                 if (!pipe) continue;
             }
+            if (drop_left > 0 && it.count >= drop_from) {
+                --drop_left;
+                ++ring_drops;
+                continue;
+            }
             if (used + it.count > cap) {
                 if (!overflow_logged_) logf("vk: vertex ring full (%u vertices)", (unsigned)cap);
                 overflow_logged_ = true;
-                break;
+                ++ring_drops;
+                continue;
             }
             if (m == MODE_LIGHTRAY || m >= FIRST_FX) {
                 // A draw of its own: more textures and its floats (the light ray three textures and
@@ -2529,14 +2593,16 @@ bool g_loading_screen = false;               // the last frame the game drew was
 unsigned g_rec_period = 0;                   // the hourglass's cycle, ms (0: not known, the newest frame is drawn)
 double g_last_draw_ms = 0;
 
-// After the game's draw (g_gpu_lock held).
+// After the game's draw (g_gpu_lock held); a frame recorded ahead (0x40000000: the hourglass's other
+// frames, ConsoleHost.RecordHourglass) only fills its slot.
 void record_loading(const ch360_frame* f) {
+    bool ahead = (f->loading & 0x40000000u) != 0;
     if (!f->loading || f->item_count > 256 || f->vertex_count > 16384) {
         if (g_rec_count) forget_loading();
         g_loading_screen = false;
         return;
     }
-    unsigned period = (f->loading >> 16) & 0x7FFF;
+    unsigned period = (f->loading >> 16) & 0x3FFF;
     if (period != g_rec_period) forget_loading();
     g_rec_period = period;
     unsigned phase = period ? (f->loading & 0xFFFF) % period : 0;
@@ -2548,6 +2614,7 @@ void record_loading(const ch360_frame* f) {
     r.views.assign(f->views, f->views + f->view_count);
     r.items.assign(f->items, f->items + f->item_count);
     r.verts.assign(f->vertices, f->vertices + f->vertex_count);
+    if (ahead) return;
     g_rec_head = slot;
     g_loading_screen = true;
 }
@@ -2721,12 +2788,14 @@ extern "C" int ch360_plat_frame_begin(void) {
         GpuLock lock;
         unsigned f, tot;
         memory_mb(&f, &tot);
+        struct mallinfo mi = mallinfo();   // newlib's heap: grown to (arena), in use
         // Times in tenths of a millisecond (integers only in the log).
         logf("frame %u: %u ms/frame x10 (worst %u, %u over 17.5); gpu wait %u, present %u; memory %u MB free of %u, player %u MB, "
-             "textures %u MB (%u uploads, %u evicted), stored %u MB; audio underruns %u",
+             "textures %u MB (%u uploads, %u evicted), stored %u MB; host heap %u MB (%u in use); items left out for the vertex ring %u; audio underruns %u",
              g_frames, (unsigned)(g_logic_ms / 60), (unsigned)(g_worst_ms * 10), g_slow, (unsigned)(g_renderer->gpu_wait_ms / 60),
              (unsigned)(g_renderer->present_ms / 60), f, tot, ch360_memory_kb() / 1024, (unsigned)(g_renderer->texture_bytes() >> 20),
-             g_renderer->uploads, g_renderer->evictions, (unsigned)(g_renderer->stored_bytes() >> 20), g_audio_underruns);
+             g_renderer->uploads, g_renderer->evictions, (unsigned)(g_renderer->stored_bytes() >> 20), (unsigned)(mi.arena >> 20),
+             (unsigned)(mi.uordblks >> 20), g_renderer->ring_drops, g_audio_underruns);
         g_logic_ms = g_worst_ms = 0;
         g_slow = 0;
         g_renderer->gpu_wait_ms = g_renderer->present_ms = 0;
@@ -2771,6 +2840,11 @@ extern "C" int ch360_plat_pad(int index, ch360_pad* out) {
 }
 
 extern "C" void ch360_plat_draw(const ch360_frame* f) {
+    if (f->loading & 0x40000000u) {   // the hourglass's frame recorded ahead: kept, not drawn
+        GpuLock lock;
+        record_loading(f);
+        return;
+    }
     {
         GpuLock lock;
         g_renderer->frame(f);
@@ -2783,14 +2857,6 @@ extern "C" void ch360_plat_draw(const ch360_frame* f) {
 extern "C" void ch360_plat_texture_file(int id, const char* key) {
     GpuLock lock;
     g_renderer->texture_file(id, key);
-}
-extern "C" int ch360_plat_texture_ready(int id) {
-    GpuLock lock;
-    return g_renderer->ready(id) ? 1 : 0;
-}
-extern "C" void ch360_plat_texture_need(int id) {
-    GpuLock lock;
-    g_renderer->need(id);
 }
 extern "C" void ch360_plat_texture_prefetch(int id, int wanted) {
     GpuLock lock;

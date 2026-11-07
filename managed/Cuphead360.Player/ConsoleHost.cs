@@ -46,8 +46,6 @@ namespace Cuphead360.Player
         static extern void TexturePrefetch(int id);
         [DllImport("ch360", EntryPoint = "texture_ahead"), WasmImportLinkage]
         static extern void TextureAhead(int id, float u0, float v0, float u1, float v1);
-        [DllImport("ch360", EntryPoint = "texture_ready"), WasmImportLinkage]
-        static extern int TextureReady(int id, float u0, float v0, float u1, float v1, int want);
         [DllImport("ch360", EntryPoint = "loading_screen"), WasmImportLinkage]
         static extern void LoadingScreenFlag(uint state);
         [DllImport("ch360", EntryPoint = "audio"), WasmImportLinkage]
@@ -442,7 +440,7 @@ namespace Cuphead360.Player
                     Console.WriteLine($"CONSOLE frame {n} scene={Cuphead360.Engine.Scenes.Active?.Name} heap {GC.GetTotalMemory(false) >> 20} MB exceptions {Exceptions.Count}; "
                         + $"GCs {GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)} (gen0/1/2), paused {(long)GC.GetTotalPauseDuration().TotalMilliseconds} ms in all; "
                         + $"converted files {ChobFile.LoadedFiles} ({ChobFile.LoadedBytes >> 20} MB, objects read {ChobFile.ObjectReads} ({ChobFile.ObjectBytes >> 20} MB) in {ChobFile.BlockReads} block reads)"
-                        + $", trees dropped {ChobObject.TreesDropped}, parsed again {ChobObject.TreesReparsed}; sprites drawn with their last loaded frame {StandIns}, left out while their page loads {LeftOut}");
+                        + $", trees dropped {ChobObject.TreesDropped}, parsed again {ChobObject.TreesReparsed}");
             }
             return 0;
         }
@@ -480,6 +478,7 @@ namespace Cuphead360.Player
             Audio.CacheFloats = 2L * 1024 * 1024;   // 8 MB of the host mixer's decoded clips (textures need the room)
             if (ChobObject.TreeBudget == long.MaxValue) ChobObject.TreeBudget = 24L << 20;   // parsed trees kept (estimated bytes)
             ChobFile.BlockBudget = 8L << 20;   // large files' blocks kept
+            Cuphead360.Engine.SceneLoader.CollectEveryBytes = 32L << 20;   // collections while scenes load (the memory's peak stays)
             RenderList.HostTransforms = !managedDraw;   // sprites' vertices go to the host untransformed
             var bad = new List<string>();
             foreach (var s in new[] { "5848540871337674781", "-2592357432173453771", "4294967296", "-4294967296", "2147483648", "-1" })
@@ -559,8 +558,9 @@ namespace Cuphead360.Player
         /// The loading screen with the hourglass faded in on a black screen (SceneLoader loading, its fader
         /// and icon opaque): the host keeps these frames and draws them again while the game is held up
         /// (an activation's Awakes and Starts, a full collection), so the hourglass keeps turning. 0 if not;
-        /// else 0x80000000 | the hourglass animation's cycle in ms &lt;&lt; 16 | where it is in it, ms (the host
-        /// draws the kept frame nearest where the animation would be; 0 for the cycle if it isn't known).
+        /// else 0x80000000 | the hourglass animation's cycle in ms &lt;&lt; 16 (under 16384) | where it is in it, ms
+        /// (the host draws the kept frame nearest where the animation would be; 0 for the cycle if it isn't
+        /// known); 0x40000000 marks a frame recorded ahead, not shown (RecordHourglass).
         /// </summary>
         static uint LoadingScreen()
         {
@@ -589,7 +589,7 @@ namespace Cuphead360.Player
                 var info = animator.GetCurrentAnimatorStateInfo(0);
                 float speed = Math.Abs(info.speed * info.speedMultiplier);
                 float cycle = speed > 0f ? info.length / speed * 1000f : 0f;
-                if (cycle >= 1f && cycle < 32768f)
+                if (cycle >= 1f && cycle < 16384f)
                 {
                     float at = info.normalizedTime - (float)Math.Floor(info.normalizedTime);
                     state |= (uint)cycle << 16 | (uint)(at * cycle) & 0xFFFF;
@@ -600,8 +600,43 @@ namespace Cuphead360.Player
 
         static void Draw(List<RenderList.View> views)
         {
-            LoadingScreenFlag(LoadingScreen());
-            PruneKept();
+            uint state = LoadingScreen();
+            DrawFrame(views, state);
+            RecordHourglass(state);
+        }
+
+        // The hourglass's frames recorded ahead: one per slot of the host's 64 over its cycle, a few each frame
+        // from the loading screen's first. The host kept only the frames the game drew, a part of the 2.2 s
+        // cycle in a long load, and drew that part over and over (the twenty-first to twenty-third runs).
+        const int HourglassSlots = 64, HourglassSlotsAFrame = 8;
+        static int hourglassRecorded = -1;
+
+        static void RecordHourglass(uint state)
+        {
+            uint cycle = (state >> 16) & 0x3FFF;
+            if (state == 0 || cycle == 0) { hourglassRecorded = -1; return; }
+            if (hourglassRecorded >= HourglassSlots || managedDraw) return;
+            if (hourglassRecorded < 0) hourglassRecorded = 0;
+            var inst = loaderInstance.GetValue(null) as UnityEngine.Object;
+            var icon = inst != null ? loaderIcon.GetValue(inst) as UnityEngine.UI.Image : null;
+            var animator = icon != null ? icon.GetComponent<Animator>() : null;
+            if (animator == null) { hourglassRecorded = HourglassSlots; return; }
+            var shown = icon.sprite;
+            for (int n = 0; n < HourglassSlotsAFrame && hourglassRecorded < HourglassSlots; n++, hourglassRecorded++)
+            {
+                float fraction = (hourglassRecorded + 0.5f) / HourglassSlots;
+                var sprite = NAnimator.SpriteAt(animator, fraction);
+                if (sprite == null) { hourglassRecorded = HourglassSlots; break; }
+                icon.sprite = sprite;
+                Cuphead360.Engine.UI.WillRender();
+                DrawFrame(RenderList.Build(), 0xC0000000u | cycle << 16 | (uint)(fraction * cycle));
+            }
+            icon.sprite = shown;
+        }
+
+        static void DrawFrame(List<RenderList.View> views, uint loading)
+        {
+            LoadingScreenFlag(loading);
             if (managedDraw) { DrawManaged(views); return; }
             float* vh = stackalloc float[13];
             int* a = stackalloc int[ItemSlots];
@@ -641,63 +676,9 @@ namespace Cuphead360.Player
         //  26/27 mode 6's shadow and sky glow textures  28-30 its t, textureWidth, textureSpeed
         //  31 sprite masks' stencil (RenderList.Item.SpriteStencil: 1 add, 2 remove for a mask, mode 7; 3 inside, 4 outside)
         //  32-43 an effect's values (modes 8-17, Effects.cs); 26 mode 17's overlay texture
-        //  44 a sprite renderer's key (RenderList.Item.Key; 0 none)
-        const int ItemSlots = 45;
+        const int ItemSlots = 44;
         static readonly int shadowTex = ShaderProps.Id("_ShadowTex"), skyGlowTex = ShaderProps.Id("_SkyGlowTex");
         static readonly int rayT = ShaderProps.Id("t"), rayWidth = ShaderProps.Id("textureWidth"), raySpeed = ShaderProps.Id("textureSpeed");
-
-        /// <summary>A sprite renderer's last frame whose page was loaded (its sprite's arrays, kept by reference).</summary>
-        sealed class Kept
-        {
-            public Vector2[] Local, Uv;
-            public int[] Triangles;
-            public int Tex, Frame;
-            public Vector4 Box;
-        }
-        static readonly Dictionary<int, Kept> kept = new Dictionary<int, Kept>();
-        static readonly List<int> keptGone = new List<int>();
-        const int KeptFrames = 60;
-        /// <summary>Sprites drawn with their renderer's last loaded frame so far (the CONSOLE lines).</summary>
-        public static long StandIns;
-        /// <summary>Sprites left out for a frame while their first page loads.</summary>
-        public static long LeftOut;
-
-        /// <summary>
-        /// A sprite whose page isn't loaded is drawn with its renderer's last frame whose page was, through its
-        /// own map, while the page loads (asked for as if drawn, nothing waiting): the host used to hold the
-        /// frame for the drive's 40-180 ms when a character's next animation was on a page of its own (a hit,
-        /// an attack). A renderer without a loaded frame in the last KeptFrames (a new bullet, an effect) is left
-        /// out until its page is in: false. (The glue kept copies of the meshes: 23 ms a frame of Hilda Berg's
-        /// moon, and memory never given back.)
-        /// </summary>
-        static bool StandIn(RenderList.Item it, ref int tex)
-        {
-            var box = it.UvBox;
-            if (TextureReady(tex, box.x, box.y, box.z, box.w, 1) != 0)
-            {
-                if (!kept.TryGetValue(it.Key, out var k)) kept[it.Key] = k = new Kept();
-                k.Local = it.Local; k.Uv = it.Uv; k.Triangles = it.Triangles; k.Tex = tex; k.Box = box; k.Frame = Clock.FrameCount;
-                return true;
-            }
-            if (kept.TryGetValue(it.Key, out var s) && Clock.FrameCount - s.Frame <= KeptFrames && s.Uv != null
-                && TextureReady(s.Tex, s.Box.x, s.Box.y, s.Box.z, s.Box.w, 0) != 0)
-            {
-                it.Local = s.Local; it.Uv = s.Uv; it.Triangles = s.Triangles; tex = s.Tex;
-                StandIns++;
-                return true;
-            }
-            LeftOut++;
-            return false;
-        }
-
-        /// <summary>Renderers not drawn with a loaded page for a while let go (every 600 frames).</summary>
-        static void PruneKept()
-        {
-            if (Clock.FrameCount % 600 != 0 || kept.Count == 0) return;
-            foreach (var kv in kept) if (Clock.FrameCount - kv.Value.Frame > KeptFrames) keptGone.Add(kv.Key);
-            foreach (var key in keptGone) kept.Remove(key);
-            keptGone.Clear();
-        }
 
         static void HostItem(RenderList.Item it, int* a)
         {
@@ -739,7 +720,6 @@ namespace Cuphead360.Player
                 if (it.Tex2 != null) a[26] = TextureId(it.Tex2);
             }
             else for (int k = 0; k < Effects.ParamCount; k++) f[32 + k] = 0f;
-            if (mode == 0 && it.Key != 0 && it.Local != null && tex >= 0 && !StandIn(it, ref tex)) return;
             var pos = it.Screen ?? it.Local;
             a[0] = tex; a[1] = (int)mode;
             f[2] = tint.r; f[3] = tint.g; f[4] = tint.b; f[5] = tint.a;
@@ -749,7 +729,6 @@ namespace Cuphead360.Player
             f[16] = it.A00; f[17] = it.A01; f[18] = it.B0; f[19] = it.A10; f[20] = it.A11; f[21] = it.B1;
             f[22] = clip.x; f[23] = clip.y; f[24] = clip.z; f[25] = clip.w;
             a[31] = it.SpriteStencil;
-            a[44] = it.Key;
             fixed (int* tri = it.Triangles)
             fixed (Vector2* p = pos)
             fixed (Vector2* uv = it.Uv)

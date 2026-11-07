@@ -96,10 +96,6 @@ namespace Cuphead360.Engine
             /// </summary>
             public int SpriteStencil;
             public const int MaskAdd = 1, MaskRemove = 2, MaskInside = 3, MaskOutside = 4;
-            /// <summary>A sprite renderer's instance id (0 for other items) and its sprite's uv box: the console draws
-            /// the renderer's last sprite whose page it has while a new frame's page loads, rather than wait for it.</summary>
-            public int Key;
-            public Vector4 UvBox;
             /// <summary>A blit's mode (Effects), fixed when it was recorded; -1: the material's shader's.</summary>
             public int Effect = -1;
             /// <summary>A blit's values (Effects.ParamCount), taken when it was recorded (owned, reused).</summary>
@@ -135,7 +131,7 @@ namespace Cuphead360.Engine
             var it = pool[pooled++];
             it.BaseName = ""; it.Suffix = null; it.SpriteName = null; it.Texture = null; it.Material = null; it.Screen = null; it.Local = null; it.Uv = null; it.Colors = null;
             it.Triangles = null; it.Tint = Color.white; it.Layer = it.Order = 0; it.Depth = 0; it.Sequence = 0; it.Kind = "sprite"; it.GoLayer = 0;
-            it.Stencil = null; it.SpriteStencil = 0; it.Effect = -1; it.Tex2 = null; it.Key = 0;
+            it.Stencil = null; it.SpriteStencil = 0; it.Effect = -1; it.Tex2 = null;
             return it;
         }
 
@@ -404,7 +400,36 @@ namespace Cuphead360.Engine
             if (overlay.Items.Count > 0) views.Add(overlay);
             DropUnseenTargets();
             Effects.FinishFrame();
+            if (VertStats) CountCorners(views);
             return views;
+        }
+
+        // CH360_VERT_STATS=1: each scene's frame with the most triangle corners in its list (the console's glue
+        // writes each, and its vertex ring holds 174,000; Hilda Berg's night sky filled the old one), with the
+        // items that had the most: a VERTS line when the scene changes.
+        static readonly bool VertStats = Environment.GetEnvironmentVariable("CH360_VERT_STATS") == "1";
+        static string vertScene;
+        static int vertMax, vertMaxFrame;
+        static string vertTop = "";
+
+        static void CountCorners(List<View> views)
+        {
+            string scene = Scenes.Active?.Name;
+            if (scene != vertScene)
+            {
+                if (vertScene != null && vertMax > 0) Log.Line($"VERTS {vertScene}: at most {vertMax} corners, frame {vertMaxFrame}: {vertTop}");
+                vertScene = scene; vertMax = 0; vertTop = "";
+            }
+            int total = 0;
+            foreach (var v in views) foreach (var it in v.Items) total += it.Triangles?.Length ?? 0;
+            if (total <= vertMax) return;
+            vertMax = total; vertMaxFrame = Clock.FrameCount;
+            var top = new List<Item>();
+            foreach (var v in views) foreach (var it in v.Items) if ((it.Triangles?.Length ?? 0) >= 1000) top.Add(it);
+            top.Sort((x, y) => y.Triangles.Length.CompareTo(x.Triangles.Length));
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < top.Count && i < 6; i++) sb.Append(i > 0 ? ", " : "").Append(top[i].Name).Append(' ').Append(top[i].Triangles.Length);
+            vertTop = sb.ToString();
         }
 
         static int group;
@@ -671,7 +696,7 @@ namespace Cuphead360.Engine
             it.Material = sr.Materials.Length > 0 ? sr.Materials[0] : null;
             it.Uv = uv; it.Triangles = info.Triangles32; it.Tint = sr.Color;
             it.Layer = SortingLayers.Index(sr.SortingLayerID); it.Order = sr.SortingOrder;
-            it.Depth = depth; it.GoLayer = sr.GameObject.Layer; it.Key = sr.InstanceId; it.UvBox = Sprites.UvBox(sr.Sprite);
+            it.Depth = depth; it.GoLayer = sr.GameObject.Layer;
             it.SpriteStencil = sr.MaskInteraction == SpriteMaskInteraction.VisibleInsideMask ? Item.MaskInside
                 : sr.MaskInteraction == SpriteMaskInteraction.VisibleOutsideMask ? Item.MaskOutside : 0;
             return it;

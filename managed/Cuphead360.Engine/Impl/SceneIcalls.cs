@@ -163,6 +163,23 @@ namespace Cuphead360.Engine
             return Scenes.NewOperation(op);
         }
 
+        /// <summary>
+        /// The console's loads (ConsoleHost): a full, compacting collection whenever the heap grew this much
+        /// since the last one while a scene builds, and one after its activation, under the loading screen.
+        /// The player's memory only grows (wasm), and each load's peak set it for good: 102 -> 151 -> 167 ->
+        /// 183 -> 215 MB over the twenty-third run, the textures squeezed from 109 MB to 41 and refused.
+        /// </summary>
+        public static long CollectEveryBytes;
+        static long collectAt;
+
+        static void CollectIfGrown(bool always)
+        {
+            if (CollectEveryBytes <= 0) return;
+            if (!always && GC.GetTotalMemory(false) < collectAt) return;
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+            collectAt = GC.GetTotalMemory(false) + CollectEveryBytes;
+        }
+
         /// <summary>Called at the start of a frame: loads requested in an earlier frame complete now.</summary>
         public static void Pump()
         {
@@ -174,12 +191,15 @@ namespace Cuphead360.Engine
                 if (SliceMs > 0 && !p.Sync)
                 {
                     if (i > 0 && pending[0].Work != null) continue;
+                    if (p.Work == null && CollectEveryBytes > 0) collectAt = GC.GetTotalMemory(false) + CollectEveryBytes;
                     p.Work ??= SceneLoad.Begin(p.BuildIndex, p.Additive);
-                    if (!p.Work.Step(SliceMs)) { p.Op.Progress = 0.9f * p.Work.Progress; continue; }
+                    bool built = p.Work.Step(SliceMs);
+                    CollectIfGrown(false);
+                    if (!built) { p.Op.Progress = 0.9f * p.Work.Progress; continue; }
                 }
                 if (!p.Op.AllowActivation) { p.Op.Progress = 0.9f; continue; }
                 pending.RemoveAt(i--);
-                if (p.Work != null) p.Work.Activate();
+                if (p.Work != null) { p.Work.Activate(); CollectIfGrown(true); }
                 else Load(p.BuildIndex, p.Additive);
                 p.Op.Progress = 1f;
                 p.Op.Done = true;

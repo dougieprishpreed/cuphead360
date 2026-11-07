@@ -729,6 +729,29 @@ namespace Cuphead360.Engine
             return len;
         }
 
+        /// <summary>
+        /// The sprite layer 0's current state shows at a fraction (0..1) of its cycle, or null: the console's
+        /// loading screen records the hourglass's frames ahead (ConsoleHost.RecordHourglass).
+        /// </summary>
+        public static Sprite SpriteAt(Animator animator, float fraction)
+        {
+            var a = Objects.Of(animator) as NAnimator;
+            if (a == null || a.Data == null || a.Layers.Length == 0 || a.Layers[0].Current == null) return null;
+            int st = a.Layers[0].Current.State;
+            var s = a.StateAt(0, st);
+            var clip = s == null ? null : a.ClipAt(0, s);
+            if (clip == null) return null;
+            float t = fraction * a.StateLength(0, st) * a.ClipScale(0, st, clip);
+            if (clip.Length > 0f) t = Math.Max(0f, Math.Min(clip.Length, t));
+            foreach (var b in clip.Bindings)
+                if (b.IsPPtr)
+                {
+                    int idx = (int)Math.Floor(clip.Sample(b.FirstCurve, t) + 0.0001f);
+                    return idx >= 0 && idx < clip.PPtrs.Length ? clip.PPtrs[idx] as Sprite : null;
+                }
+            return null;
+        }
+
         /// <summary>Clip seconds per state second on a layer: 1, but for a synced layer (or a state whose length its synced layers change) the clip is stretched over the state.</summary>
         float ClipScale(int layer, int state, ClipData clip)
         {
