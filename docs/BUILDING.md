@@ -120,6 +120,7 @@ python -I tools\convert_textures.py --game game --out work\GameData --bundles
 python -I tools\convert_console.py --data work\GameData
 python -I tools\convert_console.py --data work\GameData --max-size 4096 --out work\GameData\ctex4k --halved-only --workers 2
 python -I tools\cluster_console.py --data work\GameData
+python -I tools\simplify_meshes.py --data work\GameData
 python -I tools\convert_audio.py --game game --out work\GameData --bundles
 ```
 
@@ -130,6 +131,7 @@ python -I tools\convert_audio.py --game game --out work\GameData --bundles
 | `convert_console` | `ctex\*.ctx`, halved pages, 4 GB | 30 min | `0 errors` |
 | `convert_console --max-size 4096` | `ctex4k\*.ctx`, full-size pages, 13 GB | 45 min | `0 errors` |
 | `cluster_console` | `ctexc\`, sprite pages (4 MB at most) and `ctexmap.bin`, 13 GB | 5 min | `cluster_console: ... sprite pages` |
+| `simplify_meshes` | `objects\meshes.bin`: lighter meshes for the sprites with the most triangles (skies, cloud banks), drawing the same pixels | 15 min | `wrote ...meshes.bin` |
 | `convert_audio` | `audio\*.ogg`, about 4,000 clips, 390 MB | 10 min | `0 errors` |
 
 The texture steps run their workers at below-normal priority, so the PC

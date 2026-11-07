@@ -203,7 +203,7 @@ def main():
     if os.path.exists(os.path.join(a.data, "ctexc", "ctexmap.bin")):
         ctex.append(("ctexmap", os.path.join(a.data, "ctexc", "ctexmap.bin"), True))
     packs = write_packs("CTEX", ctex, a.workers) + write_packs("AUDIO", entries_of(os.path.join(a.data, "audio"), ".ogg", False), 1)
-    plans = {"objects": plan(os.path.join(a.data, "objects"), (".chob",)),
+    plans = {"objects": plan(os.path.join(a.data, "objects"), (".chob", ".bin")),
              "": [(os.path.join(PACKS, f), f) for f in packs]}
     # The old layouts' textures and clips (staged names, loose files), and packs not written this time.
     removed = 0

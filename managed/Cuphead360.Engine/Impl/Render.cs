@@ -357,7 +357,45 @@ namespace Cuphead360.Engine
             if (!atlasPtr.IsNull) { i.AtlasFile = co.File; i.AtlasPtr = atlasPtr; i.IncludedAtlas = AssetDb.Resolve(co.File, atlasPtr) as SpriteAtlas; }
             ReadBinding(rd, out i.TextureRect, out i.TextureRectOffset, out i.UvTransform, out i.SettingsRaw);
             ReadMesh(rd, i);
+            Simplified(i);
             return i;
+        }
+
+        // Simplified meshes by render key (tools/simplify_meshes.py: the largest tight meshes as rectangles where
+        // their atlas page is clear, the same pixels drawn): Hilda Berg's star layers went from ~40,000 corners
+        // each to ~4,600, which the console's glue writes every frame. CH360_NO_MESHES=1: the meshes as they were.
+        static Dictionary<string, (Vector2[] v, ushort[] t)> simplified;
+        static readonly bool noSimplified = Environment.GetEnvironmentVariable("CH360_NO_MESHES") == "1";
+
+        static void Simplified(Info i)
+        {
+            if (noSimplified || i.RenderKey == null) return;
+            if (simplified == null)
+            {
+                simplified = new Dictionary<string, (Vector2[], ushort[])>(StringComparer.Ordinal);
+                string path = System.IO.Path.Combine(AssetDb.Root ?? "", "objects", "meshes.bin");
+                if (System.IO.File.Exists(path))
+                {
+                    var b = System.IO.File.ReadAllBytes(path);
+                    if (b.Length >= 12 && b[0] == 'C' && b[1] == 'H' && b[2] == 'M' && b[3] == 'S' && BitConverter.ToInt32(b, 4) == 2)
+                    {
+                        int n = BitConverter.ToInt32(b, 8), at = 12;
+                        for (int e = 0; e < n && at + 2 <= b.Length; e++)
+                        {
+                            int kl = BitConverter.ToUInt16(b, at); at += 2;
+                            string key = System.Text.Encoding.ASCII.GetString(b, at, kl); at += kl;
+                            int nv = BitConverter.ToInt32(b, at); at += 4;
+                            var v = new Vector2[nv];
+                            for (int k = 0; k < nv; k++, at += 8) v[k] = new Vector2(BitConverter.ToSingle(b, at), BitConverter.ToSingle(b, at + 4));
+                            int ni = BitConverter.ToInt32(b, at); at += 4;
+                            var t = new ushort[ni];
+                            for (int k = 0; k < ni; k++, at += 2) t[k] = BitConverter.ToUInt16(b, at);
+                            simplified[key] = (v, t);
+                        }
+                    }
+                }
+            }
+            if (simplified.TryGetValue(i.RenderKey, out var m)) { i.Vertices = m.v; i.Triangles = m.t; }
         }
 
         public static void ReadBinding(object rd, out Rect textureRect, out Vector2 rectOffset, out Vector4 uvTransform, out int settings)
