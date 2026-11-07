@@ -89,8 +89,9 @@ double now_ms();
 void memory_mb(unsigned* free_mb, unsigned* total_mb);
 extern "C" void srt_get_stats(void* out);
 
-// The USB drive is slow per write: lines queue and a thread writes them every
-// 100 ms. Every 2 s for the first two minutes, then every 10 s, it logs a
+// The USB drive is slow per write, and the texture loader reads from it: lines queue and a thread writes
+// them every 2 s, synced every 30 s (writes every 100 ms, synced twice a second, sat in the drive's queue
+// with the pages the frames waited for: the twenty-second run). Every 2 s for the first two minutes, then every 10 s, it logs a
 // heartbeat: the frame count and where the guest thread is, so a stall shows
 // its place, and a log that simply ends means the whole console froze.
 void* log_writer(void*) {
@@ -113,8 +114,8 @@ void* log_writer(void*) {
                  s, g_frames_seen, (const char*)g_stage, free_mb, ch360_memory_kb() / 1024, (unsigned)(g_texture_bytes >> 20),
                  (unsigned)st.wasi_calls, g_io_opens, g_io_reads, (unsigned)(g_io_bytes >> 20), (unsigned)g_io_ms, g_io_seeks);
         }
-        // Synced twice a second: a freeze keeps what led up to it.
-        flush_log(beat || tick % 5 == 0);
+        // Written every 2 s, synced every 30: a freeze keeps most of what led up to it.
+        if (tick % 20 == 0) flush_log(tick % 300 == 0);
     }
     return NULL;
 }
@@ -171,9 +172,12 @@ void* (*volatile g_memcpy)(void*, const void*, size_t) = memcpy;
 
 const int W = 1280, H = 720, FRAMES = 2;
 const VkFormat TARGET_FORMAT = VK_FORMAT_B8G8R8A8_UNORM;
-// Vertices a frame (two frames in flight): 87,000 at 24 bytes; frames draw up to
-// ~16,000 since hidden UI is skipped (8 MB a frame held 12 MB more than needed).
-const VkDeviceSize VERTEX_RING = 2 * 1024 * 1024;
+// Vertices a frame (two frames in flight): 174,000 at 24 bytes; frames draw up to
+// ~16,000 since hidden UI is skipped (8 MB a frame held 12 MB more than needed), but Hilda Berg's
+// night sky (Stars_Night: a mesh of ~14,000 triangles round each star layer's stars) drew ~150,000,
+// and the 87,000 of a 2 MB ring left out everything after it (the twenty-second run: only the sky
+// and the clouds). The glue also drops the off-screen triangles of meshes that large.
+const VkDeviceSize VERTEX_RING = 4 * 1024 * 1024;
 // Evict least recently used textures above this: the XEX image is ~100 MB and
 // the player's linear memory reaches ~220 MB in a level, of 512 MB. A new
 // texture first makes room from textures not drawn lately, so the set stays
@@ -196,7 +200,7 @@ const size_t PAGE_MAX = 4u << 20;
 // Pages' stored bytes (LZ4, about a quarter of their size) kept in memory: a page evicted and drawn again,
 // or read ahead, decodes without the drive (USB reads ran at ~11 MB/s: 40-180 ms a page, the waits behind
 // most hitches in the levels of the twentieth and twenty-first runs; a decode is a few ms a MB).
-const size_t STORED_BUDGET = 32u << 20;
+const size_t STORED_BUDGET = 16u << 20;
 
 
 enum { MODE_SPRITE, MODE_SCREEN, MODE_MULTIPLY, MODE_OVERLAY, MODE_SDF, MODE_COLOROVERLAY, MODE_LIGHTRAY,
@@ -2719,10 +2723,10 @@ extern "C" int ch360_plat_frame_begin(void) {
         memory_mb(&f, &tot);
         // Times in tenths of a millisecond (integers only in the log).
         logf("frame %u: %u ms/frame x10 (worst %u, %u over 17.5); gpu wait %u, present %u; memory %u MB free of %u, player %u MB, "
-             "textures %u MB (%u uploads, %u evicted), stored %u MB; %u sprites drawn with their last loaded frame; audio underruns %u",
+             "textures %u MB (%u uploads, %u evicted), stored %u MB; audio underruns %u",
              g_frames, (unsigned)(g_logic_ms / 60), (unsigned)(g_worst_ms * 10), g_slow, (unsigned)(g_renderer->gpu_wait_ms / 60),
              (unsigned)(g_renderer->present_ms / 60), f, tot, ch360_memory_kb() / 1024, (unsigned)(g_renderer->texture_bytes() >> 20),
-             g_renderer->uploads, g_renderer->evictions, (unsigned)(g_renderer->stored_bytes() >> 20), ch360_stand_ins, g_audio_underruns);
+             g_renderer->uploads, g_renderer->evictions, (unsigned)(g_renderer->stored_bytes() >> 20), g_audio_underruns);
         g_logic_ms = g_worst_ms = 0;
         g_slow = 0;
         g_renderer->gpu_wait_ms = g_renderer->present_ms = 0;

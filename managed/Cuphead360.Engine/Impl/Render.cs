@@ -248,6 +248,8 @@ namespace Cuphead360.Engine
         {
             public string Name = "";
             public int AheadFrame = int.MinValue / 2;   // last asked to be read ahead (RenderList.ReadAhead)
+            internal Vector2[] BoxOf;                    // the uvs UvBox was worked out from
+            internal Vector4 Box;
             public Rect Rect;
             public Vector2 Pivot = new Vector2(0.5f, 0.5f);   // normalized
             public float PixelsPerUnit = 100f;
@@ -426,6 +428,24 @@ namespace Cuphead360.Engine
             // sprite the UI code set: the map's ingredient cards) asks when it's drawn.
             Atlases.Touch(s);
             return false;
+        }
+
+        /// <summary>The box of a sprite's uvs (min u, min v, max u, max v), kept until its uvs change.</summary>
+        public static Vector4 UvBox(Sprite s)
+        {
+            var info = Of(s);
+            if (info == null) return default;
+            var uv = RenderUvs(s);
+            if (ReferenceEquals(info.BoxOf, uv)) return info.Box;
+            var box = uv.Length > 0 ? new Vector4(uv[0].x, uv[0].y, uv[0].x, uv[0].y) : default;
+            for (int i = 1; i < uv.Length; i++)
+            {
+                if (uv[i].x < box.x) box.x = uv[i].x; else if (uv[i].x > box.z) box.z = uv[i].x;
+                if (uv[i].y < box.y) box.y = uv[i].y; else if (uv[i].y > box.w) box.w = uv[i].y;
+            }
+            info.BoxOf = uv;
+            info.Box = box;
+            return box;
         }
 
         /// <summary>The texture a sprite draws from now, if it has one, without asking for its atlas (read-ahead).</summary>

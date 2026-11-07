@@ -46,6 +46,8 @@ namespace Cuphead360.Player
         static extern void TexturePrefetch(int id);
         [DllImport("ch360", EntryPoint = "texture_ahead"), WasmImportLinkage]
         static extern void TextureAhead(int id, float u0, float v0, float u1, float v1);
+        [DllImport("ch360", EntryPoint = "texture_ready"), WasmImportLinkage]
+        static extern int TextureReady(int id, float u0, float v0, float u1, float v1, int want);
         [DllImport("ch360", EntryPoint = "loading_screen"), WasmImportLinkage]
         static extern void LoadingScreenFlag(uint state);
         [DllImport("ch360", EntryPoint = "audio"), WasmImportLinkage]
@@ -412,7 +414,8 @@ namespace Cuphead360.Player
             Console.WriteLine("CONSOLE host loop");
             int n = 0;
             long last = System.Diagnostics.Stopwatch.GetTimestamp(), hz = System.Diagnostics.Stopwatch.Frequency;
-            PlayerLoop.Profile = true;
+            // The log's per-phase and per-script figures (CH360_PROFILE=0, through CH360_GUEST_ENV on PC: off, to measure their cost).
+            PlayerLoop.Profile = Environment.GetEnvironmentVariable("CH360_PROFILE") != "0";
             var perf = new PerfLog(hz);
             while (FrameBegin() != 0)
             {
@@ -439,7 +442,7 @@ namespace Cuphead360.Player
                     Console.WriteLine($"CONSOLE frame {n} scene={Cuphead360.Engine.Scenes.Active?.Name} heap {GC.GetTotalMemory(false) >> 20} MB exceptions {Exceptions.Count}; "
                         + $"GCs {GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)} (gen0/1/2), paused {(long)GC.GetTotalPauseDuration().TotalMilliseconds} ms in all; "
                         + $"converted files {ChobFile.LoadedFiles} ({ChobFile.LoadedBytes >> 20} MB, objects read {ChobFile.ObjectReads} ({ChobFile.ObjectBytes >> 20} MB) in {ChobFile.BlockReads} block reads)"
-                        + $", trees dropped {ChobObject.TreesDropped}, parsed again {ChobObject.TreesReparsed}");
+                        + $", trees dropped {ChobObject.TreesDropped}, parsed again {ChobObject.TreesReparsed}; sprites drawn with their last loaded frame {StandIns}, left out while their page loads {LeftOut}");
             }
             return 0;
         }
@@ -598,6 +601,7 @@ namespace Cuphead360.Player
         static void Draw(List<RenderList.View> views)
         {
             LoadingScreenFlag(LoadingScreen());
+            PruneKept();
             if (managedDraw) { DrawManaged(views); return; }
             float* vh = stackalloc float[13];
             int* a = stackalloc int[ItemSlots];
@@ -642,6 +646,59 @@ namespace Cuphead360.Player
         static readonly int shadowTex = ShaderProps.Id("_ShadowTex"), skyGlowTex = ShaderProps.Id("_SkyGlowTex");
         static readonly int rayT = ShaderProps.Id("t"), rayWidth = ShaderProps.Id("textureWidth"), raySpeed = ShaderProps.Id("textureSpeed");
 
+        /// <summary>A sprite renderer's last frame whose page was loaded (its sprite's arrays, kept by reference).</summary>
+        sealed class Kept
+        {
+            public Vector2[] Local, Uv;
+            public int[] Triangles;
+            public int Tex, Frame;
+            public Vector4 Box;
+        }
+        static readonly Dictionary<int, Kept> kept = new Dictionary<int, Kept>();
+        static readonly List<int> keptGone = new List<int>();
+        const int KeptFrames = 60;
+        /// <summary>Sprites drawn with their renderer's last loaded frame so far (the CONSOLE lines).</summary>
+        public static long StandIns;
+        /// <summary>Sprites left out for a frame while their first page loads.</summary>
+        public static long LeftOut;
+
+        /// <summary>
+        /// A sprite whose page isn't loaded is drawn with its renderer's last frame whose page was, through its
+        /// own map, while the page loads (asked for as if drawn, nothing waiting): the host used to hold the
+        /// frame for the drive's 40-180 ms when a character's next animation was on a page of its own (a hit,
+        /// an attack). A renderer without a loaded frame in the last KeptFrames (a new bullet, an effect) is left
+        /// out until its page is in: false. (The glue kept copies of the meshes: 23 ms a frame of Hilda Berg's
+        /// moon, and memory never given back.)
+        /// </summary>
+        static bool StandIn(RenderList.Item it, ref int tex)
+        {
+            var box = it.UvBox;
+            if (TextureReady(tex, box.x, box.y, box.z, box.w, 1) != 0)
+            {
+                if (!kept.TryGetValue(it.Key, out var k)) kept[it.Key] = k = new Kept();
+                k.Local = it.Local; k.Uv = it.Uv; k.Triangles = it.Triangles; k.Tex = tex; k.Box = box; k.Frame = Clock.FrameCount;
+                return true;
+            }
+            if (kept.TryGetValue(it.Key, out var s) && Clock.FrameCount - s.Frame <= KeptFrames && s.Uv != null
+                && TextureReady(s.Tex, s.Box.x, s.Box.y, s.Box.z, s.Box.w, 0) != 0)
+            {
+                it.Local = s.Local; it.Uv = s.Uv; it.Triangles = s.Triangles; tex = s.Tex;
+                StandIns++;
+                return true;
+            }
+            LeftOut++;
+            return false;
+        }
+
+        /// <summary>Renderers not drawn with a loaded page for a while let go (every 600 frames).</summary>
+        static void PruneKept()
+        {
+            if (Clock.FrameCount % 600 != 0 || kept.Count == 0) return;
+            foreach (var kv in kept) if (Clock.FrameCount - kv.Value.Frame > KeptFrames) keptGone.Add(kv.Key);
+            foreach (var key in keptGone) kept.Remove(key);
+            keptGone.Clear();
+        }
+
         static void HostItem(RenderList.Item it, int* a)
         {
             if (it.Triangles.Length == 0) return;
@@ -682,6 +739,7 @@ namespace Cuphead360.Player
                 if (it.Tex2 != null) a[26] = TextureId(it.Tex2);
             }
             else for (int k = 0; k < Effects.ParamCount; k++) f[32 + k] = 0f;
+            if (mode == 0 && it.Key != 0 && it.Local != null && tex >= 0 && !StandIn(it, ref tex)) return;
             var pos = it.Screen ?? it.Local;
             a[0] = tex; a[1] = (int)mode;
             f[2] = tint.r; f[3] = tint.g; f[4] = tint.b; f[5] = tint.a;

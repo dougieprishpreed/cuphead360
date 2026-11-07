@@ -124,13 +124,11 @@ void ch360_plat_texture_file(int id, const char* key);
  * atlas the game loaded, the other pages of one drawn): only its stored bytes are kept, and only with room. */
 void ch360_plat_texture_prefetch(int id, int wanted);
 /* Whether texture id can be drawn now (loaded; render textures, run-time pixels and textures that can't be
- * read count as ready): the glue draws a sprite renderer's last frame whose page is loaded while a new
- * frame's page isn't (ch360_imports.c), asking for it with ch360_plat_texture_need (read as if drawn,
- * nothing waits for it). */
+ * read count as ready): ConsoleHost draws a sprite renderer's last frame whose page is loaded while a new
+ * frame's page isn't (the texture_ready import), asking for it with ch360_plat_texture_need (read as if
+ * drawn, nothing waits for it). */
 int ch360_plat_texture_ready(int id);
 void ch360_plat_texture_need(int id);
-/* Sprites drawn with their last loaded frame so far (the glue's count). */
-extern unsigned ch360_stand_ins;
 /* Texture id's pixels (run-time textures: font atlases), BGRA rows. */
 void ch360_plat_texture_pixels(int id, int width, int height, const unsigned char* bgra);
 /* Mixed audio: frames of 48 kHz stereo, interleaved little-endian floats

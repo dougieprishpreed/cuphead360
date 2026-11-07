@@ -550,6 +550,9 @@ static unsigned draw_words_cap;
  * have 700-1,100 triangles each). The screen box and the sprite page's uv box
  * come from the vertices rather than the corners (a sprite's mesh uses all
  * of them). */
+/* Corners (three a triangle) from which a mesh's off-screen triangles are left out. */
+#define DRAW_CULL_CORNERS 3000u
+
 static void draw_item_unclipped(ch360_item* it, const U8* tri, U32 ntri, const U8* pos, U32 npos, const U8* uv, U32 nuv,
                                 const U8* col, U32 ncol, const float* m, const U8* blend) {
     U32 *sp, *su, *o, i, bw;
@@ -614,6 +617,43 @@ static void draw_item_unclipped(ch360_item* it, const U8* tri, U32 ntri, const U
     }
     memcpy(&bw, blend, 4);
     o = (U32*)(draw_verts + draw_vert_count);
+    if (ntri >= DRAW_CULL_CORNERS && it->stencil == 0) {
+        /* A mesh this large (Hilda Berg's star layers, wider than the screen): the triangles wholly off one
+         * side of the view are left out. */
+        const ch360_view* vw = &draw_views[draw_view_count - 1];
+        float vx0 = vw->x - 1.0f, vy0 = vw->y - 1.0f, vx1 = vw->x + vw->w + 1.0f, vy1 = vw->y + vw->h + 1.0f;
+        U32 kept = 0, t;
+        for (t = 0; t + 2 < ntri; t += 3) {
+            U32 q, kk[3];
+            float ax, ay, bx, by, cx, cy;
+            for (q = 0; q < 3; q++) {
+                kk[q] = le32(tri + 4 * (t + q));
+                if (kk[q] >= npos) kk[q] = 0;
+            }
+            ax = fp[2 * kk[0]]; ay = fp[2 * kk[0] + 1];
+            bx = fp[2 * kk[1]]; by = fp[2 * kk[1] + 1];
+            cx = fp[2 * kk[2]]; cy = fp[2 * kk[2] + 1];
+            if ((ax < vx0 && bx < vx0 && cx < vx0) || (ax > vx1 && bx > vx1 && cx > vx1) ||
+                (ay < vy0 && by < vy0 && cy < vy0) || (ay > vy1 && by > vy1 && cy > vy1))
+                continue;
+            for (q = 0; q < 3; q++, o += 6) {
+                U32 k = kk[q], c = 0xFFFFFFFFu;
+                o[0] = sp[2 * k];
+                o[1] = sp[2 * k + 1];
+                if (k < nuv) {
+                    o[2] = su[2 * k];
+                    o[3] = su[2 * k + 1];
+                } else {
+                    o[2] = o[3] = 0;
+                }
+                if (k < ncol) memcpy(&c, col + 4 * k, 4);
+                o[4] = c;
+                o[5] = bw;
+            }
+            kept += 3;
+        }
+        ntri = kept;
+    } else
     for (i = 0; i < ntri; i++, o += 6) {
         U32 k = le32(tri + 4 * i), c = 0xFFFFFFFFu;
         if (k >= npos) k = 0;
@@ -636,62 +676,6 @@ static void draw_item_unclipped(ch360_item* it, const U8* tri, U32 ntri, const U
     it->x1 = x1;
     it->y1 = y1;
     draw_views[draw_view_count - 1].items++;
-}
-
-/* A sprite renderer's last item drawn with its page loaded, by the item's key (RenderList.Item.Key): drawn
- * in the new item's place while the new item's page loads, the page asked for as if drawn
- * (ch360_plat_texture_need). The frame used to wait for the page: a character's next animation on a page of
- * its own (hit, a boss's attack) held the frame for the drive's 40-180 ms, most of the twentieth and
- * twenty-first runs' hitches in the levels. A renderer not drawn for STAND_IN_FRAMES has none; one never
- * drawn still waits (its first page). */
-#define STAND_IN_SLOTS 4096u   /* a power of two */
-#define STAND_IN_FRAMES 60u
-typedef struct stand_in {
-    U32 key, frame;
-    int texture, drawn;   /* the item's texture as given (an atlas page: remapped again when drawn), the page it drew from */
-    U32 npos, nuv, ntri, cap;
-    U8* data;             /* positions, uvs, triangles, as the game gave them */
-} stand_in;
-static stand_in stand_ins[STAND_IN_SLOTS];
-static U32 draw_frame;
-unsigned ch360_stand_ins;
-
-/* The key's slot (linear probing over 16; never emptied, so chains stay whole), or with add the first free
- * or stale one. */
-static stand_in* stand_in_slot(U32 key, int add) {
-    U32 h = key * 2654435761u, n;
-    stand_in* spare = NULL;
-    for (n = 0; n < 16; n++) {
-        stand_in* s = &stand_ins[(h + n) & (STAND_IN_SLOTS - 1)];
-        if (s->key == key) return s;
-        if (s->key == 0) return add ? (spare ? spare : s) : NULL;
-        if (add && spare == NULL && draw_frame - s->frame > STAND_IN_FRAMES) spare = s;
-    }
-    return add ? (spare ? spare : &stand_ins[h & (STAND_IN_SLOTS - 1)]) : NULL;
-}
-
-static void stand_in_keep(U32 key, int texture, int drawn, const U8* tri, U32 ntri, const U8* pos, U32 npos, const U8* uv, U32 nuv) {
-    stand_in* s = stand_in_slot(key, 1);
-    U32 need = 8 * npos + 8 * nuv + 4 * ntri;
-    if (need > s->cap) {
-        U8* d = (U8*)realloc(s->data, need);
-        if (d == NULL) {
-            s->frame = draw_frame - STAND_IN_FRAMES - 1;   /* stale: not drawn from */
-            return;
-        }
-        s->data = d;
-        s->cap = need;
-    }
-    s->key = key;
-    s->frame = draw_frame;
-    s->texture = texture;
-    s->drawn = drawn;
-    s->npos = npos;
-    s->nuv = nuv;
-    s->ntri = ntri;
-    memcpy(s->data, pos, 8 * npos);
-    if (nuv) memcpy(s->data + 8 * npos, uv, 8 * nuv);
-    memcpy(s->data + 8 * npos + 8 * nuv, tri, 4 * ntri);
 }
 
 void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
@@ -745,30 +729,7 @@ void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
     for (k = 0; k < 12; k++) it->params[k] = mode == 6 ? (k < 3 ? lef(a + 112 + 4 * k) : 0.0f) : lef(a + 128 + 4 * k);
     it->stencil = le32(a + 124);
     if (!clipped) {
-        U32 key = mode == 0 && affine && srt_mem_ok(args, 45 * 4) ? le32(a + 176) : 0;
-        int given = it->texture;
-        unsigned kept = draw_item_count, from = draw_vert_count;
         draw_item_unclipped(it, tri, ntri, pos, npos, uv, nuv, col, ncol, affine ? m : NULL, blend);
-        if (key != 0 && draw_item_count == kept) {
-            if (ch360_plat_texture_ready(it->texture)) {
-                stand_in_keep(key, given, it->texture, tri, ntri, pos, npos, uv, nuv);
-            } else {
-                stand_in* s = stand_in_slot(key, 0);
-                if (s != NULL && draw_frame - s->frame <= STAND_IN_FRAMES && s->drawn != it->texture && ch360_plat_texture_ready(s->drawn) &&
-                    draw_grow((void**)&draw_verts, &draw_vert_cap, from + s->ntri, sizeof(ch360_vertex))) {
-                    int missing = it->texture;
-                    /* the item taken back, the kept one drawn through the new item's map */
-                    draw_vert_count = from;
-                    draw_views[draw_view_count - 1].items--;
-                    it->texture = s->texture;
-                    it->first = from;
-                    draw_item_unclipped(it, s->data + 8 * s->npos + 8 * s->nuv, s->ntri, s->data, s->npos, s->nuv ? s->data + 8 * s->npos : NULL, s->nuv,
-                                        col, ncol, m, blend);
-                    ch360_plat_texture_need(missing);
-                    ch360_stand_ins++;
-                }
-            }
-        }
         draw_build_ms += draw_now_ms() - t0;
         return;
     } else {
@@ -839,7 +800,6 @@ void i5_ch3608_drawX5Fend(wasmModuleInstance* inst) {
     ch360_plat_draw(&f);
     draw_view_count = draw_item_count = draw_vert_count = 0;
     draw_build_ms = 0;
-    draw_frame++;
 }
 
 /* The draw list ConsoleHost writes itself (CH360_DRAW=managed, a PC check),
@@ -947,6 +907,26 @@ void i5_ch36013_textureX5Fahead(wasmModuleInstance* inst, U32 id, F32 u0, F32 v0
         int t = remap_target_id(&rm_pages[page], &rm_boxes[bi]);
         if (t >= 0) ch360_plat_texture_prefetch(t, 1);
     }
+}
+
+/* ConsoleHost, before a sprite's item: whether the page holding its uv box (u0, v0)-(u1, v1) on texture id can
+ * be drawn now (1), else 0 and, with want, the page asked for as if drawn without a frame waiting for it
+ * (ch360_plat_texture_need). Not ready, ConsoleHost draws the renderer's last frame whose page was. */
+U32 i5_ch36013_textureX5Fready(wasmModuleInstance* inst, U32 id, F32 u0, F32 v0, F32 u1, F32 v1, U32 want) {
+    int p, page, bi, t;
+    (void)inst;
+    p = plat_id((int)id);
+    if (p < 0) return 1;
+    page = page_of_plat[p] - 1;
+    t = p;
+    if (page >= 0 && rm_pages[page].count > 0) {
+        bi = remap_find(&rm_pages[page], u0, v0, u1, v1);
+        if (bi >= 0) t = remap_target_id(&rm_pages[page], &rm_boxes[bi]);
+        if (t < 0) return 1;
+    }
+    if (ch360_plat_texture_ready(t)) return 1;
+    if (want) ch360_plat_texture_need(t);
+    return 0;
 }
 
 void i5_ch36014_textureX5Fpixels(wasmModuleInstance* inst, U32 id, U32 w, U32 h, U32 bgra) {

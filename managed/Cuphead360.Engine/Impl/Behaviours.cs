@@ -172,7 +172,7 @@ namespace Cuphead360.Engine
         public static object Send(NBehaviour b, MethodInfo m, object arg = null)
         {
             if (m == null) return null;
-            long t0 = PlayerLoop.Profile ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            long t0 = PlayerLoop.CountAllocs ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             long a0 = t0 != 0 ? GC.GetAllocatedBytesForCurrentThread() : 0;
             try
             {
@@ -197,7 +197,14 @@ namespace Cuphead360.Engine
             }
             catch (TargetInvocationException e) { Exceptions.Report(e.InnerException, b, m.Name); }
             catch (Exception e) { Exceptions.Report(e, b, m.Name); }
-            finally { if (t0 != 0) { b.ProfTicks += PlayerLoop.SlowCall(t0, b.Managed, m); b.ProfBytes += GC.GetAllocatedBytesForCurrentThread() - a0; } }
+            finally
+            {
+                if (t0 != 0)
+                {
+                    b.ProfTicks += PlayerLoop.SlowCall(t0, b.Managed, m) * PlayerLoop.AllocSampling;
+                    b.ProfBytes += (GC.GetAllocatedBytesForCurrentThread() - a0) * PlayerLoop.AllocSampling;
+                }
+            }
             return null;
         }
 

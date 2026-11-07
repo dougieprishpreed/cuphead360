@@ -96,9 +96,10 @@ namespace Cuphead360.Engine
             /// </summary>
             public int SpriteStencil;
             public const int MaskAdd = 1, MaskRemove = 2, MaskInside = 3, MaskOutside = 4;
-            /// <summary>A sprite renderer's instance id (0 for other items): the console draws the renderer's last
-            /// sprite whose page it has while a new frame's page loads, rather than wait for it.</summary>
+            /// <summary>A sprite renderer's instance id (0 for other items) and its sprite's uv box: the console draws
+            /// the renderer's last sprite whose page it has while a new frame's page loads, rather than wait for it.</summary>
             public int Key;
+            public Vector4 UvBox;
             /// <summary>A blit's mode (Effects), fixed when it was recorded; -1: the material's shader's.</summary>
             public int Effect = -1;
             /// <summary>A blit's values (Effects.ParamCount), taken when it was recorded (owned, reused).</summary>
@@ -335,15 +336,7 @@ namespace Cuphead360.Engine
             info.AheadFrame = Clock.FrameCount;
             var tex = Sprites.BoundTexture(s);
             if (tex == null) return;
-            var uv = Sprites.RenderUvs(s);
-            if (uv.Length == 0) return;
-            var box = new Vector4(uv[0].x, uv[0].y, uv[0].x, uv[0].y);
-            for (int i = 1; i < uv.Length; i++)
-            {
-                if (uv[i].x < box.x) box.x = uv[i].x; else if (uv[i].x > box.z) box.z = uv[i].x;
-                if (uv[i].y < box.y) box.y = uv[i].y; else if (uv[i].y > box.w) box.w = uv[i].y;
-            }
-            ReadAhead(tex, box);
+            ReadAhead(tex, Sprites.UvBox(s));
         }
 
         static void AheadClip(ClipData clip)
@@ -678,7 +671,7 @@ namespace Cuphead360.Engine
             it.Material = sr.Materials.Length > 0 ? sr.Materials[0] : null;
             it.Uv = uv; it.Triangles = info.Triangles32; it.Tint = sr.Color;
             it.Layer = SortingLayers.Index(sr.SortingLayerID); it.Order = sr.SortingOrder;
-            it.Depth = depth; it.GoLayer = sr.GameObject.Layer; it.Key = sr.InstanceId;
+            it.Depth = depth; it.GoLayer = sr.GameObject.Layer; it.Key = sr.InstanceId; it.UvBox = Sprites.UvBox(sr.Sprite);
             it.SpriteStencil = sr.MaskInteraction == SpriteMaskInteraction.VisibleInsideMask ? Item.MaskInside
                 : sr.MaskInteraction == SpriteMaskInteraction.VisibleOutsideMask ? Item.MaskOutside : 0;
             return it;

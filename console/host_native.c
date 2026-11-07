@@ -97,10 +97,10 @@ int ch360_plat_frame_begin(void) {
         double secs = (double)(clock() - started) / CLOCKS_PER_SEC;
         printf("[host] frame %ld: %.1f fps; last frame %lu views, %lu items, %lu vertices; textures %lu files, %lu runtime; "
                "audio %.1f s; memory %u MB; bad lists %lu; items off the sprite pages %u; loading-screen frames %lu; "
-               "stand-ins %u, late textures %lu\n",
+               "late textures %lu\n",
                frame_no, frame_no / (secs > 0 ? secs : 1), views_seen, draw_items, draw_vertices, textures_files,
                textures_pixels, audio_frames / 48000.0, ch360_memory_kb() / 1024, bad_lists, ch360_remap_misses(), loading_frames,
-               ch360_stand_ins, late_textures);
+               late_textures);
         fflush(stdout);
     }
     frame_no++;

@@ -144,6 +144,7 @@ namespace Cuphead360.Engine
             Clock.UnscaledTime += realDelta;
             Clock.DeltaTime = dt * Clock.TimeScale;
             Clock.Time += Clock.DeltaTime;
+            CountAllocs = Profile && Clock.FrameCount % AllocSampling == 0;
             Typed.Sweep();
 
             P(0); SceneLoader.Pump();
@@ -198,6 +199,13 @@ namespace Cuphead360.Engine
 
         // Phase timing (CH360_PROFILE=1): load, fixed scripts, physics, update, animators, late, UI, render/destroy, audio.
         public static bool Profile = Environment.GetEnvironmentVariable("CH360_PROFILE") == "1";
+        /// <summary>
+        /// With Profile on, each script call's time and allocations are measured on one frame in AllocSampling
+        /// (and scaled up; SLOW call lines from those frames only): four runtime calls per message and coroutine
+        /// step on every frame were ~4% of host_native's frame over the Forest Follies route.
+        /// </summary>
+        public static bool CountAllocs;
+        public const int AllocSampling = 4;
         public static readonly string[] PhaseNames = { "pump", "fixed", "physics", "update", "animators", "late", "ui", "end", "audio" };
         public static readonly double[] PhaseMs = new double[9];
         /// <summary>What each phase allocated (bytes, with Profile on): the engine's share of the GC's work beside the scripts'.</summary>
@@ -517,11 +525,15 @@ namespace Cuphead360.Engine
         {
             if (c.Done) return;
             bool more;
-            long t0 = PlayerLoop.Profile ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            long t0 = PlayerLoop.CountAllocs ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             long a0 = t0 != 0 ? GC.GetAllocatedBytesForCurrentThread() : 0;
             try { more = c.Routine.MoveNext(); }
             catch (Exception e) { Exceptions.Report(e, c.Owner, "coroutine " + c.Routine.GetType().Name); more = false; }
-            if (t0 != 0) { c.ProfTicks += PlayerLoop.SlowCall(t0, c.Routine.GetType(), null, "MoveNext"); c.ProfBytes += GC.GetAllocatedBytesForCurrentThread() - a0; }
+            if (t0 != 0)
+            {
+                c.ProfTicks += PlayerLoop.SlowCall(t0, c.Routine.GetType(), null, "MoveNext") * PlayerLoop.AllocSampling;
+                c.ProfBytes += (GC.GetAllocatedBytesForCurrentThread() - a0) * PlayerLoop.AllocSampling;
+            }
             if (!more) { Finish(c); return; }
             object y = c.Routine.Current;
             c.Waiting = y; c.FixedWait = false; c.EndOfFrameWait = false; c.WaitOn = null;
