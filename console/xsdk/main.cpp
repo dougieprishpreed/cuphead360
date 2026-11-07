@@ -400,11 +400,13 @@ struct Tex {
     bool pre_wanted;     // waiting in the prefetch backlog
     bool unused_pre;     // prefetched and not drawn yet: the first to make room
     bool soft_wanted;    // waiting in the guessed read-ahead's backlog
+    bool evicted;        // let go for room since its last load
+    unsigned char reloads;   // loads after being let go (release_unused keeps the often reloaded longer)
     unsigned char* stored;   // the pack entry's stored bytes, kept (STORED_BUDGET)
     unsigned stored_n, stored_used;
     Tex() : image(VK_NULL_HANDLE), mem(VK_NULL_HANDLE), view(VK_NULL_HANDLE), set(VK_NULL_HANDLE), w(0), h(0),
             format(VK_FORMAT_UNDEFINED), bytes(0), last_used(0), retry_at(0), failed(false), pinned(false), loading(false), prefetching(false),
-            pre_wanted(false), unused_pre(false), soft_wanted(false), stored(NULL), stored_n(0), stored_used(0) {}
+            pre_wanted(false), unused_pre(false), soft_wanted(false), evicted(false), reloads(0), stored(NULL), stored_n(0), stored_used(0) {}
 };
 
 struct Garbage {
@@ -501,6 +503,7 @@ private:
 public:
     void start_loader();
     void prefetch(int id, bool wanted);
+    int pending() const { return (int)(load_jobs_ + pre_backlog_.size()); }
 private:
     void evict();
     size_t release_unused(size_t want);
@@ -1297,6 +1300,8 @@ bool Renderer::make_image(Tex& t, VkFormat format, int w, int h, VkImageUsageFla
     t.format = format;
     t.bytes = size;
     texture_bytes_ += t.bytes;
+    if (t.evicted && t.reloads < 255) ++t.reloads;
+    t.evicted = false;
     return true;
 }
 
@@ -2014,36 +2019,50 @@ void Renderer::load_packed(int id, Tex& t) {
 
 // Frees textures not drawn in the last three frames (the GPU is done with
 // them: two frames are in flight), oldest first, until want bytes are freed.
+// A texture read again after being let go counts RELOAD_CREDIT frames
+// younger for each time (up to six): the twenty-fourth run's Forest Follies
+// read 638 MB of textures in 99 s, 120 MB of them pages loaded two to eleven
+// times (the player's, the explosions'), let go for pages behind the camera
+// that never came back.
+const unsigned RELOAD_CREDIT = 240;
 size_t Renderer::release_unused(size_t want) {
     std::vector<std::pair<unsigned, size_t> > order;
     // Prefetched textures nothing has drawn yet go first (read again if wanted), then the least recently drawn.
     for (size_t i = 0; i < textures_.size(); ++i)
-        if (textures_[i].image && !textures_[i].key.empty() && !textures_[i].pinned && frame_no_ - textures_[i].last_used > 2)
-            order.push_back(std::make_pair(textures_[i].unused_pre ? 0u : textures_[i].last_used, i));
+        if (textures_[i].image && !textures_[i].key.empty() && !textures_[i].pinned && frame_no_ - textures_[i].last_used > 2) {
+            const Tex& t = textures_[i];
+            unsigned credit = (t.reloads < 6 ? t.reloads : 6) * RELOAD_CREDIT;
+            order.push_back(std::make_pair(t.unused_pre ? 0u : t.last_used + credit, i));
+        }
     std::sort(order.begin(), order.end());
     size_t freed = 0;
     for (size_t k = 0; k < order.size() && freed < want; ++k) {
         Tex& t = textures_[order[k].second];
         freed += t.bytes;
         destroy(t, true);
+        t.evicted = true;
         ++evictions;
     }
     return freed;
 }
 
 // Frees textures not drawn (or, read ahead, not wanted) for more than age frames, oldest first, until want
-// bytes are freed: room for read-ahead.
+// bytes are freed: room for read-ahead. The often reloaded wait their credit longer (release_unused).
 size_t Renderer::release_aged(size_t want, unsigned age) {
     std::vector<std::pair<unsigned, size_t> > order;
-    for (size_t i = 0; i < textures_.size(); ++i)
-        if (textures_[i].image && !textures_[i].key.empty() && !textures_[i].pinned && frame_no_ - textures_[i].last_used > age)
-            order.push_back(std::make_pair(textures_[i].last_used, i));
+    for (size_t i = 0; i < textures_.size(); ++i) {
+        const Tex& t = textures_[i];
+        unsigned credit = (t.reloads < 6 ? t.reloads : 6) * RELOAD_CREDIT;
+        if (t.image && !t.key.empty() && !t.pinned && frame_no_ - t.last_used > age + credit)
+            order.push_back(std::make_pair(t.last_used + credit, i));
+    }
     std::sort(order.begin(), order.end());
     size_t freed = 0;
     for (size_t k = 0; k < order.size() && freed < want; ++k) {
         Tex& t = textures_[order[k].second];
         freed += t.bytes;
         destroy(t, true);
+        t.evicted = true;
         ++evictions;
     }
     return freed;
@@ -2057,6 +2076,7 @@ void Renderer::evict() {
             Tex& t = textures_[i];
             if (t.image && !t.key.empty() && !t.pinned && frame_no_ - t.last_used > age) {
                 destroy(t, false);
+                t.evicted = true;
                 ++evictions;
             }
         }
@@ -2574,7 +2594,9 @@ struct GpuLock {
     ~GpuLock() { pthread_mutex_unlock(&g_gpu_lock); }
 };
 const unsigned RECORD = 64;            // slots over the hourglass's cycle (~35 ms each for its 2.2 s)
-const double REPLAY_AFTER_MS = 50;
+// Two vblanks without a game frame: a load's game frames came 50-100 ms apart and the hourglass stepped
+// between them (the twenty-fourth run).
+const double REPLAY_AFTER_MS = 34;
 struct Recorded {
     bool kept;
     unsigned phase;                    // where the hourglass was in its cycle, ms
@@ -2584,6 +2606,19 @@ struct Recorded {
 };
 Recorded g_rec[RECORD];
 unsigned g_rec_count = 0, g_rec_head = 0;   // slots holding a frame, the newest frame's slot
+// What the kept frames show (their items and modes; not textures: the hourglass's frames may be on pages of their own): the slots are
+// kept from one loading screen to the next while it's the same screen, so a hold-up in a load's first frames
+// (before the game recorded the cycle again) has the whole cycle to draw from.
+unsigned g_rec_shape = 0;
+
+unsigned loading_shape(const ch360_frame* f) {
+    unsigned h = f->item_count * 2654435761u;
+    for (unsigned k = 0; k < f->item_count; ++k) {
+        const ch360_item& it = f->items[k];
+        h = (h ^ (it.mode * 131u + 7u)) * 16777619u;
+    }
+    return h;
+}
 
 void forget_loading() {
     for (unsigned k = 0; k < RECORD; ++k) g_rec[k].kept = false;
@@ -2598,13 +2633,13 @@ double g_last_draw_ms = 0;
 void record_loading(const ch360_frame* f) {
     bool ahead = (f->loading & 0x40000000u) != 0;
     if (!f->loading || f->item_count > 256 || f->vertex_count > 16384) {
-        if (g_rec_count) forget_loading();
-        g_loading_screen = false;
+        g_loading_screen = false;   // the slots stay for the next loading screen
         return;
     }
-    unsigned period = (f->loading >> 16) & 0x3FFF;
-    if (period != g_rec_period) forget_loading();
+    unsigned period = (f->loading >> 16) & 0x3FFF, shape = loading_shape(f);
+    if (period != g_rec_period || shape != g_rec_shape) forget_loading();
     g_rec_period = period;
+    g_rec_shape = shape;
     unsigned phase = period ? (f->loading & 0xFFFF) % period : 0;
     unsigned slot = period ? (unsigned)((unsigned long long)phase * RECORD / period) : 0;
     Recorded& r = g_rec[slot];
@@ -2857,6 +2892,10 @@ extern "C" void ch360_plat_draw(const ch360_frame* f) {
 extern "C" void ch360_plat_texture_file(int id, const char* key) {
     GpuLock lock;
     g_renderer->texture_file(id, key);
+}
+extern "C" int ch360_plat_textures_pending(void) {
+    GpuLock lock;
+    return g_renderer ? g_renderer->pending() : 0;
 }
 extern "C" void ch360_plat_texture_prefetch(int id, int wanted) {
     GpuLock lock;

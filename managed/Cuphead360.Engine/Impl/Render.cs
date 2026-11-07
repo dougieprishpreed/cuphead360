@@ -577,6 +577,8 @@ namespace Cuphead360.Engine
         static int version = 1;
         static readonly bool noBoundCache = Environment.GetEnvironmentVariable("CH360_NO_BOUND_CACHE") == "1";
         static readonly HashSet<string> requested = new HashSet<string>(StringComparer.Ordinal);
+        /// <summary>Atlases asked for (SpriteAtlasManager.atlasRequested) and not registered yet.</summary>
+        public static int Outstanding => requested.Count + pending.Count;
         static readonly List<string> pending = new List<string>();
         static readonly HashSet<string> unheard = new HashSet<string>(StringComparer.Ordinal);
         static readonly bool Trace = Environment.GetEnvironmentVariable("CH360_TRACE_ATLAS") == "1";

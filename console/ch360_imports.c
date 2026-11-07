@@ -889,6 +889,12 @@ void i5_ch36016_textureX5Fprefetch(wasmModuleInstance* inst, U32 id) {
     else ch360_plat_texture_prefetch(p, 0);
 }
 
+/* The textures still coming (ConsoleHost's boot hold waits for none). */
+U32 i5_ch36016_texturesX5Fpending(wasmModuleInstance* inst) {
+    (void)inst;
+    return (U32)ch360_plat_textures_pending();
+}
+
 /* A sprite the game expects to draw soon (near the view, a frame of a clip on screen): the page holding its
  * uv box (u0, v0)-(u1, v1) on its atlas page read ahead (the host decides by memory), not all the atlas
  * page's sprite pages. */

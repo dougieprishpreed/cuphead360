@@ -269,6 +269,31 @@ namespace Cuphead360.Engine
             foreach (var k in drop) cache.Remove(k);
         }
 
+        // Controllers built (prefabs' animators', as a scene's build resolves them) whose states and
+        // clips aren't read yet: the loads read them (WarmNext) under the loading screen, not the frame
+        // a prefab first spawns (Forest Follies' first explosion read 12 MB of clip trees on PC).
+        static readonly List<RuntimeAnimatorController> unread = new List<RuntimeAnimatorController>();
+        public static int Warmed;
+
+        public static void Built(RuntimeAnimatorController c) => unread.Add(c);
+        /// <summary>AssetUnload: the queue holds nothing past a pass (it would keep its controllers loaded).</summary>
+        public static void ForgetBuilt() => unread.Clear();
+
+        /// <summary>Reads the next queued controller (false: none left).</summary>
+        public static bool WarmNext()
+        {
+            while (unread.Count > 0)
+            {
+                var c = unread[unread.Count - 1];
+                unread.RemoveAt(unread.Count - 1);
+                if (c == null || !(Objects.Of(c) is NAsset a) || a.Destroyed) continue;
+                Of(c);
+                Warmed++;
+                return true;
+            }
+            return false;
+        }
+
         public static ControllerData Of(RuntimeAnimatorController c)
         {
             if (c == null) return null;
@@ -1319,9 +1344,16 @@ namespace Cuphead360.Engine
                 Accumulate(li, l.Current, 1f);
                 if (l.Next != null) Accumulate(li, l.Next, w);
             }
+            // A state without a motion writes nothing, defaults neither: the game ends effects and deaths
+            // in empty "Off" states (213 of its controllers' states) after clips whose last key clears
+            // the sprite, and Hilda Berg's blimp enemies showed their idle sprite again for the frame
+            // between the explosion's end and their Destroy.
             bool writeDefaults = true;
-            if (Layers.Length > 0) { var s = StateAt(0, Layers[0].Current.State); if (s != null) writeDefaults = s.WriteDefaults; }
-            HashSet<NBehaviour> notify = null;
+            if (Layers.Length > 0) { var s = StateAt(0, Layers[0].Current.State); if (s != null) writeDefaults = s.WriteDefaults && HasMotion(s); }
+            // The scripts to tell, in a list kept from call to call (a new set per animated UGUI image,
+            // every frame); a write that applies another animator nests and makes its own.
+            var notify = applyDepth == 0 ? notifyScratch : new List<NBehaviour>();
+            notify.Clear();
             for (int pass = 0; pass < 2; pass++)
                 foreach (var tg in controlled)
                 {
@@ -1332,16 +1364,30 @@ namespace Cuphead360.Engine
                         Array.Copy(tg.Default, tg.Value, 4);
                         tg.Obj = tg.DefaultObj;
                     }
-                    Write(tg);
-                    if (tg.Notify != null) (notify ??= new HashSet<NBehaviour>()).Add(tg.Notify);
+                    applyDepth++;
+                    try { Write(tg); } finally { applyDepth--; }
+                    if (tg.Notify != null && !notify.Contains(tg.Notify)) notify.Add(tg.Notify);
                 }
             // Unity tells scripts whose serialized fields the animation wrote (UGUI marks itself dirty).
-            if (notify != null)
+            if (notify.Count == 0) return;
+            applyDepth++;
+            try
+            {
                 foreach (var nb in notify)
                 {
                     var m = MessageSet.Find(nb.Managed.GetType(), "OnDidApplyAnimationProperties");
                     if (m != null && !nb.Destroyed) Behaviours.Send(nb, m);
                 }
+            }
+            finally { applyDepth--; notify.Clear(); }
+        }
+        static readonly List<NBehaviour> notifyScratch = new List<NBehaviour>();
+        static int applyDepth;
+
+        static bool HasMotion(ControllerData.State s)
+        {
+            foreach (var m in s.Sets) if (m != null) return true;
+            return false;
         }
 
         /// <summary>

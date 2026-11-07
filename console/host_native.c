@@ -170,6 +170,9 @@ void ch360_plat_texture_prefetch(int id, int wanted) {
         printf("PREFETCH frame %ld%s: %s\n", frame_no, wanted ? " wanted" : "", tex_key[id] ? tex_key[id] : "(runtime)");
 }
 
+/* Textures read at once here: none ever pending. */
+int ch360_plat_textures_pending(void) { return 0; }
+
 void ch360_plat_texture_file(int id, const char* key) {
     textures_files++;
     if (dump_keys) {

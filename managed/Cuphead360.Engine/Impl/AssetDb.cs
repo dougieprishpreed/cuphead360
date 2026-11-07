@@ -27,6 +27,8 @@ namespace Cuphead360.Engine
         /// <summary>The converted files loaded so far (the memory census walks them).</summary>
         public static IEnumerable<ChobFile> LoadedFiles => files.Values.Where(f => f != null);
         public static readonly List<string> Problems = new List<string>();
+        /// <summary>CH360_WARM_ANIMATION=1: scene loads read the animator controllers they built (ControllerData.WarmNext). Off: in Forest Follies it built 4,855 more sprites and 354 clips up front (29 MB more heap on PC), and memory is what squeezes the console's textures.</summary>
+        public static readonly bool WarmAnimation = Environment.GetEnvironmentVariable("CH360_WARM_ANIMATION") == "1";
 
         public static string[] BuildScenes = new string[0];
         public static readonly Dictionary<int, string> Tags = new Dictionary<int, string>
@@ -312,6 +314,7 @@ namespace Cuphead360.Engine
                         Assets.OnBuilt?.Invoke(managed, co);
                         // Unity binds a sprite to its atlas when the sprite loads (or asks for a late-bound one).
                         if (managed is Sprite sprite) Atlases.Touch(sprite);
+                        else if (managed is RuntimeAnimatorController rac && WarmAnimation) ControllerData.Built(rac);
                         return managed;
                     }
             }

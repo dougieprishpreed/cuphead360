@@ -123,6 +123,8 @@ void ch360_plat_texture_file(int id, const char* key);
  * the view or a frame of a clip on screen (room is made from textures not drawn lately); else a guess (an
  * atlas the game loaded, the other pages of one drawn): only its stored bytes are kept, and only with room. */
 void ch360_plat_texture_prefetch(int id, int wanted);
+/* Textures being read or waiting to be (the loader's jobs and the read-ahead asked for): the boot's hold. */
+int ch360_plat_textures_pending(void);
 /* Texture id's pixels (run-time textures: font atlases), BGRA rows. */
 void ch360_plat_texture_pixels(int id, int width, int height, const unsigned char* bgra);
 /* Mixed audio: frames of 48 kHz stereo, interleaved little-endian floats

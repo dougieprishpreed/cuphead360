@@ -80,9 +80,14 @@ namespace Cuphead360.Engine
             return null;
         }
 
+        // The components found, reused: a GetComponents call runs no game code (UGUI asks for its
+        // mesh and material modifiers, into pooled lists, at each graphic's rebuild).
+        static readonly List<Component> componentsFound = new List<Component>();
+
         public static Array Components(NGameObject go, Type type, bool typedArray, bool recursive, bool includeInactive, bool reverse, object resultList)
         {
-            var found = new List<Component>();
+            var found = componentsFound;
+            found.Clear();
             void Collect(NGameObject g, bool top)
             {
                 if (top || includeInactive || Active(g))
@@ -108,10 +113,12 @@ namespace Cuphead360.Engine
             {
                 list.Clear();
                 foreach (var c in found) list.Add(c);
+                found.Clear();
                 return null;
             }
             var arr = Array.CreateInstance(typedArray && type != null ? type : typeof(Component), found.Count);
             for (int i = 0; i < found.Count; i++) arr.SetValue(found[i], i);
+            found.Clear();
             return arr;
         }
 

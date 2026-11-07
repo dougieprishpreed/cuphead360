@@ -82,7 +82,27 @@ namespace Cuphead360.Engine
 
         // List<T> internals, as Unity's NoAllocHelpers reach them natively.
         public static Array UnityEngine_NoAllocHelpers__ExtractArrayFromList(object list)
-            => list?.GetType().GetField("_items", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.GetValue(list) as Array;
+        {
+            switch (list)
+            {
+                // UGUI's mesh channels, nine at every graphic's rebuild: no reflection for these.
+                case System.Collections.Generic.List<Vector3> l3: return ListItems<Vector3>.Of(l3);
+                case System.Collections.Generic.List<Vector2> l2: return ListItems<Vector2>.Of(l2);
+                case System.Collections.Generic.List<Vector4> l4: return ListItems<Vector4>.Of(l4);
+                case System.Collections.Generic.List<Color32> lc: return ListItems<Color32>.Of(lc);
+                case System.Collections.Generic.List<int> li: return ListItems<int>.Of(li);
+                case null: return null;
+            }
+            return list.GetType().GetField("_items", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.GetValue(list) as Array;
+        }
+
+        /// <summary>A list's backing array (its first Count items are the list's).</summary>
+        static class ListItems<T>
+        {
+            [System.Runtime.CompilerServices.UnsafeAccessor(System.Runtime.CompilerServices.UnsafeAccessorKind.Field, Name = "_items")]
+            static extern ref T[] Items(System.Collections.Generic.List<T> list);
+            public static T[] Of(System.Collections.Generic.List<T> l) => Items(l);
+        }
         public static void UnityEngine_NoAllocHelpers__ResizeList(object list, int size)
         {
             if (list == null) return;

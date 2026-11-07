@@ -46,6 +46,8 @@ namespace Cuphead360.Player
         static extern void TexturePrefetch(int id);
         [DllImport("ch360", EntryPoint = "texture_ahead"), WasmImportLinkage]
         static extern void TextureAhead(int id, float u0, float v0, float u1, float v1);
+        [DllImport("ch360", EntryPoint = "textures_pending"), WasmImportLinkage]
+        static extern int TexturesPending();
         [DllImport("ch360", EntryPoint = "loading_screen"), WasmImportLinkage]
         static extern void LoadingScreenFlag(uint state);
         [DllImport("ch360", EntryPoint = "audio"), WasmImportLinkage]
@@ -424,6 +426,7 @@ namespace Cuphead360.Player
                 // A console frame slower than the vblank still moves the game at its real speed.
                 Delta = scripted != null ? scriptedStep : Math.Clamp(real, 1f / 60f, 1f / 30f);
                 PlayerLoop.AudioDelta = scripted != null ? -1 : Math.Clamp(real, 0f, 0.25f);
+                if (scripted == null && BootHold(n)) { Delta = 1e-4f; PlayerLoop.AudioDelta = 0f; }
                 PollPads();
                 if (!frame(++n)) break;
                 if (n % 60 == 1) NoKeyboard();
@@ -598,9 +601,84 @@ namespace Cuphead360.Player
             return state;
         }
 
+        // The boot's hold (CH360_BOOT_HOLD=0: off): the title scene's first frames run with the game's clock all
+        // but stopped (its logo waits a second on a black screen first) until the atlases it asked for have come
+        // and the textures its logo, title and their clips show are read: in the twenty-fourth run they were read
+        // as the logo and the title played, frames waiting on them (the user: both hitched).
+        static int bootHold;   // 0 not yet, 1 holding, 2 done
+        static long bootFrom, bootProgressAt;
+        static int bootFrames, bootSprites, bootPending = int.MaxValue, bootUnbound = -1;
+        static bool bootSettled;
+        static readonly bool bootHoldOff = Environment.GetEnvironmentVariable("CH360_BOOT_HOLD") == "0";
+
+        static bool BootHold(int frame)
+        {
+            if (bootHold == 2 || bootHoldOff) return false;
+            long now = System.Diagnostics.Stopwatch.GetTimestamp(), hz = System.Diagnostics.Stopwatch.Frequency;
+            if (bootHold == 0)
+            {
+                if (Cuphead360.Engine.Scenes.Active?.Name != "scene_title") return false;
+                bootHold = 1;
+                bootFrom = bootProgressAt = now;
+            }
+            bootFrames++;
+            if (bootFrames % 10 == 1 && Atlases.Outstanding == 0)
+            {
+                // Sprites whose atlas isn't here ask for it; once a pass binds no more of them, nothing else will.
+                int read = RenderList.ReadAheadScene(out int unbound);
+                bootSprites = Math.Max(bootSprites, read);
+                bootSettled = unbound == 0 || unbound == bootUnbound;
+                bootUnbound = unbound;
+            }
+            int pending = TexturesPending(), atlases = Atlases.Outstanding;
+            if (pending < bootPending) { bootPending = pending; bootProgressAt = now; }
+            bool done = bootFrames > 12 && bootSettled && atlases == 0 && pending == 0;
+            // Never longer than 12 s, nor 3 s without a texture read (the host's memory may hold the rest back).
+            if (done || now - bootFrom > 12 * hz || now - bootProgressAt > 3 * hz)
+            {
+                bootHold = 2;
+                Console.WriteLine($"BOOT hold: {bootFrames} frames, {(now - bootFrom) * 1000 / hz} ms; {bootSprites} sprites read ahead, {bootUnbound} with no atlas; "
+                    + $"{pending} textures still coming, {atlases} atlases asked for{(done ? "" : " (gave up)")}");
+                return false;
+            }
+            return true;
+        }
+
+        // The hourglass by the clock: the game's clock runs at most 1/30 s a frame, so a slow load turned it slowly,
+        // and after a hold-up the host's frames (which go by the clock) gave way to the game's from further back
+        // (the twenty-fourth run's skips). Each loading frame shows the kept frame for where the clock says the
+        // hourglass is, and its animator is put there for the frames after (the fade out).
+        static long hourglassFrom;
+        static float hourglassAt;
+        static uint hourglassCycle;
+
         static void Draw(List<RenderList.View> views)
         {
             uint state = LoadingScreen();
+            uint cycle = (state >> 16) & 0x3FFF;
+            if (state != 0 && cycle != 0 && !managedDraw)
+            {
+                long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (hourglassFrom == 0 || cycle != hourglassCycle)
+                {
+                    hourglassFrom = now;
+                    hourglassAt = (state & 0xFFFF) / (float)cycle;
+                    hourglassCycle = cycle;
+                }
+                float fraction = hourglassAt + (float)((now - hourglassFrom) * 1000.0 / System.Diagnostics.Stopwatch.Frequency / cycle);
+                fraction -= MathF.Floor(fraction);
+                var inst = loaderInstance.GetValue(null) as UnityEngine.Object;
+                var icon = inst != null ? loaderIcon.GetValue(inst) as UnityEngine.UI.Image : null;
+                var animator = icon != null ? icon.GetComponent<Animator>() : null;
+                var sprite = animator != null ? NAnimator.SpriteAt(animator, fraction) : null;
+                if (sprite != null)
+                {
+                    if (!ReferenceEquals(icon.sprite, sprite)) { icon.sprite = sprite; Cuphead360.Engine.UI.WillRender(); views = RenderList.Build(); }
+                    animator.Play(0, 0, fraction);   // 0: the current state
+                    state = 0x80000000u | cycle << 16 | (uint)(fraction * cycle) & 0xFFFF;
+                }
+            }
+            else hourglassFrom = 0;
             DrawFrame(views, state);
             RecordHourglass(state);
         }

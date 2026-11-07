@@ -256,14 +256,19 @@ namespace Cuphead360.Engine
             return false;
         }
 
+        /// <summary>The names as Unity lists them: one array kept while the same pads are connected (Rewired asks every fixed step).</summary>
         public static string[] JoystickNames()
         {
-            int last = -1;
-            for (int i = 0; i < 4; i++) if (cur.Pads[i].Connected) last = i;
+            int last = -1, mask = 0;
+            for (int i = 0; i < 4; i++) if (cur.Pads[i].Connected) { last = i; mask |= 1 << i; }
+            if (joystickNames != null && mask == joystickMask) return joystickNames;
             var r = new string[last + 1];
             for (int i = 0; i <= last; i++) r[i] = cur.Pads[i].Connected ? PadName : "";
-            return r;
+            joystickMask = mask;
+            return joystickNames = r;
         }
+        static string[] joystickNames;
+        static int joystickMask;
 
         public static bool AnyKey(InputFrame f)
         {

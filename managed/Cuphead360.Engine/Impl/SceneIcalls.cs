@@ -48,8 +48,8 @@ namespace Cuphead360.Engine
             Scenes.NScene scene;
             SceneBuild build;
             List<ChobObject> gameObjects;
-            int stage, next, frames;
-            long t0, tReady, files0, bytes0;
+            int stage, next, frames, warmed0;
+            long t0, tWarm, tReady, files0, bytes0;
 
             public static SceneLoad Begin(int index, bool additive)
             {
@@ -102,6 +102,16 @@ namespace Cuphead360.Engine
                                 if (Over()) { Progress = 0.6f + 0.4f * next / build.Components.Count; return false; }
                             }
                             stage = 4;
+                            tWarm = System.Diagnostics.Stopwatch.GetTimestamp();
+                            warmed0 = ControllerData.Warmed;
+                            if (Over()) return false;
+                            break;
+                        case 4:
+                            // The animator controllers the build resolved (its prefabs'), read while the
+                            // loading screen is up: their first spawns read them in a frame of play.
+                            while (ControllerData.WarmNext())
+                                if (Over()) return false;
+                            stage = 5;
                             tReady = System.Diagnostics.Stopwatch.GetTimestamp();
                             Progress = 1f;
                             return true;
@@ -129,7 +139,8 @@ namespace Cuphead360.Engine
                 if (Timing)
                 {
                     Log.Line($"SCENE {name}: built in {Ms(t0, tReady)} ms over {frames} frames ({ChobFile.LoadedFiles - files0} files read, "
-                        + $"{(ChobFile.LoadedBytes - bytes0) >> 20} MB), activated in {Ms(t1, System.Diagnostics.Stopwatch.GetTimestamp())} ms "
+                        + $"{(ChobFile.LoadedBytes - bytes0) >> 20} MB; {ControllerData.Warmed - warmed0} animator controllers read in {Ms(tWarm, tReady)} ms), "
+                        + $"activated in {Ms(t1, System.Diagnostics.Stopwatch.GetTimestamp())} ms "
                         + $"({Instantiated(calls0, copied0, tree0, fields0, bind0, objs0, thunks0)})");
                     MemoryLine();
                 }
@@ -219,6 +230,7 @@ namespace Cuphead360.Engine
             scene.Path = path;
             if (!additive) { Scenes.ActiveHandle = scene.Handle; Clock.TimeSinceLevelLoadBase = Clock.Time; }
             var build = SceneBuild.Scene(file, scene.Handle);
+            while (ControllerData.WarmNext()) { }   // as the sliced loads do (SceneLoad's stage 4)
             Loads++;
             Log.Line($"SCENE loaded {name} (build {index}): {build.GameObjects.Count} GameObjects, {build.Components.Count} components"
                 + (traceMem ? $"; heap {GC.GetTotalMemory(true) >> 20} MB, files read {ChobFile.LoadedFiles} ({ChobFile.LoadedBytes >> 20} MB), live objects {Objects.LiveCount}" : ""));

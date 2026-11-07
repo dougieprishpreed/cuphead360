@@ -288,6 +288,22 @@ namespace Cuphead360.Engine
         public List<int[]> SubMeshes = new List<int[]> { new int[0] };
         public List<MeshTopology> Topologies = new List<MeshTopology> { MeshTopology.Triangles };
         public Bounds Bounds;
+        // Clear's arrays, for the next sets of the same sizes: UGUI's VertexHelper.FillMesh clears a
+        // graphic's mesh and sets every channel again at each rebuild (the HUD's, every frame).
+        public Vector3[] SpareVertices, SpareNormals;
+        public Vector4[] SpareTangents;
+        public Color32[] SpareColors;
+        public readonly Vector4[][] SpareUv = new Vector4[4][];
+        public int[] SpareIndices;
+
+        /// <summary>An array of n for a channel: the one it has, its spare from Clear, or a new one.</summary>
+        public static T[] Take<T>(T[] current, ref T[] spare, int n)
+        {
+            if (n == 0) return Array.Empty<T>();
+            if (current != null && current.Length == n) return current;
+            if (spare != null && spare.Length == n) { var s = spare; spare = null; return s; }
+            return new T[n];
+        }
 
         static readonly ConditionalWeakTable<Mesh, MeshData> meshes = new ConditionalWeakTable<Mesh, MeshData>();
 
@@ -763,7 +779,7 @@ namespace Cuphead360.Engine
         {
             var d = MD(self);
             if (d == null) return;
-            while (d.SubMeshes.Count < value) { d.SubMeshes.Add(new int[0]); d.Topologies.Add(MeshTopology.Triangles); }
+            while (d.SubMeshes.Count < value) { d.SubMeshes.Add(Array.Empty<int>()); d.Topologies.Add(MeshTopology.Triangles); }
             while (d.SubMeshes.Count > Math.Max(1, value)) { d.SubMeshes.RemoveAt(d.SubMeshes.Count - 1); d.Topologies.RemoveAt(d.Topologies.Count - 1); }
         }
         public static bool UnityEngine_Mesh__get_isReadable(Mesh self) => true;
@@ -776,9 +792,16 @@ namespace Cuphead360.Engine
         {
             var d = MD(self);
             if (d == null) return;
-            d.Vertices = new Vector3[0]; d.Normals = null; d.Tangents = null; d.Colors = null;
+            if (d.Vertices.Length > 0) d.SpareVertices = d.Vertices;
+            if (d.Normals != null && d.Normals.Length > 0) d.SpareNormals = d.Normals;
+            if (d.Tangents != null && d.Tangents.Length > 0) d.SpareTangents = d.Tangents;
+            if (d.Colors != null && d.Colors.Length > 0) d.SpareColors = d.Colors;
+            for (int i = 0; i < 4; i++) if (d.Uv[i] != null && d.Uv[i].Length > 0) d.SpareUv[i] = d.Uv[i];
+            if (d.SubMeshes.Count > 0 && d.SubMeshes[0].Length > 0) d.SpareIndices = d.SubMeshes[0];
+            d.Vertices = Array.Empty<Vector3>(); d.Normals = null; d.Tangents = null; d.Colors = null;
             for (int i = 0; i < 4; i++) d.Uv[i] = null;
-            d.SubMeshes = new List<int[]> { new int[0] }; d.Topologies = new List<MeshTopology> { MeshTopology.Triangles };
+            d.SubMeshes.Clear(); d.SubMeshes.Add(Array.Empty<int>());
+            d.Topologies.Clear(); d.Topologies.Add(MeshTopology.Triangles);
             d.Bounds = default;
         }
         public static void UnityEngine_Mesh__RecalculateBoundsImpl(Mesh self) => MD(self)?.RecalculateBounds();
@@ -834,7 +857,7 @@ namespace Cuphead360.Engine
             {
                 case Mesh.InternalShaderChannel.Vertex:
                     {
-                        var a = d.Vertices != null && d.Vertices.Length == n ? d.Vertices : new Vector3[n];
+                        var a = MeshData.Take(d.Vertices, ref d.SpareVertices, n);
                         if (values is Vector3[] src3) Array.Copy(src3, a, n);
                         else for (int i = 0; i < n; i++) { var v = At(values, i); a[i] = new Vector3(v.x, v.y, v.z); }
                         d.Vertices = a;
@@ -842,7 +865,7 @@ namespace Cuphead360.Engine
                     }
                 case Mesh.InternalShaderChannel.Normal:
                     {
-                        var a = d.Normals != null && d.Normals.Length == n ? d.Normals : new Vector3[n];
+                        var a = MeshData.Take(d.Normals, ref d.SpareNormals, n);
                         if (values is Vector3[] src3) Array.Copy(src3, a, n);
                         else for (int i = 0; i < n; i++) { var v = At(values, i); a[i] = new Vector3(v.x, v.y, v.z); }
                         d.Normals = n > 0 ? a : null;
@@ -850,14 +873,14 @@ namespace Cuphead360.Engine
                     }
                 case Mesh.InternalShaderChannel.Tangent:
                     {
-                        var a = d.Tangents != null && d.Tangents.Length == n ? d.Tangents : new Vector4[n];
+                        var a = MeshData.Take(d.Tangents, ref d.SpareTangents, n);
                         for (int i = 0; i < n; i++) a[i] = At(values, i);
                         d.Tangents = n > 0 ? a : null;
                         break;
                     }
                 case Mesh.InternalShaderChannel.Color:
                     {
-                        var a = d.Colors != null && d.Colors.Length == n ? d.Colors : new Color32[n];
+                        var a = MeshData.Take(d.Colors, ref d.SpareColors, n);
                         if (values is Color32[] s32) Array.Copy(s32, a, n);
                         else if (values is Color[] sc) for (int i = 0; i < n; i++) a[i] = sc[i];
                         else for (int i = 0; i < n; i++) a[i] = new Color32(255, 255, 255, 255);
@@ -867,7 +890,7 @@ namespace Cuphead360.Engine
                 default:
                     {
                         int uv = (int)channel - (int)Mesh.InternalShaderChannel.TexCoord0;
-                        var a = d.Uv[uv] != null && d.Uv[uv].Length == n ? d.Uv[uv] : new Vector4[n];
+                        var a = MeshData.Take(d.Uv[uv], ref d.SpareUv[uv], n);
                         for (int i = 0; i < n; i++) a[i] = At(values, i);
                         d.Uv[uv] = n > 0 ? a : null;
                         break;
@@ -923,7 +946,7 @@ namespace Cuphead360.Engine
             UnityEngine_Mesh__set_subMeshCount(self, Math.Max(d.SubMeshes.Count, submesh + 1));
             int n = indices == null ? 0 : Math.Min(arraySize, indices.Length);
             var old = submesh < d.SubMeshes.Count ? d.SubMeshes[submesh] : null;
-            var a = old != null && old.Length == n ? old : new int[n];
+            var a = MeshData.Take(old, ref d.SpareIndices, n);
             if (indices is int[] ii) for (int i = 0; i < n; i++) a[i] = ii[i] + baseVertex;
             else if (indices is ushort[] us) for (int i = 0; i < n; i++) a[i] = us[i] + baseVertex;
             else for (int i = 0; i < n; i++) a[i] = Convert.ToInt32(indices.GetValue(i)) + baseVertex;

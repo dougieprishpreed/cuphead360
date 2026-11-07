@@ -335,6 +335,40 @@ namespace Cuphead360.Engine
             ReadAhead(tex, Sprites.UvBox(s));
         }
 
+        /// <summary>
+        /// Every sprite the active scene's objects show, or their animators' clips play, active or not, read
+        /// ahead: the console's boot reads the logo's and the title's pages while the screen is still black
+        /// (ConsoleHost's hold). The number of sprites asked for; unbound: those whose atlas isn't here, asked for
+        /// (Atlases.Touch, as a draw would: the DLC title's came only as it was revealed).
+        /// </summary>
+        public static int ReadAheadScene(out int unbound)
+        {
+            unbound = 0;
+            if (ReadAhead == null) return 0;
+            int handle = Scenes.ActiveHandle, n = 0, missing = 0;
+            void One(Sprite s)
+            {
+                if (s == null) return;
+                var tex = Sprites.BoundTexture(s);
+                if (tex == null) { Atlases.Touch(s); missing++; return; }
+                ReadAhead(tex, Sprites.UvBox(s));
+                n++;
+            }
+            foreach (var go in Typed.GameObjects)
+            {
+                if (go.IsAsset || go.Scene != handle) continue;
+                foreach (var c in go.Components)
+                {
+                    if (c is NSpriteRenderer sr) One(sr.Sprite);
+                    else if (c is NAnimator a && a.Controller != null && ControllerData.Of(a.Controller) is ControllerData d)
+                        foreach (var clip in d.Clips) { if (clip != null) foreach (var o in clip.PPtrs) One(o as Sprite); }
+                    else if (c.Managed is UnityEngine.UI.Image img) One(img.sprite);
+                }
+            }
+            unbound = missing;
+            return n;
+        }
+
         static void AheadClip(ClipData clip)
         {
             if (clip == null || Clock.FrameCount - clip.AheadFrame < ClipAheadFrames) return;

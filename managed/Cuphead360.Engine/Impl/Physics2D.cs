@@ -246,9 +246,16 @@ namespace Cuphead360.Engine
         NTransform cachedT;
         int cachedTV;
 
-        // Apart from Shapes: its local function P is made a delegate for polygons, so the
-        // compiler puts the matrix it captures in a heap object at the method's start: every
-        // call allocated one, cached or not (the largest allocation site in a run-and-gun level).
+        // The polygon's convex pieces in its own space (the offset applied), cut once per shape version:
+        // an affine map keeps a piece convex, so a move maps their points (a mirroring map reverses
+        // their order). Cut in world space at every move, they were new arrays each time.
+        List<Vector2[]> localPieces;
+        int localPiecesVersion = -1;
+
+        // Apart from Shapes, and P never made a delegate: a local function turned into one (it was
+        // Array.ConvertAll's, for polygons) has the compiler put the matrix it captures in a heap
+        // object at the method's start, so every call allocated one (the largest allocation site in
+        // the run-and-gun levels, with the edges' and polygons' new shapes).
         void Recompute(Matrix4x4 m)
         {
             Vector2 P(Vector2 local) { var w = m.MultiplyPoint3x4(new Vector3(local.x + Offset.x, local.y + Offset.y, 0)); return new Vector2(w.x, w.y); }
@@ -295,17 +302,35 @@ namespace Cuphead360.Engine
                         break;
                     }
                 case ColliderKind.Edge:
-                    World.Clear();
-                    for (int i = 0; i + 1 < Points.Length; i++) World.Add(Shape.Poly(new[] { P(Points[i]), P(Points[i + 1]) }, EdgeRadius * rs));
-                    break;
-                case ColliderKind.Polygon:
-                    World.Clear();
-                    foreach (var path in Paths)
                     {
-                        var world = Array.ConvertAll(path, P);
-                        foreach (var piece in Geometry.ConvexPieces(world)) World.Add(Shape.Poly(piece, 0));
+                        int segs = Math.Max(0, Points.Length - 1);
+                        if (World.Count != segs) { World.Clear(); for (int i = 0; i < segs; i++) World.Add(new Shape { Pts = new Vector2[2] }); }
+                        for (int i = 0; i < segs; i++) { var sh = World[i]; sh.Pts[0] = P(Points[i]); sh.Pts[1] = P(Points[i + 1]); sh.R = EdgeRadius * rs; }
+                        break;
                     }
-                    break;
+                case ColliderKind.Polygon:
+                    {
+                        if (localPiecesVersion != Version || localPieces == null)
+                        {
+                            localPieces = new List<Vector2[]>();
+                            foreach (var path in Paths) localPieces.AddRange(Geometry.ConvexPieces(path));
+                            localPiecesVersion = Version;
+                            World.Clear();
+                        }
+                        if (World.Count != localPieces.Count)
+                        {
+                            World.Clear();
+                            foreach (var lp in localPieces) World.Add(new Shape { Pts = new Vector2[lp.Length] });
+                        }
+                        for (int i = 0; i < localPieces.Count; i++)
+                        {
+                            var lp = localPieces[i]; var pts = World[i].Pts;
+                            for (int k = 0; k < lp.Length; k++) pts[k] = P(lp[k]);
+                            Geometry.CcwInPlace(pts);
+                            World[i].R = 0;
+                        }
+                        break;
+                    }
             }
             float x0 = float.MaxValue, y0 = float.MaxValue, x1 = float.MinValue, y1 = float.MinValue;
             foreach (var s in World) { var r = s.Bounds(); x0 = Math.Min(x0, r.xMin); y0 = Math.Min(y0, r.yMin); x1 = Math.Max(x1, r.xMax); y1 = Math.Max(y1, r.yMax); }
@@ -712,12 +737,18 @@ namespace Cuphead360.Engine
         public static void Ignore(NCollider2D a, NCollider2D b, bool on) { if (on) ignored.Add(Key(a, b)); else ignored.Remove(Key(a, b)); }
         public static bool Ignored(NCollider2D a, NCollider2D b) => ignored.Contains(Key(a, b));
 
-        public static List<NCollider2D> Colliders()
+        public static List<NCollider2D> Colliders() => LiveColliders(new List<NCollider2D>(Typed.Colliders.Count));
+
+        static List<NCollider2D> LiveColliders(List<NCollider2D> l)
         {
-            var l = new List<NCollider2D>(Typed.Colliders.Count);
+            l.Clear();
             foreach (var c in Typed.Colliders) if (c.Live) l.Add(c);
             return l;
         }
+
+        // The step's live colliders, for Resolve and then the contact pass (each read it before the
+        // callbacks run): a new list per step, twice.
+        static readonly List<NCollider2D> stepColliders = new List<NCollider2D>();
 
         // ---------------------------------------------------------------- filters
 
@@ -749,10 +780,16 @@ namespace Cuphead360.Engine
 
         // ---------------------------------------------------------------- casts
 
-        /// <summary>Sweep a shape (relative to origin) along dir for distance; every hit sorted by fraction.</summary>
+        // The queries' results, reused: every caller reads them before its next query (the ground
+        // enemies' box casts and raycasts, several per fixed step, each grew a new list).
+        static readonly List<RaycastHit2D> castHits = new List<RaycastHit2D>();
+        static readonly List<NCollider2D> overlapHits = new List<NCollider2D>();
+
+        /// <summary>Sweep a shape (relative to origin) along dir for distance; every hit sorted by fraction (a list reused by the next cast).</summary>
         public static List<RaycastHit2D> Cast(Vector2 origin, Shape castShape, Vector2 dir, float distance, ContactFilter2D filter, NCollider2D exclude = null, NRigidbody2D excludeBody = null)
         {
-            var hits = new List<RaycastHit2D>();
+            var hits = castHits;
+            hits.Clear();
             float len = dir.magnitude;
             if (len < 1e-9f) dir = Vector2.zero; else dir /= len;
             if (float.IsInfinity(distance) || distance > 1e6f) distance = 1e6f;
@@ -794,9 +831,11 @@ namespace Cuphead360.Engine
                 h.m_Collider = (Collider2D)c.Managed;
                 hits.Add(h);
             }
-            hits.Sort((a, b) => a.m_Distance.CompareTo(b.m_Distance));
+            if (hits.Count > 1) hits.Sort(byDistance);
             return hits;
         }
+
+        static readonly Comparison<RaycastHit2D> byDistance = (a, b) => a.m_Distance.CompareTo(b.m_Distance);
 
         static Vector2 ContactPoint(NCollider2D c, Vector2 centroid, Shape cast, Vector2 normal)
         {
@@ -807,12 +846,21 @@ namespace Cuphead360.Engine
             return centroid + best - normal * cast.R;
         }
 
+        // The queries' shapes, shared: each is valid until the next query of its kind (a query reads its
+        // shape and keeps nothing; a new one per box cast was a run-and-gun level's steady garbage).
+        static readonly Shape boxQuery = new Shape { Pts = new Vector2[4] }, capsuleQuery = new Shape { Pts = new Vector2[2] };
+        static readonly Shape circleQuery = new Shape { Pts = new Vector2[1] }, movedQuery = new Shape(), resolveMoved = new Shape();
+
         public static Shape BoxShape(Vector2 size, float angle)
         {
             float hx = size.x / 2, hy = size.y / 2;
             float a = angle * Mathf.Deg2Rad, cs = (float)Math.Cos(a), sn = (float)Math.Sin(a);
             Vector2 R(float x, float y) => new Vector2(x * cs - y * sn, x * sn + y * cs);
-            return Shape.Poly(new[] { R(-hx, -hy), R(hx, -hy), R(hx, hy), R(-hx, hy) }, 0);
+            var p = boxQuery.Pts;
+            p[0] = R(-hx, -hy); p[1] = R(hx, -hy); p[2] = R(hx, hy); p[3] = R(-hx, hy);
+            Geometry.CcwInPlace(p);
+            boxQuery.R = 0;
+            return boxQuery;
         }
 
         public static Shape CapsuleShape(Vector2 size, CapsuleDirection2D dir, float angle)
@@ -821,14 +869,26 @@ namespace Cuphead360.Engine
             float r = (vertical ? size.x : size.y) / 2, half = Math.Max(0, (vertical ? size.y : size.x) / 2 - r);
             float a = angle * Mathf.Deg2Rad, cs = (float)Math.Cos(a), sn = (float)Math.Sin(a);
             Vector2 R(float x, float y) => new Vector2(x * cs - y * sn, x * sn + y * cs);
-            return Shape.Poly(vertical ? new[] { R(0, -half), R(0, half) } : new[] { R(-half, 0), R(half, 0) }, r);
+            var p = capsuleQuery.Pts;
+            if (vertical) { p[0] = R(0, -half); p[1] = R(0, half); } else { p[0] = R(-half, 0); p[1] = R(half, 0); }
+            capsuleQuery.R = r;
+            return capsuleQuery;
+        }
+
+        public static Shape CircleShape(Vector2 c, float r)
+        {
+            circleQuery.Pts[0] = c;
+            circleQuery.R = r;
+            return circleQuery;
         }
 
         public static readonly Shape PointShape = Shape.Circle(Vector2.zero, 0);
 
+        /// <summary>The colliders a world-space shape overlaps (a list reused by the next overlap).</summary>
         public static List<NCollider2D> OverlapShape(Shape world, ContactFilter2D filter)
         {
-            var r = new List<NCollider2D>();
+            var r = overlapHits;
+            r.Clear();
             var b = world.Bounds();
             var all = QueryIndex.Candidates(b.xMin, b.xMax);
             for (int ci = 0; ci < all.Count; ci++)
@@ -842,12 +902,31 @@ namespace Cuphead360.Engine
             return r;
         }
 
-        public static Shape Moved(Shape s, Vector2 by) => new Shape { Pts = Array.ConvertAll(s.Pts, p => p + by), R = s.R };
+        /// <summary>s moved by an offset, in a shared shape (valid until the next query's).</summary>
+        public static Shape Moved(Shape s, Vector2 by) => MovedInto(movedQuery, movedByCount, s, by);
+
+        static readonly Vector2[][] movedByCount = new Vector2[16][], resolveByCount = new Vector2[16][];
+
+        static Shape MovedInto(Shape into, Vector2[][] byCount, Shape s, Vector2 by)
+        {
+            int n = s.Pts.Length;
+            var pts = n < byCount.Length ? (byCount[n] ??= new Vector2[n]) : new Vector2[n];
+            for (int i = 0; i < n; i++) pts[i] = s.Pts[i] + by;
+            into.Pts = pts;
+            into.R = s.R;
+            return into;
+        }
 
         // ---------------------------------------------------------------- simulation and contacts
 
         sealed class Contact { public NCollider2D A, B; public bool Trigger; }
         static Dictionary<(NCollider2D, NCollider2D), Contact> contacts = new Dictionary<(NCollider2D, NCollider2D), Contact>();
+        // The step before last's contacts, emptied, for the next step to fill (a step nested in a
+        // callback, through Physics2D.Simulate, finds none and makes its own); and the snapshot the
+        // callbacks are sent from.
+        static Dictionary<(NCollider2D, NCollider2D), Contact> spareContacts = new Dictionary<(NCollider2D, NCollider2D), Contact>();
+        static readonly List<KeyValuePair<(NCollider2D, NCollider2D), Contact>> sendList = new List<KeyValuePair<(NCollider2D, NCollider2D), Contact>>();
+        static int simulating;
 
 
         /// <summary>
@@ -856,8 +935,9 @@ namespace Cuphead360.Engine
         /// </summary>
         public static void ColliderGone(NCollider2D c)
         {
-            var ended = new List<(NCollider2D, NCollider2D)>();
-            foreach (var k in contacts.Keys) if (k.Item1 == c || k.Item2 == c) ended.Add(k);
+            List<(NCollider2D, NCollider2D)> ended = null;   // most colliders that go touch nothing
+            foreach (var k in contacts.Keys) if (k.Item1 == c || k.Item2 == c) (ended ??= new List<(NCollider2D, NCollider2D)>()).Add(k);
+            if (ended == null) return;
             foreach (var k in ended)
             {
                 if (!contacts.TryGetValue(k, out var ct)) continue;
@@ -904,12 +984,14 @@ namespace Cuphead360.Engine
             Resolve();
             // Contacts. Each collider's rigidbody once (the pairs asked for it each: a walk up the
             // hierarchy per pair, every step); nothing here changes the hierarchy.
-            var cols = Colliders();
+            var cols = LiveColliders(stepColliders);
             foreach (var c in cols) c.Shapes();
             if (TraceContact != null)
                 foreach (var c in cols) if (Traced(c)) Log.Line($"TRACE contact frame {Clock.FrameCount} collider {Describe(c)}");
             var bodyOf = BodiesOf(cols);
-            var now = new Dictionary<(NCollider2D, NCollider2D), Contact>();
+            var now = spareContacts ?? new Dictionary<(NCollider2D, NCollider2D), Contact>();
+            spareContacts = null;
+            now.Clear();
             // Sort and sweep on the boxes' x ranges: only pairs whose ranges meet are looked at (every pair,
             // each step, was most of the run-and-gun levels' physics). The pairs found are put back in index
             // order, so the contacts and their callbacks come in the same order as from the full loop.
@@ -954,20 +1036,34 @@ namespace Cuphead360.Engine
                         Log.Line($"TRACE contact frame {Clock.FrameCount} {(touch ? "touch" : "boxes meet, shapes don't")}: {Describe(a)} / {Describe(b)}");
                     if (!touch) continue;
                     var key = Key(a, b);
-                    now[key] = new Contact { A = key.Item1, B = key.Item2, Trigger = trigger };
+                    // A pair still touching keeps its contact (a stay: the same kind as before).
+                    if (!contacts.TryGetValue(key, out var ct) || ct.Trigger != trigger) ct = new Contact { A = key.Item1, B = key.Item2, Trigger = trigger };
+                    now[key] = ct;
                 }
             }
             var old = contacts;
             contacts = now;
             // Callbacks may disable or destroy colliders (which edits the contact set): walk snapshots.
-            foreach (var kv in new List<KeyValuePair<(NCollider2D, NCollider2D), Contact>>(now))
+            var snap = simulating++ == 0 ? sendList : new List<KeyValuePair<(NCollider2D, NCollider2D), Contact>>();
+            try
             {
-                if (!contacts.ContainsKey(kv.Key)) continue;
-                bool stay = old.TryGetValue(kv.Key, out var prev) && prev.Trigger == kv.Value.Trigger;
-                Send(kv.Value, stay ? 1 : 0);
+                snap.Clear();
+                foreach (var kv in now) snap.Add(kv);
+                for (int i = 0; i < snap.Count; i++)
+                {
+                    var kv = snap[i];
+                    if (!contacts.ContainsKey(kv.Key)) continue;
+                    bool stay = old.TryGetValue(kv.Key, out var prev) && prev.Trigger == kv.Value.Trigger;
+                    Send(kv.Value, stay ? 1 : 0);
+                }
+                snap.Clear();
+                // Nothing edits the last step's set: the callbacks' collider changes edit this one's.
+                foreach (var kv in old)
+                    if (!now.ContainsKey(kv.Key) && Alive(kv.Value.A) && Alive(kv.Value.B)) Send(kv.Value, 2);
             }
-            foreach (var kv in old)
-                if (!now.ContainsKey(kv.Key) && Alive(kv.Value.A) && Alive(kv.Value.B)) Send(kv.Value, 2);
+            finally { simulating--; }
+            // Kept for the next step; a nested step's last set is the outer one's current set.
+            if (simulating == 0) { old.Clear(); spareContacts = old; }
         }
 
         static NRigidbody2D[] bodiesBuf = new NRigidbody2D[64];
@@ -992,11 +1088,12 @@ namespace Cuphead360.Engine
         {
             List<NCollider2D> all = null;
             NRigidbody2D[] bodyOf = null;
+            var mine = resolveMine;
             foreach (var b in bodies)
             {
                 if (b.BodyType != RigidbodyType2D.Dynamic || !b.Simulated || !b.Enabled || b.GameObject == null || !b.GameObject.ActiveInHierarchy) continue;
-                if (all == null) { all = Colliders(); bodyOf = BodiesOf(all); }
-                var mine = new List<NCollider2D>();
+                if (all == null) { all = LiveColliders(stepColliders); bodyOf = BodiesOf(all); }
+                mine.Clear();
                 for (int k = 0; k < all.Count; k++) if (!all[k].IsTrigger && bodyOf[k] == b) mine.Add(all[k]);
                 if (mine.Count == 0) continue;
                 var t = b.GameObject.Transform;
@@ -1016,7 +1113,7 @@ namespace Cuphead360.Engine
                             foreach (var sa in c.World)
                                 foreach (var sb in o.World)
                                 {
-                                    var sep = Geometry.Separation(Moved(sa, push), sb);
+                                    var sep = Geometry.Separation(push == Vector2.zero ? sa : MovedInto(resolveMoved, resolveByCount, sa, push), sb);
                                     if (sep.sqrMagnitude > 1e-12f) push += sep;
                                 }
                         }
@@ -1029,7 +1126,9 @@ namespace Cuphead360.Engine
                     if (into < 0) b.Velocity -= n * into;
                 }
             }
+            mine.Clear();
         }
+        static readonly List<NCollider2D> resolveMine = new List<NCollider2D>();
 
         static void SetWorld(NTransform t, Vector2 p)
         {
@@ -1081,13 +1180,32 @@ namespace Cuphead360.Engine
                 col.m_Enabled = 1;
                 arg = col;
             }
-            var targets = new List<NGameObject> { self.GameObject };
+            var first = self.GameObject;
             var rb = self.Rigidbody;
-            if (rb != null && rb.GameObject != self.GameObject) targets.Add(rb.GameObject);
-            foreach (var go in targets)
-                foreach (var comp in go.Components.ToArray())
+            var second = rb != null && rb.GameObject != first ? rb.GameObject : null;
+            DeliverTo(first, trigger, phase, arg);
+            if (second != null) DeliverTo(second, trigger, phase, arg);
+        }
+
+        // Each nesting level's copy of a GameObject's components (a callback can add or remove
+        // components, and the exit callbacks of the colliders it destroys deliver in turn): a list and
+        // an array per delivery were the largest allocation site of the run-and-gun levels.
+        static NComponent[][] deliverSnaps = new NComponent[8][];
+        static int deliverDepth;
+
+        static void DeliverTo(NGameObject go, bool trigger, int phase, object arg)
+        {
+            var comps = go.Components;
+            int n = comps.Count, depth = deliverDepth++;
+            NComponent[] snap;
+            if (depth < deliverSnaps.Length) { snap = deliverSnaps[depth]; if (snap == null || snap.Length < n) deliverSnaps[depth] = snap = new NComponent[Math.Max(n, 16)]; }
+            else snap = new NComponent[n];
+            comps.CopyTo(snap);
+            try
+            {
+                for (int i = 0; i < n; i++)
                 {
-                    if (!(comp is NBehaviour b) || b.Destroyed) continue;
+                    if (!(snap[i] is NBehaviour b) || b.Destroyed) continue;
                     var ms = b.Messages;
                     var m = trigger
                         ? (phase == 0 ? ms.OnTriggerEnter2D : phase == 1 ? ms.OnTriggerStay2D : ms.OnTriggerExit2D)
@@ -1096,6 +1214,12 @@ namespace Cuphead360.Engine
                     var r = Behaviours.Send(b, m, arg);
                     if (r is System.Collections.IEnumerator e) Coroutines.Start(b, e);
                 }
+            }
+            finally
+            {
+                Array.Clear(snap, 0, n);   // holds nothing past the delivery
+                deliverDepth--;
+            }
         }
 
         public static bool Touching(NCollider2D a, NCollider2D b) => contacts.ContainsKey(Key(a, b));
@@ -1127,38 +1251,47 @@ namespace Cuphead360.Engine
             return n;
         }
         static RaycastHit2D First(List<RaycastHit2D> h) => h.Count > 0 ? h[0] : default;
+        // The *All queries' new arrays (an empty one shared: nothing can be written to it).
+        static RaycastHit2D[] Hits(this List<RaycastHit2D> h) => h.Count == 0 ? Array.Empty<RaycastHit2D>() : h.ToArray();
+        static Collider2D[] Colliders(this List<NCollider2D> l)
+        {
+            if (l.Count == 0) return Array.Empty<Collider2D>();
+            var r = new Collider2D[l.Count];
+            for (int i = 0; i < r.Length; i++) r[i] = (Collider2D)l[i].Managed;
+            return r;
+        }
 
         // Raycast / linecast
         public static void UnityEngine_Physics2D__INTERNAL_CALL_Internal_Raycast(ref Vector2 origin, ref Vector2 direction, float distance, ref ContactFilter2D contactFilter, out RaycastHit2D raycastHit)
             => raycastHit = First(Physics.Cast(origin, Physics.PointShape, direction, distance, contactFilter));
         public static RaycastHit2D[] UnityEngine_Physics2D__INTERNAL_CALL_Internal_RaycastAll(ref Vector2 origin, ref Vector2 direction, float distance, ref ContactFilter2D contactFilter)
-            => Physics.Cast(origin, Physics.PointShape, direction, distance, contactFilter).ToArray();
+            => Physics.Cast(origin, Physics.PointShape, direction, distance, contactFilter).Hits();
         public static int UnityEngine_Physics2D__INTERNAL_CALL_Internal_RaycastNonAlloc(ref Vector2 origin, ref Vector2 direction, float distance, ref ContactFilter2D contactFilter, RaycastHit2D[] results)
             => Fill(Physics.Cast(origin, Physics.PointShape, direction, distance, contactFilter), results);
         public static void UnityEngine_Physics2D__INTERNAL_CALL_Internal_Linecast(ref Vector2 start, ref Vector2 end, ref ContactFilter2D contactFilter, out RaycastHit2D raycastHit)
             => raycastHit = First(Physics.Cast(start, Physics.PointShape, end - start, (end - start).magnitude, contactFilter));
         public static RaycastHit2D[] UnityEngine_Physics2D__INTERNAL_CALL_Internal_LinecastAll(ref Vector2 start, ref Vector2 end, ref ContactFilter2D contactFilter)
-            => Physics.Cast(start, Physics.PointShape, end - start, (end - start).magnitude, contactFilter).ToArray();
+            => Physics.Cast(start, Physics.PointShape, end - start, (end - start).magnitude, contactFilter).Hits();
         public static int UnityEngine_Physics2D__INTERNAL_CALL_Internal_LinecastNonAlloc(ref Vector2 start, ref Vector2 end, ref ContactFilter2D contactFilter, RaycastHit2D[] results)
             => Fill(Physics.Cast(start, Physics.PointShape, end - start, (end - start).magnitude, contactFilter), results);
 
         // Circle / box / capsule casts
         public static void UnityEngine_Physics2D__INTERNAL_CALL_Internal_CircleCast(ref Vector2 origin, float radius, ref Vector2 direction, float distance, ref ContactFilter2D contactFilter, out RaycastHit2D raycastHit)
-            => raycastHit = First(Physics.Cast(origin, Shape.Circle(Vector2.zero, radius), direction, distance, contactFilter));
+            => raycastHit = First(Physics.Cast(origin, Physics.CircleShape(Vector2.zero, radius), direction, distance, contactFilter));
         public static RaycastHit2D[] UnityEngine_Physics2D__INTERNAL_CALL_Internal_CircleCastAll(ref Vector2 origin, float radius, ref Vector2 direction, float distance, ref ContactFilter2D contactFilter)
-            => Physics.Cast(origin, Shape.Circle(Vector2.zero, radius), direction, distance, contactFilter).ToArray();
+            => Physics.Cast(origin, Physics.CircleShape(Vector2.zero, radius), direction, distance, contactFilter).Hits();
         public static int UnityEngine_Physics2D__INTERNAL_CALL_Internal_CircleCastNonAlloc(ref Vector2 origin, float radius, ref Vector2 direction, float distance, ref ContactFilter2D contactFilter, RaycastHit2D[] results)
-            => Fill(Physics.Cast(origin, Shape.Circle(Vector2.zero, radius), direction, distance, contactFilter), results);
+            => Fill(Physics.Cast(origin, Physics.CircleShape(Vector2.zero, radius), direction, distance, contactFilter), results);
         public static void UnityEngine_Physics2D__INTERNAL_CALL_Internal_BoxCast(ref Vector2 origin, ref Vector2 size, float angle, ref Vector2 direction, float distance, ref ContactFilter2D contactFilter, out RaycastHit2D raycastHit)
             => raycastHit = First(Physics.Cast(origin, Physics.BoxShape(size, angle), direction, distance, contactFilter));
         public static RaycastHit2D[] UnityEngine_Physics2D__INTERNAL_CALL_Internal_BoxCastAll(ref Vector2 origin, ref Vector2 size, float angle, ref Vector2 direction, float distance, ref ContactFilter2D contactFilter)
-            => Physics.Cast(origin, Physics.BoxShape(size, angle), direction, distance, contactFilter).ToArray();
+            => Physics.Cast(origin, Physics.BoxShape(size, angle), direction, distance, contactFilter).Hits();
         public static int UnityEngine_Physics2D__INTERNAL_CALL_Internal_BoxCastNonAlloc(ref Vector2 origin, ref Vector2 size, float angle, ref Vector2 direction, float distance, ref ContactFilter2D contactFilter, RaycastHit2D[] results)
             => Fill(Physics.Cast(origin, Physics.BoxShape(size, angle), direction, distance, contactFilter), results);
         public static void UnityEngine_Physics2D__INTERNAL_CALL_Internal_CapsuleCast(ref Vector2 origin, ref Vector2 size, CapsuleDirection2D capsuleDirection, float angle, ref Vector2 direction, float distance, ref ContactFilter2D contactFilter, out RaycastHit2D raycastHit)
             => raycastHit = First(Physics.Cast(origin, Physics.CapsuleShape(size, capsuleDirection, angle), direction, distance, contactFilter));
         public static RaycastHit2D[] UnityEngine_Physics2D__INTERNAL_CALL_Internal_CapsuleCastAll(ref Vector2 origin, ref Vector2 size, CapsuleDirection2D capsuleDirection, float angle, ref Vector2 direction, float distance, ref ContactFilter2D contactFilter)
-            => Physics.Cast(origin, Physics.CapsuleShape(size, capsuleDirection, angle), direction, distance, contactFilter).ToArray();
+            => Physics.Cast(origin, Physics.CapsuleShape(size, capsuleDirection, angle), direction, distance, contactFilter).Hits();
         public static int UnityEngine_Physics2D__INTERNAL_CALL_Internal_CapsuleCastNonAlloc(ref Vector2 origin, ref Vector2 size, CapsuleDirection2D capsuleDirection, float angle, ref Vector2 direction, float distance, ref ContactFilter2D contactFilter, RaycastHit2D[] results)
             => Fill(Physics.Cast(origin, Physics.CapsuleShape(size, capsuleDirection, angle), direction, distance, contactFilter), results);
         public static void UnityEngine_Physics2D__INTERNAL_CALL_Internal_GetRayIntersection(ref Ray ray, float distance, int layerMask, out RaycastHit2D raycastHit)
@@ -1169,28 +1302,28 @@ namespace Cuphead360.Engine
 
         // Overlaps
         public static Collider2D UnityEngine_Physics2D__INTERNAL_CALL_Internal_OverlapPoint(ref Vector2 point, ref ContactFilter2D contactFilter)
-        { var l = Physics.OverlapShape(Shape.Circle(point, 0), contactFilter); return l.Count > 0 ? (Collider2D)l[0].Managed : null; }
+        { var l = Physics.OverlapShape(Physics.CircleShape(point, 0), contactFilter); return l.Count > 0 ? (Collider2D)l[0].Managed : null; }
         public static Collider2D[] UnityEngine_Physics2D__INTERNAL_CALL_Internal_OverlapPointAll(ref Vector2 point, ref ContactFilter2D contactFilter)
-            => Physics.OverlapShape(Shape.Circle(point, 0), contactFilter).ConvertAll(c => (Collider2D)c.Managed).ToArray();
+            => Physics.OverlapShape(Physics.CircleShape(point, 0), contactFilter).Colliders();
         public static int UnityEngine_Physics2D__INTERNAL_CALL_Internal_OverlapPointNonAlloc(ref Vector2 point, ref ContactFilter2D contactFilter, Collider2D[] results)
-            => Fill(Physics.OverlapShape(Shape.Circle(point, 0), contactFilter), results);
+            => Fill(Physics.OverlapShape(Physics.CircleShape(point, 0), contactFilter), results);
         public static Collider2D UnityEngine_Physics2D__INTERNAL_CALL_Internal_OverlapCircle(ref Vector2 point, float radius, ref ContactFilter2D contactFilter)
-        { var l = Physics.OverlapShape(Shape.Circle(point, radius), contactFilter); return l.Count > 0 ? (Collider2D)l[0].Managed : null; }
+        { var l = Physics.OverlapShape(Physics.CircleShape(point, radius), contactFilter); return l.Count > 0 ? (Collider2D)l[0].Managed : null; }
         public static Collider2D[] UnityEngine_Physics2D__INTERNAL_CALL_Internal_OverlapCircleAll(ref Vector2 point, float radius, ref ContactFilter2D contactFilter)
-            => Physics.OverlapShape(Shape.Circle(point, radius), contactFilter).ConvertAll(c => (Collider2D)c.Managed).ToArray();
+            => Physics.OverlapShape(Physics.CircleShape(point, radius), contactFilter).Colliders();
         public static int UnityEngine_Physics2D__INTERNAL_CALL_Internal_OverlapCircleNonAlloc(ref Vector2 point, float radius, ref ContactFilter2D contactFilter, Collider2D[] results)
-            => Fill(Physics.OverlapShape(Shape.Circle(point, radius), contactFilter), results);
+            => Fill(Physics.OverlapShape(Physics.CircleShape(point, radius), contactFilter), results);
         public static Collider2D UnityEngine_Physics2D__INTERNAL_CALL_Internal_OverlapBox(ref Vector2 point, ref Vector2 size, float angle, ref ContactFilter2D contactFilter)
         { var l = Physics.OverlapShape(Physics.Moved(Physics.BoxShape(size, angle), point), contactFilter); return l.Count > 0 ? (Collider2D)l[0].Managed : null; }
         public static Collider2D[] UnityEngine_Physics2D__INTERNAL_CALL_Internal_OverlapBoxAll(ref Vector2 point, ref Vector2 size, float angle, ref ContactFilter2D contactFilter)
-            => Physics.OverlapShape(Physics.Moved(Physics.BoxShape(size, angle), point), contactFilter).ConvertAll(c => (Collider2D)c.Managed).ToArray();
+            => Physics.OverlapShape(Physics.Moved(Physics.BoxShape(size, angle), point), contactFilter).Colliders();
         public static int UnityEngine_Physics2D__INTERNAL_CALL_Internal_OverlapBoxNonAlloc(ref Vector2 point, ref Vector2 size, float angle, ref ContactFilter2D contactFilter, Collider2D[] results)
             => Fill(Physics.OverlapShape(Physics.Moved(Physics.BoxShape(size, angle), point), contactFilter), results);
         static Shape Area(Vector2 a, Vector2 b) => Shape.Poly(new[] { new Vector2(Math.Min(a.x, b.x), Math.Min(a.y, b.y)), new Vector2(Math.Max(a.x, b.x), Math.Min(a.y, b.y)), new Vector2(Math.Max(a.x, b.x), Math.Max(a.y, b.y)), new Vector2(Math.Min(a.x, b.x), Math.Max(a.y, b.y)) }, 0);
         public static Collider2D UnityEngine_Physics2D__INTERNAL_CALL_Internal_OverlapArea(ref Vector2 pointA, ref Vector2 pointB, ref ContactFilter2D contactFilter)
         { var l = Physics.OverlapShape(Area(pointA, pointB), contactFilter); return l.Count > 0 ? (Collider2D)l[0].Managed : null; }
         public static Collider2D[] UnityEngine_Physics2D__INTERNAL_CALL_Internal_OverlapAreaAll(ref Vector2 pointA, ref Vector2 pointB, ref ContactFilter2D contactFilter)
-            => Physics.OverlapShape(Area(pointA, pointB), contactFilter).ConvertAll(c => (Collider2D)c.Managed).ToArray();
+            => Physics.OverlapShape(Area(pointA, pointB), contactFilter).Colliders();
         public static int UnityEngine_Physics2D__INTERNAL_CALL_Internal_OverlapAreaNonAlloc(ref Vector2 pointA, ref Vector2 pointB, ref ContactFilter2D contactFilter, Collider2D[] results)
             => Fill(Physics.OverlapShape(Area(pointA, pointB), contactFilter), results);
         public static Collider2D UnityEngine_Physics2D__INTERNAL_CALL_Internal_OverlapCapsule(ref Vector2 point, ref Vector2 size, CapsuleDirection2D direction, float angle, ref ContactFilter2D contactFilter)
