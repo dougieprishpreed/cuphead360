@@ -202,14 +202,14 @@ const unsigned MEMORY_FLOOR_MB = 24;
 const unsigned AHEAD_AGE = 180;
 const size_t PAGE_MAX = 4u << 20;
 // Pages' stored bytes (LZ4, a fifth to a quarter of their size) kept in memory: a page evicted and drawn
-// again, or read ahead, decodes without the drive (USB reads ran at 9 MB/s: 50-80 ms a page, decoding from
-// memory ~24 ms a 4 MB page). More than half the twenty-sixth run's page loads were pages read before (the
-// Frogs 217 of 401, Forest Follies 245 of 452). The copies kept first are of pages let go (release_stored):
-// those are the ones read again. Each was a malloc of its own once, and newlib's heap never gives back what
-// it grew to (the twenty-second and twenty-third runs: ~35 MB more of the console's memory not counted
-// anywhere, textures squeezed to 41 MB and refused); now they come from 2 MB slabs (big_alloc's kernel
-// pages), each given back whole when its last copy goes (stored_alloc).
-const size_t STORED_BUDGET = 16u << 20;
+// again, or read ahead, decodes without the drive (USB reads ran at 9 MB/s: 50-80 ms a page, from memory
+// ~24 ms a 4 MB page). Off. Each a malloc of its own, newlib's heap never gave back what it grew to (the
+// twenty-second and twenty-third runs: ~35 MB more of the console's memory not counted anywhere, textures
+// squeezed to 41 MB and refused). From 2 MB slabs given back whole when empty (the twenty-seventh run),
+// the copies kept longest (of pages let go) pinned nearly every slab: 15 MB of copies held 60 MB of slabs,
+// the textures fell to 54-69 MB (the map after Hilda Berg at 37 fps, pages refused and drawn without: the
+// smoke puffs flickered, the Frogs' bouncing balls went missing). Back only with copies that can move.
+const size_t STORED_BUDGET = 0;
 // The loader's buffers (a job's decoded texture until it's copied to staging) come from one block made at
 // start, not malloc: a malloc of up to 4 MB a texture load left newlib's heap at its highest.
 const size_t LOAD_ARENA = 12u << 20;
@@ -287,52 +287,6 @@ const VkFormat DEPTH_FORMAT = VK_FORMAT_D24_UNORM_S8_UINT;
 // malloc isn't known to be thread safe here): the game thread makes each job and its buffer, sized from the
 // pack's table, and the jobs pass through fixed rings; it has its own pack reader (ch360_pack_reader_new);
 // it reads only the texture pack, whose file nothing else reads after start-up.
-// Stored copies' memory: 2 MB slabs (malloc of 1 MB and up is big_alloc's: the kernel's pages, given back
-// whole), a copy taken from the newest slab's end; a slab goes back when its last copy is freed. A copy over
-// 1 MB has a block of its own. The game's thread only.
-const size_t STORED_SLAB = 2u << 20;
-struct StoredSlab {
-    unsigned char* base;
-    size_t used;
-    unsigned live;
-};
-std::vector<StoredSlab> g_stored_slabs;   // the last takes new copies
-size_t g_stored_slab_bytes = 0;
-
-unsigned char* stored_alloc(size_t n) {
-    if (n > STORED_SLAB / 2) return (unsigned char*)malloc(n);
-    n = (n + 15) & ~(size_t)15;
-    if (g_stored_slabs.empty() || g_stored_slabs.back().used + n > STORED_SLAB) {
-        StoredSlab sl;
-        sl.base = (unsigned char*)malloc(STORED_SLAB);
-        if (!sl.base) return NULL;
-        sl.used = 0;
-        sl.live = 0;
-        g_stored_slabs.push_back(sl);
-        g_stored_slab_bytes += STORED_SLAB;
-    }
-    StoredSlab& sl = g_stored_slabs.back();
-    unsigned char* p = sl.base + sl.used;
-    sl.used += n;
-    ++sl.live;
-    return p;
-}
-
-void stored_free(unsigned char* p) {
-    if (!p) return;
-    for (size_t i = 0; i < g_stored_slabs.size(); ++i) {
-        StoredSlab& sl = g_stored_slabs[i];
-        if (p < sl.base || p >= sl.base + STORED_SLAB) continue;
-        if (--sl.live == 0) {
-            free(sl.base);
-            g_stored_slab_bytes -= STORED_SLAB;
-            g_stored_slabs.erase(g_stored_slabs.begin() + (long)i);
-        }
-        return;
-    }
-    free(p);   // a copy with a block of its own
-}
-
 struct LoadJob {
     int id;
     std::string key;
@@ -549,6 +503,7 @@ private:
     size_t stored_bytes_;           // the textures' kept stored bytes
     std::vector<LoadJob*> taken_;   // done jobs past this frame's upload budget
     std::vector<int> waiting_;      // textures this frame's items draw that the loader still has
+    unsigned last_waited_;          // how many there were, the last frame
     unsigned load_jobs_;            // jobs made and not yet taken back
     size_t load_bytes_, pre_bytes_; // their buffers', the prefetches' of them
     double wait_ms_;
@@ -556,6 +511,8 @@ public:
     void start_loader();
     void prefetch(int id, bool wanted);
     int pending() const { return (int)(load_jobs_ + pre_backlog_.size()); }
+    // Textures the last frame drew and waited for (the level hold ends when a frame waits for none).
+    int waited() const { return (int)last_waited_; }
 private:
     void evict();
     size_t release_unused(size_t want);
@@ -1748,7 +1705,7 @@ void Renderer::take_loads(bool all) {
                 t->stored_n = j->e.stored;
                 t->stored_used = frame_no_;
             } else {
-                stored_free(j->stored);
+                free(j->stored);
                 stored_bytes_ -= j->e.stored;
             }
         }
@@ -1783,7 +1740,7 @@ void Renderer::take_loads(bool all) {
                     record_copy(*t, buf, off);
                     t->unused_pre = j->pre;
                     g_texture_bytes = texture_bytes_;
-                    if (loads_logged_ < 1500) {
+                    if (loads_logged_ < 1500 && !ch360_quiet) {
                         ++loads_logged_;
                         unsigned free_mb, total_mb;
                         memory_mb(&free_mb, &total_mb);
@@ -1812,6 +1769,7 @@ void Renderer::take_loads(bool all) {
 // The frame's textures still with the loader: the frame waits for them (the loader reads them meanwhile,
 // several in a row); those the in-flight cap kept back are queued as room comes.
 void Renderer::finish_waits() {
+    last_waited_ = (unsigned)waiting_.size();
     if (waiting_.empty()) return;
     double t0 = now_ms();
     for (;;) {
@@ -1907,17 +1865,11 @@ void Renderer::feed_prefetch() {
     }
 }
 
-// Kept stored bytes go (none a job is reading) until want bytes are freed: first the copies of textures in
-// memory, then of guesses never drawn, then of pages let go (the ones drawn again), each least recently used
-// first (a page let go counts as used then).
+// Kept stored bytes go, least recently used first (none a job is reading), until want bytes are freed.
 size_t Renderer::release_stored(size_t want) {
-    std::vector<std::pair<unsigned long long, size_t> > order;
-    for (size_t i = 0; i < textures_.size(); ++i) {
-        const Tex& t = textures_[i];
-        if (!t.stored || t.loading) continue;
-        unsigned long long kind = t.image ? 0 : t.evicted ? 2 : 1;
-        order.push_back(std::make_pair((kind << 32) | t.stored_used, i));
-    }
+    std::vector<std::pair<unsigned, size_t> > order;
+    for (size_t i = 0; i < textures_.size(); ++i)
+        if (textures_[i].stored && !textures_[i].loading) order.push_back(std::make_pair(textures_[i].stored_used, i));
     std::sort(order.begin(), order.end());
     size_t freed = 0;
     for (size_t k = 0; k < order.size() && freed < want; ++k) {
@@ -1929,7 +1881,7 @@ size_t Renderer::release_stored(size_t want) {
 
 void Renderer::forget_stored(Tex& t) {
     if (!t.stored) return;
-    stored_free(t.stored);
+    free(t.stored);
     stored_bytes_ -= t.stored_n;
     t.stored = NULL;
     t.stored_n = 0;
@@ -1975,14 +1927,14 @@ bool Renderer::queue_load(int id, Tex& t, bool pre, bool stored_only) {
     bool fresh = false;
     if (!stored && pe.stored <= PAGE_MAX + (1u << 20)) {
         if (stored_bytes_ + pe.stored > STORED_BUDGET) release_stored(stored_bytes_ + pe.stored - STORED_BUDGET);
-        if (stored_bytes_ + pe.stored <= STORED_BUDGET && (stored = stored_alloc(pe.stored)) != NULL) fresh = true;
+        if (stored_bytes_ + pe.stored <= STORED_BUDGET && (stored = (unsigned char*)malloc(pe.stored)) != NULL) fresh = true;
     }
     if (stored_only && !stored) return false;
     if (t.stored) t.stored_used = frame_no_;
     unsigned char* data = NULL;
     if (!stored_only && (data = arena_take(n ? n : 1)) == NULL) data = (unsigned char*)malloc(n ? n : 1);
     if (!stored_only && !data) {
-        if (fresh) stored_free(stored);
+        if (fresh) free(stored);
         t.retry_at = frame_no_ + 120;
         return false;
     }
@@ -2099,7 +2051,6 @@ size_t Renderer::release_unused(size_t want) {
         freed += t.bytes;
         destroy(t, true);
         t.evicted = true;
-        if (t.stored) t.stored_used = frame_no_;
         ++evictions;
     }
     return freed;
@@ -2122,7 +2073,6 @@ size_t Renderer::release_aged(size_t want, unsigned age) {
         freed += t.bytes;
         destroy(t, true);
         t.evicted = true;
-        if (t.stored) t.stored_used = frame_no_;
         ++evictions;
     }
     return freed;
@@ -2137,7 +2087,6 @@ void Renderer::evict() {
             if (t.image && !t.key.empty() && !t.pinned && frame_no_ - t.last_used > age) {
                 destroy(t, false);
                 t.evicted = true;
-                if (t.stored) t.stored_used = frame_no_;
                 ++evictions;
             }
         }
@@ -2606,7 +2555,7 @@ void Renderer::frame(const ch360_frame* f) {
     if (t6 - t0 > 12.0) {
         stats_.slow += 1;
         ++host_slow_;
-        if (host_slow_logged_ < 6) {
+        if (host_slow_logged_ < 6 && !ch360_quiet) {
             ++host_slow_logged_;
             logf("HOST SLOW frame %u: %.1f ms: boxes+loads %.1f (%u textures), fence %.1f, uploads %.1f, acquire %.1f, record %.1f, "
                  "submit %.1f, present %.1f; %u draws, %u passes, %u items", frame_no_, t6 - t0, t1 - t0, uploads - uploads0, t2 - t1,
@@ -2975,10 +2924,10 @@ extern "C" int ch360_plat_frame_begin(void) {
         struct mallinfo mi = mallinfo();   // newlib's heap: grown to (arena), in use
         // Times in tenths of a millisecond (integers only in the log).
         logf("frame %u: %u ms/frame x10 (worst %u, %u over 17.5); gpu wait %u, present %u; memory %u MB free of %u, player %u MB, "
-             "textures %u MB (%u uploads, %u evicted), stored %u MB in %u MB of slabs; host heap %u MB (%u in use); items left out for the vertex ring %u; audio underruns %u",
+             "textures %u MB (%u uploads, %u evicted), stored %u MB; host heap %u MB (%u in use); items left out for the vertex ring %u; audio underruns %u",
              g_frames, (unsigned)(g_logic_ms / 60), (unsigned)(g_worst_ms * 10), g_slow, (unsigned)(g_renderer->gpu_wait_ms / 60),
              (unsigned)(g_renderer->present_ms / 60), f, tot, ch360_memory_kb() / 1024, (unsigned)(g_renderer->texture_bytes() >> 20),
-             g_renderer->uploads, g_renderer->evictions, (unsigned)(g_renderer->stored_bytes() >> 20), (unsigned)(g_stored_slab_bytes >> 20), (unsigned)(mi.arena >> 20),
+             g_renderer->uploads, g_renderer->evictions, (unsigned)(g_renderer->stored_bytes() >> 20), (unsigned)(mi.arena >> 20),
              (unsigned)(mi.uordblks >> 20), g_renderer->ring_drops, g_audio_underruns);
         unsigned am[7];
         ch360_audio_memory(am);
@@ -3045,6 +2994,10 @@ extern "C" void ch360_plat_draw(const ch360_frame* f) {
 extern "C" void ch360_plat_texture_file(int id, const char* key) {
     GpuLock lock;
     g_renderer->texture_file(id, key);
+}
+extern "C" int ch360_plat_textures_waited(void) {
+    GpuLock lock;
+    return g_renderer ? g_renderer->waited() : 0;
 }
 extern "C" int ch360_plat_textures_pending(void) {
     GpuLock lock;
@@ -3185,6 +3138,14 @@ int main() {
     FILE* fresh = fopen("game:/cuphead360.txt", "wb");
     if (fresh) fclose(fresh);
     logf("Cuphead360 (xSDK) %s", CH360_GIT_COMMIT);
+    {
+        FILE* q = fopen("game:/quiet.txt", "rb");
+        if (q) {
+            fclose(q);
+            ch360_quiet = 1;
+            logf("quiet run (quiet.txt): profiling off, texture and slow-part lines off");
+        }
+    }
     unsigned f, t;
     memory_mb(&f, &t);
     logf("memory at start: %u MB free of %u MB", f, t);

@@ -48,6 +48,8 @@ namespace Cuphead360.Player
         static extern void TextureAhead(int id, float u0, float v0, float u1, float v1);
         [DllImport("ch360", EntryPoint = "textures_pending"), WasmImportLinkage]
         static extern int TexturesPending();
+        [DllImport("ch360", EntryPoint = "textures_waited"), WasmImportLinkage]
+        static extern int TexturesWaited();
         [DllImport("ch360", EntryPoint = "loading_screen"), WasmImportLinkage]
         static extern void LoadingScreenFlag(uint state);
         [DllImport("ch360", EntryPoint = "audio_queued"), WasmImportLinkage]
@@ -688,13 +690,14 @@ namespace Cuphead360.Player
 
         /// <summary>
         /// A level's start, as the boot's: the game held (its clock all but stopped, behind the load's black)
-        /// until the pages its first frames draw are in: what its renderers and images show and the clips its
-        /// animators play (RenderList.ReadAheadFirst). They came in its first frames, under the fade in: the
-        /// twenty-sixth run's Frogs started with frames of 234, 308 and 196 ms. At most 3 s, or 1.5 s without
-        /// a page read (memory may hold the rest back); CH360_LEVEL_HOLD=0: none.
+        /// until its frames draw without waiting for a page (three in a row), the clips its animators play now
+        /// asked for ahead (RenderList.ReadAheadFirst). They came in its first frames, under the fade in: the
+        /// twenty-sixth run's Frogs started with frames of 234, 308 and 196 ms. Not until every page asked for
+        /// is in, as the boot's: the read-ahead's backlog (300-odd pages) ran it to its limit in the
+        /// twenty-seventh run. At most 3 s; CH360_LEVEL_HOLD=0: none.
         /// </summary>
-        static int levelLoads = -1, levelFrames, levelSprites, levelPending, levelUnbound;
-        static long levelFrom, levelProgressAt;
+        static int levelLoads = -1, levelFrames, levelSprites, levelUnbound, levelClear;
+        static long levelFrom;
         static bool levelHolding, levelSettled;
         static readonly bool levelHoldOff = Environment.GetEnvironmentVariable("CH360_LEVEL_HOLD") == "0";
         // CH360_HOLD_SCRIPTED=1: the holds in scripted runs too (PC checks of them; scripted runs skip them otherwise)
@@ -712,9 +715,8 @@ namespace Cuphead360.Player
                 levelLoads = loads;
                 if (!name.StartsWith("scene_level_")) return false;
                 levelHolding = true;
-                levelFrom = levelProgressAt = now;
-                levelFrames = levelSprites = 0;
-                levelPending = int.MaxValue;
+                levelFrom = now;
+                levelFrames = levelSprites = levelClear = 0;
                 levelUnbound = -1;
                 levelSettled = false;
             }
@@ -726,14 +728,14 @@ namespace Cuphead360.Player
                 levelSettled = unbound == 0 || unbound == levelUnbound;
                 levelUnbound = unbound;
             }
-            int pending = TexturesPending(), atlases = Atlases.Outstanding;
-            if (pending < levelPending) { levelPending = pending; levelProgressAt = now; }
-            bool done = levelFrames > 2 && levelSettled && atlases == 0 && pending == 0;
-            if (done || now - levelFrom > 3 * hz || (now - levelProgressAt) * 2 > 3 * hz)
+            int waited = TexturesWaited(), atlases = Atlases.Outstanding;
+            levelClear = waited == 0 ? levelClear + 1 : 0;
+            bool done = levelFrames > 2 && levelSettled && atlases == 0 && levelClear >= 3;
+            if (done || now - levelFrom > 3 * hz)
             {
                 levelHolding = false;
                 Console.WriteLine($"LEVEL hold {name}: {levelFrames} frames, {(now - levelFrom) * 1000 / hz} ms; {levelSprites} sprites read ahead, "
-                    + $"{levelUnbound} with no atlas; {pending} textures still coming, {atlases} atlases asked for{(done ? "" : " (gave up)")}");
+                    + $"{levelUnbound} with no atlas; the last frame waited for {waited} textures, {TexturesPending()} still coming, {atlases} atlases asked for{(done ? "" : " (gave up)")}");
                 return false;
             }
             return true;

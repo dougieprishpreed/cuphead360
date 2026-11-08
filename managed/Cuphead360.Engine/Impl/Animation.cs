@@ -52,6 +52,8 @@ namespace Cuphead360.Engine
         }
 
         static readonly Dictionary<ChobObject, ClipData> cache = new Dictionary<ChobObject, ClipData>();
+        /// <summary>Whether the clip has been read (ControllerData's warm-up skips those).</summary>
+        internal static bool Cached(ChobObject clip) => cache.ContainsKey(clip);
 
         /// <summary>AssetUnload: only the clips live animators use stay cached (their frames' sprites with them).</summary>
         public static void Retain(HashSet<ClipData> keep)
@@ -277,29 +279,107 @@ namespace Cuphead360.Engine
 
         public static void Built(RuntimeAnimatorController c) => unread.Add(c);
         /// <summary>AssetUnload: the queue holds nothing past a pass (it would keep its controllers loaded).</summary>
-        public static void ForgetBuilt() => unread.Clear();
+        public static void ForgetBuilt()
+        {
+            unread.Clear();
+            warming.Clear();
+            warmClips = null;
+            warmSprites = null;
+            warmStage = warmAt = 0;
+        }
 
         /// <summary>
-        /// Whether a scene's load reads its controllers: the levels', whose first spawns hitched in play. Not
-        /// the maps', menus' and cutscenes': every controller the world map references read up front raised
-        /// its heap 68 -> 96 MB on the PC host (most of them never play there), and the linear memory a
-        /// step (151 -> 167 MB over the Hilda Berg run), which the console's textures would have given up.
+        /// Whether a scene's load reads its controllers: the levels', whose first spawns hitched in play, and
+        /// the title's and the slot select's (the title screen's first update built its dancers' controllers:
+        /// StartScreen.Update 199 ms as the logo ended, the slot select 240 ms, the twenty-seventh run). Not
+        /// the maps' and cutscenes': every controller the world map references read up front raised its heap
+        /// 68 -> 96 MB on the PC host (most of them never play there), and the linear memory a step (151 ->
+        /// 167 MB over the Hilda Berg run), which the console's textures would have given up.
         /// </summary>
-        public static bool WarmScene(string scene) => scene != null && scene.StartsWith("scene_level_");
+        public static bool WarmScene(string scene) =>
+            scene != null && (scene.StartsWith("scene_level_") || scene == "scene_title" || scene == "scene_slot_select");
 
-        /// <summary>Reads the next queued controller (false: none left).</summary>
+        // The warm-up in the files' order: the queued controllers' clips, then their sprites, each built in the
+        // order their bytes lie in their file, then the controllers. Built controller by controller, a level's
+        // load read its objects in no order through the 8 MB cache of 32 KB blocks: the Frogs' read 2,607 blocks
+        // on the console (~83 MB from the drive for 13,000 objects lying in ~1,200 blocks, 38 MB) and took 8 s
+        // more than before the warm-up (the twenty-seventh run: Hilda Berg's 7.3 s, Forest Follies' 11.8 s).
+        static readonly List<RuntimeAnimatorController> warming = new List<RuntimeAnimatorController>();
+        static List<ChobObject> warmClips;
+        static List<(ChobFile from, PPtr p, ChobObject at)> warmSprites;
+        static int warmStage, warmAt;
+
+        static int FileOrder(ChobObject a, ChobObject b)
+        {
+            int f = string.CompareOrdinal(a.File?.Name, b.File?.Name);
+            return f != 0 ? f : a.Offset.CompareTo(b.Offset);
+        }
+
+        /// <summary>Does the next step of the queued controllers' reading (false: none left).</summary>
         public static bool WarmNext()
         {
-            while (unread.Count > 0)
+            switch (warmStage)
             {
-                var c = unread[unread.Count - 1];
-                unread.RemoveAt(unread.Count - 1);
-                if (c == null || !(Objects.Of(c) is NAsset a) || a.Destroyed) continue;
-                Of(c);
-                Warmed++;
-                return true;
+                case 0:
+                    {
+                        if (unread.Count == 0) return false;
+                        warming.Clear();
+                        warming.AddRange(unread);
+                        unread.Clear();
+                        var clips = new HashSet<ChobObject>();
+                        foreach (var c in warming)
+                        {
+                            if (c == null || !(Objects.Of(c) is NAsset a) || a.Destroyed || !(a.Source is ChobObject co) || co.Type != "AnimatorController" || cache.ContainsKey(co)) continue;
+                            foreach (var e in Tree.List(co.Tree, "m_AnimationClips"))
+                                if (e is PPtr p && AssetDb.Lookup(co.File, p) is ChobObject clip && !ClipData.Cached(clip)) clips.Add(clip);
+                        }
+                        warmClips = new List<ChobObject>(clips);
+                        warmClips.Sort(FileOrder);
+                        warmSprites = new List<(ChobFile, PPtr, ChobObject)>();
+                        warmAt = 0;
+                        warmStage = 1;
+                        return true;
+                    }
+                case 1:
+                    if (warmAt < warmClips.Count)
+                    {
+                        // the sprites a clip's curves show (its tree is read again when the clip is built)
+                        var clip = warmClips[warmAt++];
+                        foreach (var e in Tree.List(Tree.Get(clip.Tree, "m_ClipBindingConstant"), "pptrCurveMapping"))
+                            if (e is PPtr p && AssetDb.Lookup(clip.File, p) is ChobObject sp && sp.Type == "Sprite") warmSprites.Add((clip.File, p, sp));
+                        return true;
+                    }
+                    {
+                        var once = new HashSet<ChobObject>();
+                        warmSprites.RemoveAll(x => !once.Add(x.at));
+                        warmSprites.Sort((x, y) => FileOrder(x.at, y.at));
+                    }
+                    warmClips = null;
+                    warmAt = 0;
+                    warmStage = 2;
+                    return true;
+                case 2:
+                    // a few sprites a step (each is short)
+                    for (int k = 0; k < 8 && warmAt < warmSprites.Count; k++, warmAt++) AssetDb.Resolve(warmSprites[warmAt].from, warmSprites[warmAt].p);
+                    if (warmAt < warmSprites.Count) return true;
+                    warmSprites = null;
+                    warmAt = 0;
+                    warmStage = 3;
+                    return true;
+                default:
+                    while (warmAt < warming.Count)
+                    {
+                        var c = warming[warmAt++];
+                        if (c == null || !(Objects.Of(c) is NAsset a) || a.Destroyed) continue;
+                        Of(c);
+                        Warmed++;
+                        return true;
+                    }
+                    warming.Clear();
+                    warmAt = 0;
+                    warmStage = 0;
+                    return unread.Count > 0;
             }
-            return false;
         }
 
         public static ControllerData Of(RuntimeAnimatorController c)

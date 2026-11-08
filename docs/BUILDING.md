@@ -248,6 +248,16 @@ It prints a row per scene: the time between frames, the share of frames at
 pass, and what holds the scene back (the game on the CPU, the GPU, or
 hitches).
 
+To compare runs scene by scene, keep each run's log in its own folder
+(`work\console\<run>\cuphead360.txt`) and run
+`python tools\compare_runs.py <run> <run> ...`.
+
+Measuring costs a little. To play without it, put an empty file named
+`quiet.txt` next to `default.xex`: the game then skips its per-script timing
+and its per-texture and slow-frame lines, and still logs each scene's frame
+times and hitch counts, so a quiet run can be compared with a normal one.
+Delete the file to go back.
+
 ## After an update
 
 After `git pull` in `cuphead360` (and in `spire360`):

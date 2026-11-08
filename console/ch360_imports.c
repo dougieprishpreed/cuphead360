@@ -895,6 +895,12 @@ U32 i5_ch36012_audioX5Fqueued(wasmModuleInstance* inst) {
     return (U32)ch360_plat_audio_queued();
 }
 
+/* The textures the last frame waited for (ConsoleHost's level hold ends at none). */
+U32 i5_ch36015_texturesX5Fwaited(wasmModuleInstance* inst) {
+    (void)inst;
+    return (U32)ch360_plat_textures_waited();
+}
+
 /* The textures still coming (ConsoleHost's boot hold waits for none). */
 U32 i5_ch36016_texturesX5Fpending(wasmModuleInstance* inst) {
     (void)inst;
@@ -943,6 +949,7 @@ static void run_start(void* p) {
 }
 
 int ch360_staged_names = 0;
+int ch360_quiet = 0;
 
 void ch360_staged_name(const char* key, size_t len, char* out) {
     static const char hex[] = "0123456789ABCDEF";
@@ -977,15 +984,16 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
      * 160 MB) or kept segments (GCRetainVM): the nineteenth run's route peaked at
      * 199-200 or 215-216 MB from run to run with either setting and without
      * (scene builds sliced by the clock), so neither is set (2026-11-05). */
-    static const char* const env[6] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCConserveMemory=0",
-                                        "CH360_TREE_BUDGET_MB=4", "DOTNET_GCgen0size=100000", "DOTNET_GCLOHCompact=1" };
+    static const char* const env[7] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCConserveMemory=0",
+                                        "CH360_TREE_BUDGET_MB=4", "DOTNET_GCgen0size=100000", "DOTNET_GCLOHCompact=1",
+                                        "CH360_PROFILE=0" };   /* the last only in a quiet run */
     srt_config cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.root_dir = root_dir;
     ch360_ogg_root(root_dir);
     cfg.argc = argc;
     cfg.argv = argv;
-    cfg.envc = (int)(sizeof(env) / sizeof(env[0]));
+    cfg.envc = (int)(sizeof(env) / sizeof(env[0])) - (ch360_quiet ? 0 : 1);
     cfg.envp = env;
 #ifndef __XSDK__
     {

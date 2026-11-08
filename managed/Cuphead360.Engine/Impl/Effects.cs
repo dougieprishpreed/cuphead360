@@ -320,6 +320,8 @@ namespace Cuphead360.Engine
         }
 
         static readonly Dictionary<Type, FieldInfo> sequenceFields = new Dictionary<Type, FieldInfo>();
+        // Sequences whose shown frames were read ahead (the first time the effect drew them).
+        static readonly HashSet<Texture2D[]> sequencesAhead = new HashSet<Texture2D[]>();
 
         /// <summary>
         /// An effect's overlay from a texture sequence (the film grain: 127 frames at 1024x512, a new one every
@@ -337,6 +339,12 @@ namespace Cuphead360.Engine
                 sequenceFields[type] = field;
             }
             if (field == null || !(field.GetValue(b.Managed) is Texture2D[] seq) || seq.Length < 2) return;
+            // Its frames read ahead the first time it draws (the boot hold's frames, under the black): each came
+            // from the drive as the grain first showed it, 19 of them in the MDHR logo's first 1.5 s (the
+            // twenty-seventh run), the frame waiting ~8 ms for each (a dropped frame).
+            if (RenderList.ReadAhead != null && sequencesAhead.Add(seq))
+                for (int i = 0; i < seq.Length; i += 2)
+                    if (seq[i] != null) RenderList.ReadAhead(seq[i], new Vector4(0, 0, 1, 1));
             for (int v = firstView; v < RenderList.ViewCount; v++)
                 foreach (var it in RenderList.ViewAt(v).Items)
                 {

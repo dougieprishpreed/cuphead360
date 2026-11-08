@@ -125,6 +125,8 @@ void ch360_plat_texture_file(int id, const char* key);
 void ch360_plat_texture_prefetch(int id, int wanted);
 /* Textures being read or waiting to be (the loader's jobs and the read-ahead asked for): the boot's hold. */
 int ch360_plat_textures_pending(void);
+/* Textures the last frame drew that weren't loaded yet (it waited for them): the level hold's end. */
+int ch360_plat_textures_waited(void);
 /* Texture id's pixels (run-time textures: font atlases), BGRA rows. */
 void ch360_plat_texture_pixels(int id, int width, int height, const unsigned char* bgra);
 /* Mixed audio: frames of 48 kHz stereo, interleaved little-endian floats
@@ -163,6 +165,10 @@ void ch360_audio_memory(unsigned out[7]);
  * of long names (FAT32 scans a folder from the start for every open). The
  * console host sets ch360_staged_names; the PC reads the loose files. */
 extern int ch360_staged_names;
+/* A quiet run (the console host sets it when game:\quiet.txt exists): the player's profiling off
+ * (CH360_PROFILE=0: no phase, script or slow-call timing) and the host's per-texture and slow-part lines
+ * off; frame times, hitch counts and the per-scene summaries stay. To see what measuring costs. */
+extern int ch360_quiet;
 /* "XX/YYYYYYYY" and a NUL (12 bytes) for the len bytes of key. */
 void ch360_staged_name(const char* key, size_t len, char* out);
 /* FNV-1a 64 of key as two words. */
