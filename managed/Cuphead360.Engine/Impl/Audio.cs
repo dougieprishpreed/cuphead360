@@ -220,6 +220,27 @@ namespace Cuphead360.Engine
         /// <summary>Stopwatch ticks spent decoding clips (streams and whole short clips).</summary>
         public static long DecodeTicks;
 
+        /// <summary>
+        /// The host reads a short clip ahead (path, the load's number): its first play then finds it in
+        /// memory, not on the drive in the frame (null: no such host).
+        /// </summary>
+        public static Action<string, int> Preload;
+        // Clips whose facts were read since the last load's preload (their assets built).
+        static readonly List<WeakReference<Clip>> fresh = new List<WeakReference<Clip>>();
+        static int preloadBatch;
+
+        /// <summary>A scene load's end (under the loading screen): its short clips to the host to read ahead.</summary>
+        public static void PreloadFresh()
+        {
+            if (Preload == null || fresh.Count == 0) return;
+            preloadBatch++;
+            foreach (var w in fresh)
+                // streamed ones too: one under the host's size for reading off the game's thread opened in the
+                // frame (the title's 59 ms frame as the logo played); the host keeps those under 256 KB
+                if (w.TryGetTarget(out var c) && !c.Missing && c.HostPcm < 0 && PathOf(c) is string p) Preload(p, preloadBatch);
+            fresh.Clear();
+        }
+
         public static Clip ClipOf(AudioClip c)
         {
             if (c == null) return null;
@@ -241,6 +262,7 @@ namespace Cuphead360.Engine
                 ci.Key = k + "_" + IdText.Of(src.PathId);
             }
             clips.AddOrUpdate(c, ci);
+            if (Preload != null && fresh.Count < 4096) fresh.Add(new WeakReference<Clip>(ci));
             return ci;
         }
 

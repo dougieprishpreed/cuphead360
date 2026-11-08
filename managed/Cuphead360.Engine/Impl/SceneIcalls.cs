@@ -108,9 +108,12 @@ namespace Cuphead360.Engine
                             break;
                         case 4:
                             // The animator controllers the build resolved (its prefabs'), read while the
-                            // loading screen is up: their first spawns read them in a frame of play.
-                            while (ControllerData.WarmNext())
+                            // loading screen is up: their first spawns read them in a frame of play. Levels
+                            // only (ControllerData.WarmScene): the map's raised its heap 68 -> 96 MB.
+                            if (!ControllerData.WarmScene(name)) ControllerData.ForgetBuilt();
+                            else while (ControllerData.WarmNext())
                                 if (Over()) return false;
+                            Audio.PreloadFresh();
                             stage = 5;
                             tReady = System.Diagnostics.Stopwatch.GetTimestamp();
                             Progress = 1f;
@@ -230,7 +233,9 @@ namespace Cuphead360.Engine
             scene.Path = path;
             if (!additive) { Scenes.ActiveHandle = scene.Handle; Clock.TimeSinceLevelLoadBase = Clock.Time; }
             var build = SceneBuild.Scene(file, scene.Handle);
-            while (ControllerData.WarmNext()) { }   // as the sliced loads do (SceneLoad's stage 4)
+            if (!ControllerData.WarmScene(name)) ControllerData.ForgetBuilt();
+            else while (ControllerData.WarmNext()) { }   // as the sliced loads do (SceneLoad's stage 4)
+            Audio.PreloadFresh();
             Loads++;
             Log.Line($"SCENE loaded {name} (build {index}): {build.GameObjects.Count} GameObjects, {build.Components.Count} components"
                 + (traceMem ? $"; heap {GC.GetTotalMemory(true) >> 20} MB, files read {ChobFile.LoadedFiles} ({ChobFile.LoadedBytes >> 20} MB), live objects {Objects.LiveCount}" : ""));

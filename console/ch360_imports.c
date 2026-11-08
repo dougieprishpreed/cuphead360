@@ -889,6 +889,12 @@ void i5_ch36016_textureX5Fprefetch(wasmModuleInstance* inst, U32 id) {
     else ch360_plat_texture_prefetch(p, 0);
 }
 
+/* The mixed frames the host's output still has to play (-1: none that plays in real time). */
+U32 i5_ch36012_audioX5Fqueued(wasmModuleInstance* inst) {
+    (void)inst;
+    return (U32)ch360_plat_audio_queued();
+}
+
 /* The textures still coming (ConsoleHost's boot hold waits for none). */
 U32 i5_ch36016_texturesX5Fpending(wasmModuleInstance* inst) {
     (void)inst;

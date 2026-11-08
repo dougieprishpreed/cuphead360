@@ -27,8 +27,14 @@ namespace Cuphead360.Engine
         /// <summary>The converted files loaded so far (the memory census walks them).</summary>
         public static IEnumerable<ChobFile> LoadedFiles => files.Values.Where(f => f != null);
         public static readonly List<string> Problems = new List<string>();
-        /// <summary>CH360_WARM_ANIMATION=1: scene loads read the animator controllers they built (ControllerData.WarmNext). Off: in Forest Follies it built 4,855 more sprites and 354 clips up front (29 MB more heap on PC), and memory is what squeezes the console's textures.</summary>
-        public static readonly bool WarmAnimation = Environment.GetEnvironmentVariable("CH360_WARM_ANIMATION") == "1";
+        /// <summary>
+        /// Scene loads read the animator controllers they built (ControllerData.WarmNext), their clips and
+        /// sprites, under the loading screen (CH360_WARM_ANIMATION=0: when an animator first plays). Off, a
+        /// prefab's first spawn read them in the frame: the twenty-sixth run's Frogs fight read 466 objects
+        /// from the drive in play (each a block read, some a file opened again: 100-450 ms hitches), with it
+        /// 34; Forest Follies on PC 479 against 64, the heap the same (68-69 MB, the census at frame 4300).
+        /// </summary>
+        public static readonly bool WarmAnimation = Environment.GetEnvironmentVariable("CH360_WARM_ANIMATION") != "0";
 
         public static string[] BuildScenes = new string[0];
         public static readonly Dictionary<int, string> Tags = new Dictionary<int, string>
@@ -324,6 +330,10 @@ namespace Cuphead360.Engine
                         // Unity binds a sprite to its atlas when the sprite loads (or asks for a late-bound one).
                         if (managed is Sprite sprite) Atlases.Touch(sprite);
                         else if (managed is RuntimeAnimatorController rac && WarmAnimation) ControllerData.Built(rac);
+                        // Its facts now, while its tree is parsed: read at its first play, the tree was often let
+                        // go by then (the tree budget) and came back from the drive (60 of Forest Follies' 64
+                        // reads in play with the warm-up).
+                        else if (managed is AudioClip ac) Audio.ClipOf(ac);
                         return managed;
                     }
             }

@@ -50,6 +50,10 @@ namespace Cuphead360.Player
         static extern int TexturesPending();
         [DllImport("ch360", EntryPoint = "loading_screen"), WasmImportLinkage]
         static extern void LoadingScreenFlag(uint state);
+        [DllImport("ch360", EntryPoint = "audio_queued"), WasmImportLinkage]
+        static extern int AudioQueued();
+        [DllImport("ch360", EntryPoint = "ogg_preload"), WasmImportLinkage]
+        static extern void OggPreload(byte* path, int length, int batch);
         [DllImport("ch360", EntryPoint = "audio"), WasmImportLinkage]
         static extern void AudioOut(float* samples, int frames);
         [DllImport("ch360", EntryPoint = "ogg_open"), WasmImportLinkage]
@@ -193,11 +197,12 @@ namespace Cuphead360.Player
                 public readonly Dictionary<Type, long> Scripts = new Dictionary<Type, long>(), Bytes = new Dictionary<Type, long>();
                 public double Game, Period, Decode;
                 public int Frames, Periods, Hitches, Unsaid;
+                public readonly StringBuilder UnsaidAt = new StringBuilder();   // the window's hitches past ten: frame and ms
                 public long Gc0, Gc1, Gc2, PauseMs, Alloc, DecodeAt;
                 public void Start()
                 {
                     Array.Clear(Hist); Array.Clear(Phase); Scripts.Clear(); Bytes.Clear();
-                    Game = Period = Decode = 0; Frames = Periods = Hitches = Unsaid = 0;
+                    Game = Period = Decode = 0; Frames = Periods = Hitches = Unsaid = 0; UnsaidAt.Clear();
                     Gc0 = GC.CollectionCount(0); Gc1 = GC.CollectionCount(1); Gc2 = GC.CollectionCount(2);
                     PauseMs = (long)GC.GetTotalPauseDuration().TotalMilliseconds; Alloc = Allocated(); DecodeAt = Audio.DecodeTicks;
                 }
@@ -244,7 +249,12 @@ namespace Cuphead360.Player
                 if (ms <= 50) return;
                 window.Hitches++;
                 if (!act) scene.Hitches++;
-                if (window.Hitches > 10) { window.Unsaid++; return; }
+                if (window.Hitches > 10)
+                {
+                    // where they were (the boot's window hid the logo's among the startup's: the twenty-sixth run)
+                    if (window.Unsaid++ < 24) window.UnsaidAt.Append(window.Unsaid > 1 ? ", " : ": frames ").Append(lastFrame).Append(' ').Append(ms.ToString("0"));
+                    return;
+                }
                 var sb = new StringBuilder();
                 sb.Append("HITCH frame ").Append(lastFrame).Append(": ").Append(ms.ToString("0")).Append(" ms to the next frame; game ")
                   .Append(lastGame.ToString("0.0")).Append(" (");
@@ -351,7 +361,7 @@ namespace Cuphead360.Player
                 int f = Math.Max(1, window.Frames);
                 Console.WriteLine($"FRAMES {windowStart}-{n}: {window.Game / f:0.0} ms/frame; {Phases(window)}; audio decode {(Audio.DecodeTicks - window.DecodeAt) * 1000.0 / hz / f:0.0} ms/frame, "
                     + $"{Audio.VoiceCount} voices; {Spread(window)}; scripts {scripts:0.0} ms/frame; {Gc(window)}; hitches {window.Hitches}"
-                    + (window.Unsaid > 0 ? $" ({window.Unsaid} not said)" : "") + $"; {windowScenes}");
+                    + (window.Unsaid > 0 ? $" ({window.Unsaid} not said{window.UnsaidAt} ms)" : "") + $"; {windowScenes}");
                 Console.WriteLine($"TOP {windowStart}-{n} ms/frame:{top}");
                 // What each phase allocated, then the scripts' top allocators (each message and coroutine step)
                 if (!noAlloc && PlayerLoop.Profile)
@@ -402,6 +412,12 @@ namespace Cuphead360.Player
             else
                 Audio.HostMixer = new HostMixer();
             Console.WriteLine($"CONSOLE audio mixed by the {(Audio.HostMixer != null ? "host" : "engine")}");
+            // A load's short clips read ahead by the host (its clip reader's thread, into its cache of clips).
+            Audio.Preload = (path, batch) =>
+            {
+                var b = Encoding.UTF8.GetBytes(path);
+                fixed (byte* p = b) OggPreload(p, b.Length, batch);
+            };
             // An atlas the game loads: its pages read ahead (the boot's preload of the title's atlases readies the logo).
             Atlases.Prefetch = src => TexturePrefetch(FileTextureId(src));
             // Sprites near the view and the clips those on screen play: their pages read ahead (converted ones only).
@@ -430,8 +446,8 @@ namespace Cuphead360.Player
                 perf.Between(real * 1000.0);
                 // A console frame slower than the vblank still moves the game at its real speed.
                 Delta = scripted != null ? scriptedStep : Math.Clamp(real, 1f / 60f, 1f / 30f);
-                PlayerLoop.AudioDelta = scripted != null ? -1 : Math.Clamp(real, 0f, 0.25f);
-                if (scripted == null && BootHold(n)) { Delta = 1e-4f; PlayerLoop.AudioDelta = 0f; }
+                PlayerLoop.AudioDelta = scripted != null ? -1 : AudioLead(real);
+                if ((scripted == null || holdScripted) && (BootHold(n) || LevelHold())) { Delta = 1e-4f; PlayerLoop.AudioDelta = 0f; }
                 PollPads();
                 if (!frame(++n)) break;
                 if (n % 60 == 1) NoKeyboard();
@@ -451,6 +467,27 @@ namespace Cuphead360.Player
                         + $", trees dropped {ChobObject.TreesDropped}, parsed again {ChobObject.TreesReparsed}");
             }
             return 0;
+        }
+
+        /// <summary>
+        /// The mix's length this frame: the frame's time, corrected toward a little ahead of what the host's
+        /// output still holds. Mixing the frame's time alone left the output nothing to spare (a frame a
+        /// little longer than the one before ran it dry: 7,351 empty audio frames in the twenty-sixth run's
+        /// first minute), and after a long frame the next mixed up to 250 ms at once, which stayed queued as
+        /// that much more delay. Now it keeps AudioLeadPlay ahead in play (a frame's jitter) and
+        /// AudioLeadLoading under the loading screen (its frames run 100-400 ms; the host loops the screen's
+        /// sound through longer hold-ups), and a surplus is played off at up to half the frame's time.
+        /// </summary>
+        const float AudioLeadPlay = 0.015f, AudioLeadLoading = 0.15f;
+        static bool loadingShown;
+
+        static float AudioLead(float real)
+        {
+            float mix = Math.Clamp(real, 0f, 0.25f);
+            int queued = AudioQueued();
+            if (queued < 0) return mix;   // no output playing in real time (the PC host)
+            float gap = (loadingShown ? AudioLeadLoading : AudioLeadPlay) - queued / (float)Audio.Rate;
+            return Math.Clamp(mix + Math.Clamp(gap, -0.5f * mix, 0.25f), 0f, 0.5f);
         }
 
         static readonly bool keepKeyboard = Environment.GetEnvironmentVariable("CH360_KEYBOARD") == "1";
@@ -649,6 +686,59 @@ namespace Cuphead360.Player
             return true;
         }
 
+        /// <summary>
+        /// A level's start, as the boot's: the game held (its clock all but stopped, behind the load's black)
+        /// until the pages its first frames draw are in: what its renderers and images show and the clips its
+        /// animators play (RenderList.ReadAheadFirst). They came in its first frames, under the fade in: the
+        /// twenty-sixth run's Frogs started with frames of 234, 308 and 196 ms. At most 3 s, or 1.5 s without
+        /// a page read (memory may hold the rest back); CH360_LEVEL_HOLD=0: none.
+        /// </summary>
+        static int levelLoads = -1, levelFrames, levelSprites, levelPending, levelUnbound;
+        static long levelFrom, levelProgressAt;
+        static bool levelHolding, levelSettled;
+        static readonly bool levelHoldOff = Environment.GetEnvironmentVariable("CH360_LEVEL_HOLD") == "0";
+        // CH360_HOLD_SCRIPTED=1: the holds in scripted runs too (PC checks of them; scripted runs skip them otherwise)
+        static readonly bool holdScripted = Environment.GetEnvironmentVariable("CH360_HOLD_SCRIPTED") == "1";
+
+        static bool LevelHold()
+        {
+            if (levelHoldOff || bootHold != 2) return false;
+            long now = System.Diagnostics.Stopwatch.GetTimestamp(), hz = System.Diagnostics.Stopwatch.Frequency;
+            var name = Cuphead360.Engine.Scenes.Active?.Name;
+            if (!levelHolding)
+            {
+                int loads = Cuphead360.Engine.SceneLoader.Loads;
+                if (loads == levelLoads || name == null) return false;
+                levelLoads = loads;
+                if (!name.StartsWith("scene_level_")) return false;
+                levelHolding = true;
+                levelFrom = levelProgressAt = now;
+                levelFrames = levelSprites = 0;
+                levelPending = int.MaxValue;
+                levelUnbound = -1;
+                levelSettled = false;
+            }
+            levelFrames++;
+            if (levelFrames % 5 == 1 && Atlases.Outstanding == 0)
+            {
+                int read = RenderList.ReadAheadFirst(out int unbound);
+                levelSprites = Math.Max(levelSprites, read);
+                levelSettled = unbound == 0 || unbound == levelUnbound;
+                levelUnbound = unbound;
+            }
+            int pending = TexturesPending(), atlases = Atlases.Outstanding;
+            if (pending < levelPending) { levelPending = pending; levelProgressAt = now; }
+            bool done = levelFrames > 2 && levelSettled && atlases == 0 && pending == 0;
+            if (done || now - levelFrom > 3 * hz || (now - levelProgressAt) * 2 > 3 * hz)
+            {
+                levelHolding = false;
+                Console.WriteLine($"LEVEL hold {name}: {levelFrames} frames, {(now - levelFrom) * 1000 / hz} ms; {levelSprites} sprites read ahead, "
+                    + $"{levelUnbound} with no atlas; {pending} textures still coming, {atlases} atlases asked for{(done ? "" : " (gave up)")}");
+                return false;
+            }
+            return true;
+        }
+
         // The hourglass by the clock: the game's clock runs at most 1/30 s a frame, so a slow load turned it slowly,
         // and after a hold-up the host's frames (which go by the clock) gave way to the game's from further back
         // (the twenty-fourth run's skips). Each loading frame shows the kept frame for where the clock says the
@@ -660,6 +750,7 @@ namespace Cuphead360.Player
         static void Draw(List<RenderList.View> views)
         {
             uint state = LoadingScreen();
+            loadingShown = state != 0;
             uint cycle = (state >> 16) & 0x3FFF;
             if (state != 0 && cycle != 0 && !managedDraw)
             {

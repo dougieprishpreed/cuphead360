@@ -279,6 +279,14 @@ namespace Cuphead360.Engine
         /// <summary>AssetUnload: the queue holds nothing past a pass (it would keep its controllers loaded).</summary>
         public static void ForgetBuilt() => unread.Clear();
 
+        /// <summary>
+        /// Whether a scene's load reads its controllers: the levels', whose first spawns hitched in play. Not
+        /// the maps', menus' and cutscenes': every controller the world map references read up front raised
+        /// its heap 68 -> 96 MB on the PC host (most of them never play there), and the linear memory a
+        /// step (151 -> 167 MB over the Hilda Berg run), which the console's textures would have given up.
+        /// </summary>
+        public static bool WarmScene(string scene) => scene != null && scene.StartsWith("scene_level_");
+
         /// <summary>Reads the next queued controller (false: none left).</summary>
         public static bool WarmNext()
         {
@@ -734,6 +742,18 @@ namespace Cuphead360.Engine
         /// twenty-fifth run most of the fights' texture loads came on demand (the Frogs 162 of 194), an
         /// attack's first frame waiting for its pages.
         /// </summary>
+        /// <summary>The clips its layers play now read ahead (a level's first frames: ConsoleHost's level hold).</summary>
+        internal void ReadAheadCurrent()
+        {
+            if (RenderList.ReadAhead == null || Data == null || Layers.Length == 0) return;
+            for (int li = 0; li < Layers.Length && li < Data.Layers.Length; li++)
+            {
+                int src = Data.Layers[li].Source >= 0 ? Data.Layers[li].Source : li;
+                var cur = Layers[src].Current;
+                if (cur != null) RenderList.AheadClipOf(ClipAt(li, StateAt(src, cur.State)));
+            }
+        }
+
         internal void ReadAheadNext()
         {
             if (RenderList.ReadAhead == null || Data == null || Layers.Length == 0) return;

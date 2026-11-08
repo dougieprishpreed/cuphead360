@@ -129,35 +129,50 @@ static void ogg_unlock(U32 h) {
 /* Clips from the audio pack (ch360_pack.c) when there is one. The bytes of
  * clips closed lately are kept (CACHE_BYTES) for their next play: a clip
  * longer than the engine's StreamOver streams, opened again each time it
- * sounds (the tenth run's fights opened ~30 files a minute). */
-enum { CACHE_SLOTS = 64, CACHE_BYTES = 6 * 1024 * 1024 };
+ * sounds (the tenth run's fights opened ~30 files a minute). A scene's load
+ * also reads its short clips in ahead (ogg_preload): a clip's first play read
+ * it from the drive in the frame. */
+enum { CACHE_SLOTS = 512, CACHE_BYTES = 8 * 1024 * 1024 };   /* the Frogs' load read 333 short clips ahead (5.5 MB) */
 typedef struct ogg_cached {
     unsigned char* data;
     int size, file;
-    unsigned offset, age;
+    unsigned offset, age, batch;   /* batch: the scene load that read it ahead (0: kept after a play) */
 } ogg_cached;
 static ogg_cached cache[CACHE_SLOTS];
 static unsigned cache_bytes, cache_clock;
 static int audio_pack = -2;
+static srt_mutex* cache_lock;   /* once the clip reader runs (it fills the cache too) */
 
 static unsigned char* cache_take(int file, unsigned offset) {
     int i;
+    unsigned char* d = NULL;
+    if (cache_lock) srt_mutex_lock(cache_lock);
     for (i = 0; i < CACHE_SLOTS; i++)
         if (cache[i].data != NULL && cache[i].file == file && cache[i].offset == offset) {
-            unsigned char* d = cache[i].data;
+            d = cache[i].data;
             cache_bytes -= (unsigned)cache[i].size;
             cache[i].data = NULL;
-            return d;
+            break;
         }
-    return NULL;
+    if (cache_lock) srt_mutex_unlock(cache_lock);
+    return d;
 }
 
-static void cache_put(unsigned char* data, int size, int file, unsigned offset) {
-    int i, slot = -1;
+/* Keeps a clip's bytes, making room from the least recently kept; a clip read ahead (batch) makes none
+ * from its own load's others (0 when it doesn't fit then, and the bytes are freed). */
+static int cache_put_batch(unsigned char* data, int size, int file, unsigned offset, unsigned batch) {
+    int i, slot = -1, kept = 1;
     if (file < 0 || size > CACHE_BYTES / 2) {
         free(data);
-        return;
+        return 0;
     }
+    if (cache_lock) srt_mutex_lock(cache_lock);
+    for (i = 0; i < CACHE_SLOTS; i++)   /* already there (read ahead twice, or played meanwhile) */
+        if (cache[i].data != NULL && cache[i].file == file && cache[i].offset == offset) {
+            if (cache_lock) srt_mutex_unlock(cache_lock);
+            free(data);
+            return 1;
+        }
     while (cache_bytes + (unsigned)size > CACHE_BYTES || slot < 0) {
         int oldest = -1;
         for (i = 0; i < CACHE_SLOTS; i++) {
@@ -168,7 +183,10 @@ static void cache_put(unsigned char* data, int size, int file, unsigned offset) 
             if (oldest < 0 || cache[i].age < cache[oldest].age) oldest = i;
         }
         if (slot >= 0 && cache_bytes + (unsigned)size <= CACHE_BYTES) break;
-        if (oldest < 0) break;
+        if (oldest < 0 || (batch != 0 && cache[oldest].batch == batch)) {
+            slot = -1;
+            break;
+        }
         free(cache[oldest].data);
         cache_bytes -= (unsigned)cache[oldest].size;
         cache[oldest].data = NULL;
@@ -176,14 +194,22 @@ static void cache_put(unsigned char* data, int size, int file, unsigned offset) 
     }
     if (slot < 0) {
         free(data);
-        return;
+        kept = 0;
+    } else {
+        cache[slot].data = data;
+        cache[slot].size = size;
+        cache[slot].file = file;
+        cache[slot].offset = offset;
+        cache[slot].age = ++cache_clock;
+        cache[slot].batch = batch;
+        cache_bytes += (unsigned)size;
     }
-    cache[slot].data = data;
-    cache[slot].size = size;
-    cache[slot].file = file;
-    cache[slot].offset = offset;
-    cache[slot].age = ++cache_clock;
-    cache_bytes += (unsigned)size;
+    if (cache_lock) srt_mutex_unlock(cache_lock);
+    return kept;
+}
+
+static void cache_put(unsigned char* data, int size, int file, unsigned offset) {
+    cache_put_batch(data, size, file, offset, 0);
 }
 
 /* The clip's bytes from the pack: its key is the file name without ".ogg". */
@@ -306,10 +332,54 @@ static int info_find(const char* key, size_t len, unsigned* channels, unsigned* 
     return *channels >= 1 && *channels <= 2;
 }
 
+/* The clip's bytes, in pieces: the drive takes one request at a time, and a clip read in one went ahead
+ * of everything else for its whole length (a 5 MB track ~550 ms): a sound effect read on the game's thread
+ * meanwhile (the twenty-sixth run's Frogs fight: a 338 ms frame in the mix) and the texture loader's reads
+ * waited for all of it. */
+enum { LOAD_PIECE = 64 * 1024 };
+
+/* Short clips a load asked to read ahead (ogg_preload): read when no large clip waits, into the cache. */
+enum { PRELOAD_QUEUE = 512 };
+static ch360_pack_entry pre_key[PRELOAD_QUEUE], pre_from[PRELOAD_QUEUE];
+static unsigned pre_head, pre_count, pre_batch, pre_batch_of[PRELOAD_QUEUE];
+static unsigned pre_done, pre_kept, pre_bytes;
+
+static void preload_one(const ch360_pack_entry* key, const ch360_pack_entry* from, unsigned batch) {
+    unsigned char* data;
+    unsigned at = 0;
+    int i, have = 0;
+    srt_mutex_lock(cache_lock);
+    for (i = 0; i < CACHE_SLOTS && !have; i++) have = cache[i].data != NULL && cache[i].file == key->file && cache[i].offset == key->offset;
+    srt_mutex_unlock(cache_lock);
+    if (have || (data = (unsigned char*)malloc(key->size)) == NULL) return;
+    while (at < key->size) {
+        unsigned n = key->size - at < LOAD_PIECE ? key->size - at : LOAD_PIECE;
+        if (ch360_pack_read_with(async_reader, from, at, data + at, n) != 0) {
+            free(data);
+            return;
+        }
+        at += n;
+    }
+    pre_done++;
+    pre_bytes += key->size;
+    pre_kept += (unsigned)cache_put_batch(data, (int)key->size, key->file, key->offset, batch);
+}
+static int read_pieces(int h) {
+    ch360_ogg* o = &oggs[h];
+    unsigned at = 0, size = (unsigned)o->size;
+    while (at < size) {
+        unsigned n = size - at < LOAD_PIECE ? size - at : LOAD_PIECE;
+        if (o->close_asked) return 0;   /* closed meanwhile: the rest isn't wanted */
+        if (ch360_pack_read_with(async_reader, &load_entry[h], at, o->data + at, n) != 0) return 0;
+        at += n;
+    }
+    return 1;
+}
+
 /* The clip's bytes read and its decoder opened (or, closed meanwhile, let go). */
 static void load_one(int h) {
     ch360_ogg* o = &oggs[h];
-    int err = 0, ok = ch360_pack_read_with(async_reader, &load_entry[h], 0, o->data, (unsigned)o->size) == 0;
+    int err = 0, ok = read_pieces(h);
     stb_vorbis* v = ok ? stb_vorbis_open_memory(o->data, o->size, &err, NULL) : NULL;
     ogg_lock((U32)h);
     if (o->close_asked || v == NULL) {
@@ -353,7 +423,16 @@ static void loader_main(void* arg) {
     for (;;) {
         int h;
         srt_mutex_lock(load_lock);
-        while (load_count == 0) srt_cond_wait(load_cond, load_lock);
+        while (load_count == 0 && pre_count == 0) srt_cond_wait(load_cond, load_lock);
+        if (load_count == 0) {   /* nothing that plays waits: a clip read ahead */
+            ch360_pack_entry key = pre_key[pre_head], from = pre_from[pre_head];
+            unsigned batch = pre_batch_of[pre_head];
+            pre_head = (pre_head + 1) % PRELOAD_QUEUE;
+            pre_count--;
+            srt_mutex_unlock(load_lock);
+            preload_one(&key, &from, batch);
+            continue;
+        }
         h = load_queue[load_head];
         load_head = (load_head + 1) % LOAD_QUEUE;
         load_count--;
@@ -374,7 +453,8 @@ static int loader_ready(void) {
     async_reader = ch360_pack_reader_new();
     load_lock = srt_mutex_create();
     load_cond = srt_cond_create();
-    if (audio_pack_async < 0 || async_reader == NULL || load_lock == NULL || load_cond == NULL) return 0;
+    cache_lock = srt_mutex_create();
+    if (audio_pack_async < 0 || async_reader == NULL || load_lock == NULL || load_cond == NULL || cache_lock == NULL) return 0;
     if (srt_thread_start(loader_main, NULL, 128 * 1024, CLIP_READER_HW_THREAD) == NULL) return 0;
     loader_state = 1;
     return 1;
@@ -442,6 +522,46 @@ static int open_async(int h, const U8* path, U32 len, U32 info) {
 }
 
 /* ogg_open(path, length, info): a handle, info = channels, rate, frames; -1 if it can't be read. */
+/* ogg_preload(path, len, batch): a short clip of the scene being loaded, read into the cache on the clip
+ * reader's thread (when no large clip waits) so its first play finds it in memory; batch numbers the load
+ * (a load's clips don't push each other out). Large clips (read off the game's thread anyway) and clips
+ * already kept are left. */
+void i5_ch36011_oggX5Fpreload(wasmModuleInstance* inst, U32 path, U32 len, U32 batch) {
+    ch360_pack_entry e, ea;
+    U32 slash = len, end = len;
+    const U8* p;
+    (void)inst;
+    if (len == 0 || len > 1024 || !srt_mem_ok(path, len) || batch == 0) return;
+    if (audio_pack == -2) audio_pack = ch360_pack_open(ogg_root, "AUDIO");
+    if (audio_pack < 0 || !loader_ready()) return;
+    p = srt_mem_ptr(path);
+    while (slash > 0 && p[slash - 1] != '/') slash--;
+    if (end - slash > 4 && memcmp(p + end - 4, ".ogg", 4) == 0) end -= 4;
+    if (!ch360_pack_find(audio_pack, (const char*)p + slash, end - slash, &e) || e.size == 0 || e.size >= ASYNC_MIN_BYTES ||
+        !ch360_pack_find(audio_pack_async, (const char*)p + slash, end - slash, &ea))
+        return;
+    srt_mutex_lock(load_lock);
+    if (batch != pre_batch) {   /* a new load: the last one's tally, and what it still had queued goes */
+        if (pre_batch != 0 && pre_done > 0) {
+            char msg[128];
+            int n = sprintf(msg, "audio: %u short clips read ahead (%u KB), %u kept\n", pre_done, pre_bytes >> 10, pre_kept);
+            ch360_plat_log(msg, (size_t)n);
+        }
+        pre_batch = batch;
+        pre_count = 0;
+        pre_done = pre_kept = pre_bytes = 0;
+    }
+    if (pre_count < PRELOAD_QUEUE) {
+        unsigned at = (pre_head + pre_count) % PRELOAD_QUEUE;
+        pre_key[at] = e;
+        pre_from[at] = ea;
+        pre_batch_of[at] = batch;
+        pre_count++;
+        srt_cond_broadcast(load_cond);
+    }
+    srt_mutex_unlock(load_lock);
+}
+
 U32 i5_ch3608_oggX5Fopen(wasmModuleInstance* inst, U32 path, U32 len, U32 info) {
     char full[1024];
     size_t root = strlen(ogg_root);

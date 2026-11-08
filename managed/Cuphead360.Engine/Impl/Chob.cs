@@ -67,7 +67,7 @@ namespace Cuphead360.Engine
                         if (post > 0) File.ReadAt(HoleAt + HoleLen, buf, pre, post);
                         ChobFile.ObjectReads++;
                         ChobFile.ObjectBytes += buf.Length;
-                        if (ChobFile.TraceReads) Console.WriteLine($"READ {File?.Name} {Offset} {Length} {HoleLen}");
+                        if (ChobFile.TraceReads) Console.WriteLine($"READ {File?.Name} {Offset} {Length} {HoleLen} {Type} {PathId} frame {Clock.FrameCount}{(table != null ? " again" : "")}");
                         at = 0;
                         if (HoleLen > 0) holeAt = pre;
                     }

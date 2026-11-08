@@ -132,6 +132,9 @@ void ch360_plat_texture_pixels(int id, int width, int height, const unsigned cha
 void ch360_plat_audio(const unsigned char* f32le, int frames);
 /* The same from the host's own mixer (ch360_ogg.c): native floats. */
 void ch360_plat_audio_native(const float* lr, int frames);
+/* Mixed frames the platform holds that haven't been played yet (-1: no output that plays in real time):
+ * the player mixes enough each frame to keep a little ahead (ConsoleHost.AudioLead). */
+int ch360_plat_audio_queued(void);
 /* The player's stdout and stderr. */
 void ch360_plat_log(const char* text, size_t len);
 

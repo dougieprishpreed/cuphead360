@@ -388,6 +388,36 @@ namespace Cuphead360.Engine
             return n;
         }
 
+        /// <summary>
+        /// A level's first frames (ConsoleHost's level hold): the sprites its active renderers and images show
+        /// and the clips its animators play now, read ahead (unbound: sprites whose atlas isn't here yet).
+        /// Not every clip, as ReadAheadScene does for the title: a fight's would be all of its pages.
+        /// </summary>
+        public static int ReadAheadFirst(out int unbound)
+        {
+            unbound = 0;
+            if (ReadAhead == null) return 0;
+            int handle = Scenes.ActiveHandle, n = 0, missing = 0;
+            foreach (var go in Typed.GameObjects)
+            {
+                if (go.IsAsset || go.Scene != handle || !go.ActiveInHierarchy) continue;
+                foreach (var c in go.Components)
+                {
+                    Sprite s = null;
+                    if (c is NAnimator a) { a.ReadAheadCurrent(); continue; }
+                    if (c is NSpriteRenderer sr) s = sr.Sprite;
+                    else if (c.Managed is UnityEngine.UI.Image img) s = img.sprite;
+                    if (s == null) continue;
+                    var tex = Sprites.BoundTexture(s);
+                    if (tex == null) { Atlases.Touch(s); missing++; continue; }
+                    ReadAhead(tex, Sprites.UvBox(s));
+                    n++;
+                }
+            }
+            unbound = missing;
+            return n;
+        }
+
         /// <summary>A clip's sprites read ahead (an animator's next states: NAnimator.ReadAheadNext).</summary>
         internal static void AheadClipOf(ClipData clip) { if (ReadAhead != null) AheadClip(clip); }
 

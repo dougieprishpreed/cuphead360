@@ -201,12 +201,15 @@ const unsigned MEMORY_FLOOR_MB = 24;
 // never from what the screen showed lately; a sprite page is 4 MB at most (tools/cluster_console.py).
 const unsigned AHEAD_AGE = 180;
 const size_t PAGE_MAX = 4u << 20;
-// Pages' stored bytes (LZ4, about a quarter of their size) kept in memory: a page evicted and drawn again,
-// or read ahead, decodes without the drive (USB reads ran at ~11 MB/s: 40-180 ms a page). Off: each was a
-// malloc of its own, and newlib's heap never gives back what it grew to (the twenty-second and twenty-third
-// runs: ~35 MB more of the console's memory not counted anywhere, textures squeezed to 41 MB and refused).
-// Back only with a fixed arena of its own.
-const size_t STORED_BUDGET = 0;
+// Pages' stored bytes (LZ4, a fifth to a quarter of their size) kept in memory: a page evicted and drawn
+// again, or read ahead, decodes without the drive (USB reads ran at 9 MB/s: 50-80 ms a page, decoding from
+// memory ~24 ms a 4 MB page). More than half the twenty-sixth run's page loads were pages read before (the
+// Frogs 217 of 401, Forest Follies 245 of 452). The copies kept first are of pages let go (release_stored):
+// those are the ones read again. Each was a malloc of its own once, and newlib's heap never gives back what
+// it grew to (the twenty-second and twenty-third runs: ~35 MB more of the console's memory not counted
+// anywhere, textures squeezed to 41 MB and refused); now they come from 2 MB slabs (big_alloc's kernel
+// pages), each given back whole when its last copy goes (stored_alloc).
+const size_t STORED_BUDGET = 16u << 20;
 // The loader's buffers (a job's decoded texture until it's copied to staging) come from one block made at
 // start, not malloc: a malloc of up to 4 MB a texture load left newlib's heap at its highest.
 const size_t LOAD_ARENA = 12u << 20;
@@ -284,6 +287,52 @@ const VkFormat DEPTH_FORMAT = VK_FORMAT_D24_UNORM_S8_UINT;
 // malloc isn't known to be thread safe here): the game thread makes each job and its buffer, sized from the
 // pack's table, and the jobs pass through fixed rings; it has its own pack reader (ch360_pack_reader_new);
 // it reads only the texture pack, whose file nothing else reads after start-up.
+// Stored copies' memory: 2 MB slabs (malloc of 1 MB and up is big_alloc's: the kernel's pages, given back
+// whole), a copy taken from the newest slab's end; a slab goes back when its last copy is freed. A copy over
+// 1 MB has a block of its own. The game's thread only.
+const size_t STORED_SLAB = 2u << 20;
+struct StoredSlab {
+    unsigned char* base;
+    size_t used;
+    unsigned live;
+};
+std::vector<StoredSlab> g_stored_slabs;   // the last takes new copies
+size_t g_stored_slab_bytes = 0;
+
+unsigned char* stored_alloc(size_t n) {
+    if (n > STORED_SLAB / 2) return (unsigned char*)malloc(n);
+    n = (n + 15) & ~(size_t)15;
+    if (g_stored_slabs.empty() || g_stored_slabs.back().used + n > STORED_SLAB) {
+        StoredSlab sl;
+        sl.base = (unsigned char*)malloc(STORED_SLAB);
+        if (!sl.base) return NULL;
+        sl.used = 0;
+        sl.live = 0;
+        g_stored_slabs.push_back(sl);
+        g_stored_slab_bytes += STORED_SLAB;
+    }
+    StoredSlab& sl = g_stored_slabs.back();
+    unsigned char* p = sl.base + sl.used;
+    sl.used += n;
+    ++sl.live;
+    return p;
+}
+
+void stored_free(unsigned char* p) {
+    if (!p) return;
+    for (size_t i = 0; i < g_stored_slabs.size(); ++i) {
+        StoredSlab& sl = g_stored_slabs[i];
+        if (p < sl.base || p >= sl.base + STORED_SLAB) continue;
+        if (--sl.live == 0) {
+            free(sl.base);
+            g_stored_slab_bytes -= STORED_SLAB;
+            g_stored_slabs.erase(g_stored_slabs.begin() + (long)i);
+        }
+        return;
+    }
+    free(p);   // a copy with a block of its own
+}
+
 struct LoadJob {
     int id;
     std::string key;
@@ -1699,7 +1748,7 @@ void Renderer::take_loads(bool all) {
                 t->stored_n = j->e.stored;
                 t->stored_used = frame_no_;
             } else {
-                free(j->stored);
+                stored_free(j->stored);
                 stored_bytes_ -= j->e.stored;
             }
         }
@@ -1858,11 +1907,17 @@ void Renderer::feed_prefetch() {
     }
 }
 
-// Kept stored bytes go, least recently used first (none a job is reading), until want bytes are freed.
+// Kept stored bytes go (none a job is reading) until want bytes are freed: first the copies of textures in
+// memory, then of guesses never drawn, then of pages let go (the ones drawn again), each least recently used
+// first (a page let go counts as used then).
 size_t Renderer::release_stored(size_t want) {
-    std::vector<std::pair<unsigned, size_t> > order;
-    for (size_t i = 0; i < textures_.size(); ++i)
-        if (textures_[i].stored && !textures_[i].loading) order.push_back(std::make_pair(textures_[i].stored_used, i));
+    std::vector<std::pair<unsigned long long, size_t> > order;
+    for (size_t i = 0; i < textures_.size(); ++i) {
+        const Tex& t = textures_[i];
+        if (!t.stored || t.loading) continue;
+        unsigned long long kind = t.image ? 0 : t.evicted ? 2 : 1;
+        order.push_back(std::make_pair((kind << 32) | t.stored_used, i));
+    }
     std::sort(order.begin(), order.end());
     size_t freed = 0;
     for (size_t k = 0; k < order.size() && freed < want; ++k) {
@@ -1874,7 +1929,7 @@ size_t Renderer::release_stored(size_t want) {
 
 void Renderer::forget_stored(Tex& t) {
     if (!t.stored) return;
-    free(t.stored);
+    stored_free(t.stored);
     stored_bytes_ -= t.stored_n;
     t.stored = NULL;
     t.stored_n = 0;
@@ -1920,14 +1975,14 @@ bool Renderer::queue_load(int id, Tex& t, bool pre, bool stored_only) {
     bool fresh = false;
     if (!stored && pe.stored <= PAGE_MAX + (1u << 20)) {
         if (stored_bytes_ + pe.stored > STORED_BUDGET) release_stored(stored_bytes_ + pe.stored - STORED_BUDGET);
-        if (stored_bytes_ + pe.stored <= STORED_BUDGET && (stored = (unsigned char*)malloc(pe.stored)) != NULL) fresh = true;
+        if (stored_bytes_ + pe.stored <= STORED_BUDGET && (stored = stored_alloc(pe.stored)) != NULL) fresh = true;
     }
     if (stored_only && !stored) return false;
     if (t.stored) t.stored_used = frame_no_;
     unsigned char* data = NULL;
     if (!stored_only && (data = arena_take(n ? n : 1)) == NULL) data = (unsigned char*)malloc(n ? n : 1);
     if (!stored_only && !data) {
-        if (fresh) free(stored);
+        if (fresh) stored_free(stored);
         t.retry_at = frame_no_ + 120;
         return false;
     }
@@ -2044,6 +2099,7 @@ size_t Renderer::release_unused(size_t want) {
         freed += t.bytes;
         destroy(t, true);
         t.evicted = true;
+        if (t.stored) t.stored_used = frame_no_;
         ++evictions;
     }
     return freed;
@@ -2066,6 +2122,7 @@ size_t Renderer::release_aged(size_t want, unsigned age) {
         freed += t.bytes;
         destroy(t, true);
         t.evicted = true;
+        if (t.stored) t.stored_used = frame_no_;
         ++evictions;
     }
     return freed;
@@ -2080,6 +2137,7 @@ void Renderer::evict() {
             if (t.image && !t.key.empty() && !t.pinned && frame_no_ - t.last_used > age) {
                 destroy(t, false);
                 t.evicted = true;
+                if (t.stored) t.stored_used = frame_no_;
                 ++evictions;
             }
         }
@@ -2722,16 +2780,37 @@ void* replay_thread(void*) {
 
 // The player mixes 48 kHz stereo each frame (ch360_plat_audio); a thread
 // feeds xsdk's audio frames (256 samples, six channels) from a ring, silence
-// when it runs dry; a full ring drops the oldest samples.
-const unsigned AUDIO_RING = 48000; // frames (1 s)
+// when it runs dry; a full ring drops the oldest samples. The player keeps the
+// ring a little ahead (ch360_plat_audio_queued, ConsoleHost.AudioLead).
+const unsigned AUDIO_RING = 96000; // frames (2 s)
 float g_ring[AUDIO_RING * 2];
 volatile unsigned g_ring_read = 0, g_ring_write = 0;
 pthread_mutex_t g_audio_lock = PTHREAD_MUTEX_INITIALIZER;
 bool g_audio_open = false;
 unsigned g_audio_underruns = 0;
 
+// The loading screen's sound (the vinyl crackle) through a hold-up: the game's thread mixes nothing while a
+// load holds it (up to ~4 s: the twenty-sixth run's hold-ups, the hourglass drawn again by replay_thread),
+// so the crackle stopped. The thread keeps the last second it played and, when the ring runs dry under the
+// loading screen, plays the screen's own last 0.75 s again in a loop (crossfaded at the seam and back into
+// the game's samples), as replay_thread does with the hourglass's frames. Only what played under the
+// loading screen is looped (never the scene before it), and at least 0.3 s of it.
+const unsigned AUDIO_HIST = 48000;              // frames played, kept (1 s)
+const unsigned AUDIO_LOOP = 36000;              // frames looped (0.75 s)
+const unsigned AUDIO_LOOP_MIN = 14400;          // frames of the loading screen's sound needed first (0.3 s)
+const unsigned AUDIO_XFADE = 256;               // frames of each crossfade
+float g_hist[AUDIO_HIST * 2];
+unsigned g_hist_pos = 0;                        // frames written into g_hist (its newest at g_hist_pos - 1)
+
 void* audio_thread(void*) {
     xsdk_thread_move(4);
+    bool was_loading = false, looping = false;
+    unsigned loading_from = 0;                   // g_hist_pos where the loading screen's sound began
+    unsigned loop_a = 0, loop_b = 0, loop_at = 0;   // the loop [loop_a, loop_b) in g_hist positions, and where it plays
+    unsigned fade_in = 0, fade_out = 0;          // frames left of a crossfade into the loop / back to the ring
+    float held_l = 0, held_r = 0;                // the last sample played before the loop (faded out under it)
+    unsigned looped = 0;
+    double loop_started = 0;
     for (;;) {
         float* out = NULL;
         if (xsdk_audio_next_frame(0, &out) != 0 || !out) {
@@ -2744,16 +2823,83 @@ void* audio_thread(void*) {
         float* right = out + XSDK_AUDIO_FRONT_RIGHT * XSDK_AUDIO_FRAME_SAMPLES;
         pthread_mutex_lock(&g_audio_lock);
         unsigned avail = g_ring_write - g_ring_read;
-        if (avail < XSDK_AUDIO_FRAME_SAMPLES) ++g_audio_underruns;
-        for (int i = 0; i < XSDK_AUDIO_FRAME_SAMPLES && g_ring_read != g_ring_write; ++i) {
-            unsigned at = (g_ring_read % AUDIO_RING) * 2;
-            float l = g_ring[at], r = g_ring[at + 1];
+        bool loading = g_loading_screen;
+        // the screen's sound starts after what the ring already holds (mixed before it)
+        if (loading && !was_loading) loading_from = g_hist_pos + avail;
+        was_loading = loading;
+        if (avail < XSDK_AUDIO_FRAME_SAMPLES) {
+            ++g_audio_underruns;
+            unsigned have = (int)(g_hist_pos - loading_from) > 0 ? g_hist_pos - loading_from : 0;
+            if (!looping && loading && have >= AUDIO_LOOP_MIN && avail == 0) {
+                looping = true;
+                loop_b = g_hist_pos - AUDIO_XFADE;   // the seam crossfades the loop's start with the frames after it
+                loop_a = g_hist_pos - (have < AUDIO_LOOP + AUDIO_XFADE ? have : AUDIO_LOOP + AUDIO_XFADE);
+                loop_at = loop_a;
+                fade_in = AUDIO_XFADE;
+                unsigned last = ((g_hist_pos - 1) % AUDIO_HIST) * 2;
+                held_l = g_hist[last];
+                held_r = g_hist[last + 1];
+                looped = 0;
+                loop_started = now_ms();
+            }
+        }
+        if (looping && avail > 0 && fade_out == 0) fade_out = AUDIO_XFADE;   // the game's samples again: crossfaded back
+        for (int i = 0; i < XSDK_AUDIO_FRAME_SAMPLES; ++i) {
+            float l = 0, r = 0;
+            bool real = g_ring_read != g_ring_write;
+            if (real) {
+                unsigned at = (g_ring_read % AUDIO_RING) * 2;
+                l = g_ring[at];
+                r = g_ring[at + 1];
+                ++g_ring_read;
+                unsigned h = (g_hist_pos % AUDIO_HIST) * 2;
+                g_hist[h] = l;
+                g_hist[h + 1] = r;
+                ++g_hist_pos;
+            }
+            if (looping) {
+                // the loop's sample here, its seam crossfaded with the frames past its end
+                unsigned at = (loop_at % AUDIO_HIST) * 2, k = loop_at - loop_a;
+                float ll = g_hist[at], lr = g_hist[at + 1];
+                if (k < AUDIO_XFADE) {
+                    unsigned past = ((loop_b + k) % AUDIO_HIST) * 2;
+                    float t = (float)k / AUDIO_XFADE;
+                    ll = ll * t + g_hist[past] * (1 - t);
+                    lr = lr * t + g_hist[past + 1] * (1 - t);
+                }
+                if (++loop_at == loop_b) loop_at = loop_a;
+                if (fade_in > 0) {   // out of the last sample played, into the loop
+                    float t = 1.0f - (float)fade_in / AUDIO_XFADE;
+                    ll = ll * t + held_l * (1 - t);
+                    lr = lr * t + held_r * (1 - t);
+                    --fade_in;
+                }
+                if (real) {   // out of the loop, into the game's samples
+                    float t = (float)fade_out / AUDIO_XFADE;
+                    l = l * (1 - t) + ll * t;
+                    r = r * (1 - t) + lr * t;
+                    if (fade_out <= 1) {
+                        looping = false;
+                        fade_out = 0;
+                    } else {
+                        --fade_out;
+                    }
+                } else {
+                    l = ll;
+                    r = lr;
+                    ++looped;
+                }
+            }
             left[i] = l < -1.0f ? -1.0f : l > 1.0f ? 1.0f : l;
             right[i] = r < -1.0f ? -1.0f : r > 1.0f ? 1.0f : r;
-            ++g_ring_read;
         }
+        bool ended = !looping && looped > 0;
+        unsigned looped_ms = looped / 48;
+        double loop_ms = now_ms() - loop_started;
+        if (ended) looped = 0;
         pthread_mutex_unlock(&g_audio_lock);
         xsdk_audio_queue_frame();
+        if (ended) logf("HOST loading screen: its sound looped for %u ms of a %u ms hold-up", looped_ms, (unsigned)loop_ms);
     }
     return NULL;
 }
@@ -2829,10 +2975,10 @@ extern "C" int ch360_plat_frame_begin(void) {
         struct mallinfo mi = mallinfo();   // newlib's heap: grown to (arena), in use
         // Times in tenths of a millisecond (integers only in the log).
         logf("frame %u: %u ms/frame x10 (worst %u, %u over 17.5); gpu wait %u, present %u; memory %u MB free of %u, player %u MB, "
-             "textures %u MB (%u uploads, %u evicted), stored %u MB; host heap %u MB (%u in use); items left out for the vertex ring %u; audio underruns %u",
+             "textures %u MB (%u uploads, %u evicted), stored %u MB in %u MB of slabs; host heap %u MB (%u in use); items left out for the vertex ring %u; audio underruns %u",
              g_frames, (unsigned)(g_logic_ms / 60), (unsigned)(g_worst_ms * 10), g_slow, (unsigned)(g_renderer->gpu_wait_ms / 60),
              (unsigned)(g_renderer->present_ms / 60), f, tot, ch360_memory_kb() / 1024, (unsigned)(g_renderer->texture_bytes() >> 20),
-             g_renderer->uploads, g_renderer->evictions, (unsigned)(g_renderer->stored_bytes() >> 20), (unsigned)(mi.arena >> 20),
+             g_renderer->uploads, g_renderer->evictions, (unsigned)(g_renderer->stored_bytes() >> 20), (unsigned)(g_stored_slab_bytes >> 20), (unsigned)(mi.arena >> 20),
              (unsigned)(mi.uordblks >> 20), g_renderer->ring_drops, g_audio_underruns);
         unsigned am[7];
         ch360_audio_memory(am);
@@ -2913,6 +3059,14 @@ extern "C" void ch360_plat_texture_pixels(int id, int width, int height, const u
     Stage stage("vk: run-time texture");
     GpuLock lock;
     g_renderer->texture_pixels(id, width, height, bgra);
+}
+
+extern "C" int ch360_plat_audio_queued(void) {
+    if (!g_audio_open) return -1;
+    pthread_mutex_lock(&g_audio_lock);
+    unsigned n = g_ring_write - g_ring_read;
+    pthread_mutex_unlock(&g_audio_lock);
+    return (int)n;
 }
 
 extern "C" void ch360_plat_audio_native(const float* lr, int frames) {

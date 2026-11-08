@@ -176,6 +176,8 @@ void ch360_plat_texture_prefetch(int id, int wanted) {
 
 /* Textures read at once here: none ever pending. */
 int ch360_plat_textures_pending(void) { return 0; }
+/* No output playing in real time here (the WAV takes what is mixed): the player mixes each frame's time. */
+int ch360_plat_audio_queued(void) { return -1; }
 
 void ch360_plat_texture_file(int id, const char* key) {
     textures_files++;
