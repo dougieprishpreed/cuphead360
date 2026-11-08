@@ -411,6 +411,11 @@ namespace Cuphead360.Player
                 int id = TextureId(t);
                 if (id >= 0) TextureAhead(id, box.x, box.y, box.z, box.w);
             };
+            // Rewired's control mapper reads this field by name (ReflectionTools.GetPrivateField, widened by the
+            // patcher to public members too: publicize made the field public).
+            var groupsField = typeof(UnityEngine.UI.Selectable).GetField("m_GroupsAllowInteraction",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+            Console.WriteLine($"CONSOLE reflection: Selectable.m_GroupsAllowInteraction {(groupsField != null ? "found" : "MISSING")}");
             Console.WriteLine("CONSOLE host loop");
             int n = 0;
             long last = System.Diagnostics.Stopwatch.GetTimestamp(), hz = System.Diagnostics.Stopwatch.Frequency;

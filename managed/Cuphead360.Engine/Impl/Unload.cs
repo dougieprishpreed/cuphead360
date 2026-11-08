@@ -81,6 +81,8 @@ namespace Cuphead360.Engine
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             long heap0 = GC.GetTotalMemory(false);
             ControllerData.ForgetBuilt();
+            RenderList.ForgetScene();
+            Physics.ForgetScene();
             var cands = new List<NObject>();
             foreach (var r in Objects.Live())
                 if (Candidate(r)) cands.Add(r);

@@ -536,6 +536,26 @@ namespace Cuphead360.Engine
         static readonly ConditionalWeakTable<TextGenerator, TextGenState> states = new ConditionalWeakTable<TextGenerator, TextGenState>();
         public static TextGenState Of(TextGenerator g) => states.GetValue(g, _ => new TextGenState());
 
+        /// <summary>
+        /// A UGUI Text destroyed: its generators' vertices, characters and lines (Unity's cached copies and
+        /// these) let go. A destroyed script the game left in a static event (the map's difficulty card in
+        /// PlayerManager.OnPlayerJoinedEvent: its base class's OnDestroy that unsubscribes never runs, in
+        /// Unity too) keeps its Texts; in Unity they're small, here they held their meshes, ~1 MB a map
+        /// visit. Asked for again, they're laid out again.
+        /// </summary>
+        public static void Forget(UnityEngine.UI.Text text)
+        {
+            foreach (var g in new[] { text.cachedTextGenerator, text.cachedTextGeneratorForLayout })
+            {
+                if (g == null) continue;
+                if (g.verts is List<UIVertex> v) { v.Clear(); v.TrimExcess(); }
+                if (g.characters is List<UICharInfo> c) { c.Clear(); c.TrimExcess(); }
+                if (g.lines is List<UILineInfo> l) { l.Clear(); l.TrimExcess(); }
+                g.Invalidate();
+                states.Remove(g);
+            }
+        }
+
         struct Run { public int Start, End; public float Width; }
 
         struct Glyph

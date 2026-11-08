@@ -83,6 +83,7 @@ namespace Cuphead360.Player
         public InputFrame Step(int fr)
         {
             frame = fr;
+            frameLive.Clear();   // the last step's objects: kept, they held destroyed scenes in heap dumps
             var p = f.Pads[0];
             p.Connected = true; p.Buttons = 0; p.LX = p.LY = p.RX = p.RY = p.LT = p.RT = 0;
             if (index < 0) Next("start");

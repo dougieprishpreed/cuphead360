@@ -113,6 +113,23 @@ internal static class Program
                 foreach (var md in t.Methods)
                     if (!md.IsPublic && !md.IsVirtual) { md.IsPublic = true; methods++; }
             }
+            // Rewired finds members by name as non-public (ReflectionTools' Get/SetPrivateField, ...Property,
+            // CallPrivateMethod: Instance | NonPublic); widened above, they're public and the lookups came back
+            // null (its control mapper's Selectable.m_GroupsAllowInteraction: the controls screen threw on every
+            // move on the console). They look for public members too.
+            var reflectionTools = asm.MainModule.GetType("Rewired.Utils.ReflectionTools");
+            if (reflectionTools != null)
+            {
+                int widenedLookups = 0;
+                foreach (var md in reflectionTools.Methods)
+                    if (md.HasBody && md.Name.Contains("Private"))
+                        foreach (var ins in md.Body.Instructions)
+                        {
+                            if (ins.OpCode == OpCodes.Ldc_I4_S && (sbyte)ins.Operand == 36) { ins.Operand = (sbyte)52; widenedLookups++; }
+                            else if (ins.OpCode == OpCodes.Ldc_I4 && (int)ins.Operand == 36) { ins.Operand = 52; widenedLookups++; }
+                        }
+                Console.WriteLine($"publicize: Rewired's private-member lookups widened to public members too ({widenedLookups})");
+            }
             asm.Write(dst);
         }
         File.WriteAllLines(Path.Combine(outDir, "publicized_fields.txt"), widened);

@@ -219,11 +219,14 @@ python tools\stage_console.py --to E:\Apps\cuphead360
 The first time, it packs the textures and sounds into a few large files
 (`CTEX0.PAK`, `CTEX1.PAK`, `AUDIO0.PAK`, each under 2 GB) in
 `work\console\packs`, which takes a while; later it packs again only what
-changed. Then it copies what is new or changed to the drive. Saves already
+changed. It also writes `AUDIOINFO.BIN` there, each sound's length read
+from its file, so the console can start long sounds without waiting for
+them to load. Then it copies what is new or changed to the drive. Saves already
 on the drive are kept.
 
 **Check:** `E:\Apps\cuphead360` holds `default.xex`, `GameData\` (with
-`objects`, `fonts` and the `.PAK` files), `licenses\` and `save\`.
+`objects`, `fonts`, the `.PAK` files and `AUDIOINFO.BIN`), `licenses\`
+and `save\`.
 
 ## 9. Play
 

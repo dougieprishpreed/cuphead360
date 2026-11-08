@@ -227,8 +227,17 @@ namespace Cuphead360.Engine
         public static List<((ChobFile, long) key, WeakReference obj)> WeakenBuilt()
         {
             var aside = new List<((ChobFile, long), WeakReference)>();
+            var dead = new List<(ChobFile, long)>();
             foreach (var kv in built)
-                if (Engine.Objects.Of(kv.Value) is NObject rec && rec.UnloadCandidate) aside.Add((kv.Key, new WeakReference(kv.Value)));
+            {
+                var rec = Engine.Objects.Of(kv.Value);
+                // Destroyed (the record gone): Resolve builds it anew, so the entry only kept the object and
+                // what it holds (prefabs' UI destroyed with their scene: their text meshes and glyphs, ~700
+                // components a level, the heap after each unload 65 -> 100 MB over a route).
+                if (rec == null) dead.Add(kv.Key);
+                else if (rec.UnloadCandidate) aside.Add((kv.Key, new WeakReference(kv.Value)));
+            }
+            foreach (var k in dead) built.Remove(k);
             foreach (var e in aside) built.Remove(e.Item1);
             return aside;
         }

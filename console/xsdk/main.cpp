@@ -186,7 +186,10 @@ const VkDeviceSize VERTEX_RING = 4 * 1024 * 1024;
 // while the title's and slot select's 53 MB are still loaded). With sprites at
 // full size the map draws ~91 MB; memory (MEMORY_FLOOR_MB) was what held the
 // set lower in the twelfth run, so the budget is only a little above that.
-const size_t TEXTURE_BUDGET = 112u << 20;
+// Raised to 144 MB once the player's memory stopped creeping (the scenes' scratch lists and the asset table
+// let go of what they held): free memory above the floor is the limit again, not this cap, which the
+// twenty-fifth run's levels sat at (111 MB) while their pages came on demand.
+const size_t TEXTURE_BUDGET = 144u << 20;
 // Uploads go through one staging buffer, run (submitted and waited) when it
 // fills: one buffer per texture until the frame ended doubled a scene's first
 // frame in memory, and the fifth run froze there.

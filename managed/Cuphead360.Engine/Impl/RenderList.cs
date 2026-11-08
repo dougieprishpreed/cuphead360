@@ -271,6 +271,25 @@ namespace Cuphead360.Engine
         static readonly List<(NCamera cam, CamXform xf)> visibleCams = new List<(NCamera, CamXform)>();
 
         /// <summary>
+        /// AssetUnload's pass: the lists and pooled items kept from frame to frame let go of what they held. A
+        /// level's UICamera stayed in visibleCams on the map (no isVisible asked there), and through its parent
+        /// the level's whole Level_UI, 727 objects with their text meshes and glyphs: the heap left after each
+        /// unload grew 61 -> 106 MB over the twenty-fifth run, the textures squeezed to 60-80 MB.
+        /// </summary>
+        public static void ForgetScene()
+        {
+            visibleCams.Clear();
+            visibleFrame = -1;
+            renderers.Clear(); canvases.Clear(); masks.Clear(); meshRenderers.Clear();
+            canvasOut.Clear(); meshOut.Clear(); callbackCams.Clear(); fxChain.Clear();
+            views.Clear();
+            foreach (var v in viewPool) { v.Camera = null; v.Target = null; v.Items.Clear(); }
+            foreach (var it in pool) { it.Texture = null; it.Material = null; it.Tex2 = null; }
+            WillRender.RemoveAll(b => b.Destroyed);
+            Current = null;
+        }
+
+        /// <summary>
         /// Renderer.isVisible: a camera this frame sees it (Unity: it was drawn by a camera). The run-and-gun
         /// levels' flying enemies switch their colliders on only while visible; every enabled renderer counted
         /// as visible, so they could be hit, and collided, off the screen.
@@ -368,6 +387,9 @@ namespace Cuphead360.Engine
             unbound = missing;
             return n;
         }
+
+        /// <summary>A clip's sprites read ahead (an animator's next states: NAnimator.ReadAheadNext).</summary>
+        internal static void AheadClipOf(ClipData clip) { if (ReadAhead != null) AheadClip(clip); }
 
         static void AheadClip(ClipData clip)
         {

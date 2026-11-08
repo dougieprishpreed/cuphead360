@@ -13,5 +13,11 @@
       <Type Name="System.Collections.Generic.List`1[[System.String,System.Private.CoreLib]]" Dynamic="Required All" />
       <Type Name="System.Collections.Generic.List`1[[System.Int64,System.Private.CoreLib]]" Dynamic="Required All" />
     </Assembly>
+    <!-- Rewired's control mapper reads Selectable.m_GroupsAllowInteraction by name
+         (ReflectionTools.GetPrivateField, which the patcher widens to public members:
+         publicize made the field public, and the lookup came back null). -->
+    <Assembly Name="UnityEngine.UI">
+      <Type Name="UnityEngine.UI.Selectable" Dynamic="Required All" />
+    </Assembly>
   </Application>
 </Directives>

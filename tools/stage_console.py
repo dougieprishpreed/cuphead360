@@ -144,6 +144,50 @@ def write_packs(name, entries, workers):
     return files
 
 
+def ogg_info(path):
+    """(channels, rate, frames) of an Ogg Vorbis file: its identification header's channels and rate, and the
+    granule position of its last page (what stb_vorbis_stream_length_in_samples reads), or None."""
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        head = f.read(512)
+        f.seek(max(0, size - 65536))
+        tail = f.read()
+    if head[:4] != b"OggS":
+        return None
+    body = 27 + head[26]
+    if head[body:body + 7] != b"\x01vorbis":
+        return None
+    channels, rate = head[body + 11], struct.unpack_from("<I", head, body + 12)[0]
+    frames, i = None, tail.rfind(b"OggS")
+    while i >= 0:
+        if i + 14 <= len(tail) and tail[i + 4] == 0:
+            g = struct.unpack_from("<q", tail, i + 6)[0]
+            if g >= 0:
+                frames = g
+                break
+        i = tail.rfind(b"OggS", 0, i)
+    return (channels, rate, frames) if frames is not None and frames < 2 ** 32 else None
+
+
+def write_audio_info(entries):
+    """<PACKS>/AUDIOINFO.BIN: each clip's channels, rate and frames by key hash ("CHAI", count, then hi, lo,
+    channels, rate, frames, sorted): the console opens a large clip without reading it first (ch360_ogg.c)."""
+    rows = []
+    for key, path, _ in entries:
+        info = ogg_info(path)
+        if info:
+            h = fnv64(key)
+            rows.append((h >> 32, h & 0xFFFFFFFF) + info)
+    rows.sort()
+    data = b"CHAI" + struct.pack("<I", len(rows)) + b"".join(struct.pack("<5I", *r) for r in rows)
+    out = os.path.join(PACKS, "AUDIOINFO.BIN")
+    if not (os.path.exists(out) and open(out, "rb").read() == data):
+        with open(out, "wb") as f:
+            f.write(data)
+    print("audio info: %d of %d clips" % (len(rows), len(entries)), flush=True)
+    return "AUDIOINFO.BIN"
+
+
 def entries_of(folder, ext, compress):
     out = []
     if os.path.isdir(folder):
@@ -202,9 +246,10 @@ def main():
     ctex = entries_of(os.path.join(a.data, "ctex"), ".ctx", True) + entries_of(os.path.join(a.data, "ctexc"), ".ctx", True)
     if os.path.exists(os.path.join(a.data, "ctexc", "ctexmap.bin")):
         ctex.append(("ctexmap", os.path.join(a.data, "ctexc", "ctexmap.bin"), True))
-    packs = write_packs("CTEX", ctex, a.workers) + write_packs("AUDIO", entries_of(os.path.join(a.data, "audio"), ".ogg", False), 1)
+    audio = entries_of(os.path.join(a.data, "audio"), ".ogg", False)
+    packs = write_packs("CTEX", ctex, a.workers) + write_packs("AUDIO", audio, 1)
     plans = {"objects": plan(os.path.join(a.data, "objects"), (".chob", ".bin")),
-             "": [(os.path.join(PACKS, f), f) for f in packs]}
+             "": [(os.path.join(PACKS, f), f) for f in packs + [write_audio_info(audio)]]}
     # The old layouts' textures and clips (staged names, loose files), and packs not written this time.
     removed = 0
     for sub in ("ctex", "audio"):

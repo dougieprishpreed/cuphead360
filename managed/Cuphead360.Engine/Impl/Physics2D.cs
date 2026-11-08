@@ -117,6 +117,9 @@ namespace Cuphead360.Engine
             }
         }
 
+        /// <summary>AssetUnload's pass: the last query's candidates go (they would keep their scene's objects).</summary>
+        public static void ForgetScene() => scratch.Clear();
+
         /// <summary>The colliders whose world box may meet [xMin, xMax] in x, in creation order (a list reused by the next call).</summary>
         public static List<NCollider2D> Candidates(float xMin, float xMax)
         {
@@ -312,8 +315,7 @@ namespace Cuphead360.Engine
                     {
                         if (localPiecesVersion != Version || localPieces == null)
                         {
-                            localPieces = new List<Vector2[]>();
-                            foreach (var path in Paths) localPieces.AddRange(Geometry.ConvexPieces(path));
+                            localPieces = Geometry.ConvexPiecesOf(Paths);
                             localPiecesVersion = Version;
                             World.Clear();
                         }
@@ -455,6 +457,89 @@ namespace Cuphead360.Engine
             }
             result.Add(p.ToArray());
             return result;
+        }
+
+        /// <summary>
+        /// A polygon collider's paths as convex pieces, a path inside an odd number of others a hole (Unity's
+        /// rule): each hole is bridged into the path around it (its rightmost point to an outer point it sees),
+        /// then the joined outline is cut as one. The DLC island's map is a rectangle with the walkable ground
+        /// cut out of it: every path solid, Cuphead started inside the rectangle and was pushed out of its top
+        /// edge, off the screen (the twenty-fifth run).
+        /// </summary>
+        public static List<Vector2[]> ConvexPiecesOf(List<Vector2[]> paths)
+        {
+            var result = new List<Vector2[]>();
+            int n = paths.Count;
+            if (n == 1) { result.AddRange(ConvexPieces(paths[0])); return result; }
+            var depth = new int[n];
+            for (int i = 0; i < n; i++)
+                for (int j = 0; j < n; j++)
+                    if (i != j && paths[i].Length > 0 && paths[j].Length >= 3 && Contains(paths[j], paths[i][0])) depth[i]++;
+            for (int s = 0; s < n; s++)
+            {
+                if (paths[s].Length < 3 || (depth[s] & 1) != 0) { if (paths[s].Length > 0 && paths[s].Length < 3) result.Add(paths[s]); continue; }
+                var outer = new List<Vector2>(Ccw(paths[s]));
+                var holes = new List<Vector2[]>();
+                for (int h = 0; h < n; h++)
+                    if (depth[h] == depth[s] + 1 && paths[h].Length >= 3 && Contains(paths[s], paths[h][0]))
+                    {
+                        var cw = (Vector2[])Ccw(paths[h]).Clone();
+                        Array.Reverse(cw);
+                        holes.Add(cw);
+                    }
+                // Rightmost holes first, so later bridges can't cross earlier ones' channels from behind.
+                holes.Sort((a, b) => MaxX(b).CompareTo(MaxX(a)));
+                foreach (var hole in holes) Bridge(outer, hole);
+                result.AddRange(ConvexPieces(outer.ToArray()));
+            }
+            return result;
+        }
+
+        static float MaxX(Vector2[] p) { float m = float.MinValue; foreach (var v in p) m = Math.Max(m, v.x); return m; }
+
+        static bool Contains(Vector2[] poly, Vector2 p)
+        {
+            bool c = false;
+            for (int i = 0, j = poly.Length - 1; i < poly.Length; j = i++)
+                if ((poly[i].y > p.y) != (poly[j].y > p.y) && p.x < (poly[j].x - poly[i].x) * (p.y - poly[i].y) / (poly[j].y - poly[i].y) + poly[i].x) c = !c;
+            return c;
+        }
+
+        /// <summary>Joins a clockwise hole to the counter-clockwise outline: its rightmost point to the nearest outline point the segment between them reaches without crossing an edge.</summary>
+        static void Bridge(List<Vector2> outer, Vector2[] hole)
+        {
+            int m = 0;
+            for (int i = 1; i < hole.Length; i++) if (hole[i].x > hole[m].x || (hole[i].x == hole[m].x && hole[i].y < hole[m].y)) m = i;
+            var M = hole[m];
+            int best = -1; float bestD = float.MaxValue;
+            for (int i = 0; i < outer.Count; i++)
+            {
+                var V = outer[i];
+                float d = (V - M).sqrMagnitude;
+                if (d >= bestD || V == M) continue;
+                if (Crosses(M, V, outer) || Crosses(M, V, hole)) continue;
+                best = i; bestD = d;
+            }
+            if (best < 0) return;   // no outline point in sight: the hole is left out (solid)
+            var joined = new List<Vector2>(outer.Count + hole.Length + 2);
+            for (int i = 0; i <= best; i++) joined.Add(outer[i]);
+            for (int k = 0; k <= hole.Length; k++) joined.Add(hole[(m + k) % hole.Length]);
+            for (int i = best; i < outer.Count; i++) joined.Add(outer[i]);
+            outer.Clear();
+            outer.AddRange(joined);
+        }
+
+        /// <summary>Whether segment a-b properly crosses an edge of the closed outline (edges meeting a or b don't count).</summary>
+        static bool Crosses(Vector2 a, Vector2 b, IList<Vector2> poly)
+        {
+            for (int i = 0, j = poly.Count - 1; i < poly.Count; j = i++)
+            {
+                Vector2 c = poly[j], d = poly[i];
+                if (c == a || c == b || d == a || d == b) continue;
+                float d1 = Cross(b - a, c - a), d2 = Cross(b - a, d - a), d3 = Cross(d - c, a - c), d4 = Cross(d - c, b - c);
+                if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+            }
+            return false;
         }
 
         static bool IsConvex(List<Vector2> p)
@@ -749,6 +834,17 @@ namespace Cuphead360.Engine
         // The step's live colliders, for Resolve and then the contact pass (each read it before the
         // callbacks run): a new list per step, twice.
         static readonly List<NCollider2D> stepColliders = new List<NCollider2D>();
+
+        /// <summary>
+        /// AssetUnload's pass: the scratch lists kept from step to step let go of the last scene's colliders,
+        /// bodies and hits (a collider's record holds its GameObject, and that its whole hierarchy).
+        /// </summary>
+        public static void ForgetScene()
+        {
+            stepColliders.Clear(); castHits.Clear(); overlapHits.Clear(); resolveMine.Clear(); sendList.Clear();
+            Array.Clear(bodiesBuf, 0, bodiesBuf.Length);
+            QueryIndex.ForgetScene();
+        }
 
         // ---------------------------------------------------------------- filters
 
@@ -1115,6 +1211,8 @@ namespace Cuphead360.Engine
                                 {
                                     var sep = Geometry.Separation(push == Vector2.zero ? sa : MovedInto(resolveMoved, resolveByCount, sa, push), sb);
                                     if (sep.sqrMagnitude > 1e-12f) push += sep;
+                                    if (TraceContact != null && Traced(c) && sep.sqrMagnitude > 1e-12f)
+                                        Log.Line($"TRACE resolve frame {Clock.FrameCount}: {Describe(c)} pushed ({sep.x:0.###},{sep.y:0.###}) out of {Describe(o)}");
                                 }
                         }
                     }

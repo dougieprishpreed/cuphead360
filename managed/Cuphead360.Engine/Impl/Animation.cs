@@ -726,6 +726,38 @@ namespace Cuphead360.Engine
             return mo.BlendClips[th.Length - 1];
         }
 
+        int[] aheadStates;
+
+        /// <summary>
+        /// When a layer's state changes, the clips of the states it can go to next are read ahead (the host
+        /// reads their sprite pages if memory allows). Only clips already playing were read ahead: in the
+        /// twenty-fifth run most of the fights' texture loads came on demand (the Frogs 162 of 194), an
+        /// attack's first frame waiting for its pages.
+        /// </summary>
+        internal void ReadAheadNext()
+        {
+            if (RenderList.ReadAhead == null || Data == null || Layers.Length == 0) return;
+            if (aheadStates == null || aheadStates.Length != Layers.Length) { aheadStates = new int[Layers.Length]; for (int i = 0; i < aheadStates.Length; i++) aheadStates[i] = -1; }
+            for (int li = 0; li < Layers.Length && li < Data.Layers.Length; li++)
+            {
+                int src = Data.Layers[li].Source >= 0 ? Data.Layers[li].Source : li;
+                var cur = Layers[src].Current;
+                if (cur == null || cur.State == aheadStates[li]) continue;
+                aheadStates[li] = cur.State;
+                var s = StateAt(src, cur.State);
+                if (s == null) continue;
+                var m = Data.Machines[Data.Layers[src].Machine];
+                foreach (var tr in s.Transitions)
+                {
+                    if (tr.Destination < 30000) { RenderList.AheadClipOf(ClipAt(li, StateAt(src, tr.Destination))); continue; }
+                    int si = tr.Destination - 30000;
+                    if (si < 0 || si >= m.Selectors.Length) continue;
+                    foreach (var st in m.Selectors[si].Transitions)
+                        if (st.Destination < 30000) RenderList.AheadClipOf(ClipAt(li, StateAt(src, st.Destination)));
+                }
+            }
+        }
+
         ClipData ClipAt(int layer, ControllerData.State s)
         {
             int ci = ClipIndex(layer, s);
@@ -1600,6 +1632,7 @@ namespace Cuphead360.Engine
                 if (a.UpdateMode == AnimatorUpdateMode.AnimatePhysics) continue;
                 float dt = a.UpdateMode == AnimatorUpdateMode.UnscaledTime ? Clock.UnscaledDeltaTime : Clock.DeltaTime;
                 a.Update(dt);
+                if (!a.Destroyed) a.ReadAheadNext();
             }
             System.Buffers.ArrayPool<NAnimator>.Shared.Return(batch, true);
         }
@@ -1613,7 +1646,10 @@ namespace Cuphead360.Engine
             {
                 var a = batch[i];
                 if (!a.Destroyed && a.Enabled && a.GameObject != null && a.GameObject.ActiveInHierarchy && a.UpdateMode == AnimatorUpdateMode.AnimatePhysics)
+                {
                     a.Update(Clock.FixedDeltaTime);
+                    if (!a.Destroyed) a.ReadAheadNext();
+                }
             }
             System.Buffers.ArrayPool<NAnimator>.Shared.Return(batch, true);
         }

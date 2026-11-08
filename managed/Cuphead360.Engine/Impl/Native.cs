@@ -211,6 +211,7 @@ namespace Cuphead360.Engine
             if (traceRelease != null && rec.Name != null && rec.Name.Contains(traceRelease))
                 Log.Line($"TRACE release {rec.Name} ({rec.GetType().Name}) frame {Clock.FrameCount}\n{Environment.StackTrace}");
             rec.Destroyed = true;
+            if (rec.Managed is UnityEngine.UI.Text text) { try { TextGenState.Forget(text); } catch (Exception) { } }
             rec.Managed.m_CachedPtr = IntPtr.Zero;
             NativeMemory.Free((void*)rec.Block);
             rec.Block = IntPtr.Zero;
