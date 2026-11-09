@@ -36,6 +36,8 @@ namespace Cuphead360.Engine
     public sealed class NGameObject : NObject
     {
         public readonly List<NComponent> Components = new List<NComponent>();
+        /// <summary>Changes as components come and go (what physics keeps about its listeners is worked out again).</summary>
+        public int ComponentsVersion;
         public NTransform Transform;
         /// <summary>A collider here was indexed for physics queries: its transform's changes move it there.</summary>
         public bool HasColliders;
@@ -141,6 +143,23 @@ namespace Cuphead360.Engine
                     worldValid = true;
                 }
                 return world;
+            }
+        }
+
+        // The inverse of the world matrix, kept while that holds (WorldVersion): a child's world position set (each
+        // run-and-gun parallax layer, every frame), InverseTransformPoint and the like inverted the whole 4x4 at each
+        // ask, float work that is slow on the console (each float load and store a stall). The same arithmetic: the
+        // same bits as before.
+        Matrix4x4 inverse;
+        int inverseVersion = -1;
+
+        public Matrix4x4 WorldToLocal
+        {
+            get
+            {
+                var m = LocalToWorld;
+                if (inverseVersion != WorldVersion) { MathX.Invert(m, out inverse); inverseVersion = WorldVersion; }
+                return inverse;
             }
         }
 

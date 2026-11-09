@@ -41,6 +41,18 @@ namespace Cuphead360.Engine
         // used longest ago are let go and parsed again from the file if asked
         // for (trees set at run time are kept).
         string[] table;               // the file's strings, kept to parse again
+        // A small object read from the drive keeps its bytes for the next parse (SmallAgainBytes, up to
+        // SmallAgainBudget in all, the first read first: the boot's, title's and slot select's objects, the ones read again
+        // most): the slot select's choice read fifteen audio mixer snapshots of under 100 bytes again, a block
+        // read each from the USB, a 238 ms frame, once the console held no file whole.
+        byte[] again;
+        static long againBytes;
+        /// <summary>
+        /// The bytes kept for small objects, at most (CH360_SMALL_AGAIN_KB, default 2 MB: the boot's, title's and slot
+        /// select's come to 1.9 MB; 4 MB took the first map's too, the heap 4 MB higher after every load).
+        /// </summary>
+        public static long SmallAgainBudget = long.TryParse(Environment.GetEnvironmentVariable("CH360_SMALL_AGAIN_KB"), out var sa) ? sa << 10 : 2L << 20;
+        const int SmallAgainBytes = 4096;
         long lastUse, cost;
         static long clock, treeBytes;
         static readonly List<ChobObject> cached = new List<ChobObject>();
@@ -58,7 +70,8 @@ namespace Cuphead360.Engine
                     if (table != null) TreesReparsed++;
                     var buf = Data;
                     int at = Offset, holeAt = -1;
-                    if (buf == null)
+                    if (buf == null && again != null) { buf = again; at = 0; }
+                    else if (buf == null)
                     {
                         // From the drive, through the block cache: the object's bytes, less its font data.
                         int pre = HoleLen > 0 ? (int)(HoleAt - Offset) : Length, post = HoleLen > 0 ? Length - pre - HoleLen : 0;
@@ -72,6 +85,11 @@ namespace Cuphead360.Engine
                             Console.WriteLine($"READ {File?.Name} {Offset} {Length} {HoleLen} {Type} {PathId} frame {Clock.FrameCount}{(table != null ? " again" : "")} blocks {ChobFile.BlockReads - blocks0}");
                         at = 0;
                         if (HoleLen > 0) holeAt = pre;
+                        else if (buf.Length <= SmallAgainBytes && againBytes + buf.Length <= SmallAgainBudget && File?.SourcePath != null)
+                        {
+                            again = buf;
+                            againBytes += buf.Length;
+                        }
                     }
                     var rd = new ChobFile.Reader(buf, at, Strings)
                     {
@@ -97,6 +115,14 @@ namespace Cuphead360.Engine
                 return tree;
             }
             set { tree = value; Data = null; Strings = null; DiskPath = null; table = null; }
+        }
+
+        /// <summary>AssetUnload's pass, after the files no longer read went: the small objects' kept bytes still held.</summary>
+        internal static void RecountAgain(IEnumerable<ChobFile> live)
+        {
+            long n = 0;
+            foreach (var f in live) foreach (var o in f.Objects.Values) if (o.again != null) n += o.again.Length;
+            againBytes = n;
         }
 
         /// <summary>AssetUnload's pass: every parsed tree read from a file is let go (they are parsed again when asked for).</summary>
@@ -175,7 +201,7 @@ namespace Cuphead360.Engine
                 if (data != null) held += data.Length;
             }
             // An object's index record: ~84 bytes on the console's 32-bit heap, ~28 more in its file's map and list.
-            var sb = new StringBuilder($"TREES file bytes held {held >> 20} MB; {nfiles} files index {indexed} objects (~{indexed * 112 >> 20} MB), "
+            var sb = new StringBuilder($"TREES file bytes held {held >> 20} MB, small objects' bytes kept {againBytes >> 10} KB; {nfiles} files index {indexed} objects (~{indexed * 112 >> 20} MB), "
                 + $"string tables {tables.Count} (~{(tableChars * 2 + tables.Count * 0L) >> 20} MB of characters);");
             long total = 0;
             foreach (var kv in by) total += kv.Value.bytes;

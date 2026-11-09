@@ -224,6 +224,7 @@ namespace Cuphead360.Engine
                 if (w.Target is ChobFile f) files[key] = f;
                 else gone++;
             }
+            ChobObject.RecountAgain(files.Values);
             return gone;
         }
 
@@ -556,6 +557,7 @@ namespace Cuphead360.Engine
             rec.Enabled = Tree.Bool(co.Tree, "m_Enabled", true);
             rec.Data = co;
             go.Components.Add(rec);
+            go.ComponentsVersion++;
             return rec;
         }
 

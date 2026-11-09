@@ -252,6 +252,15 @@ To compare runs scene by scene, keep each run's log in its own folder
 (`work\console\<run>\cuphead360.txt`) and run
 `python tools\compare_runs.py <run> <run> ...`.
 
+To find what will be slow on the console before playing it there, run
+`python tools\level_costs.py` after building the PC player. It plays every
+level and map on the PC with cost counters (the engine's phases, physics
+pairs and casts, what each frame draws, the scripts' time) and writes
+`work\costs\report.txt`: per level an estimate of the console's frame time,
+its worst stretch and what leads it, then the causes shared by several
+levels. The estimate is calibrated from a console run's log
+(`--console <run>`), so it is only as current as that run.
+
 By default the game times its own phases and logs each scene's frame times,
 hitches and texture counts. Two empty files next to `default.xex` change
 that: `quiet.txt` turns the phase timing off too (only frame times and

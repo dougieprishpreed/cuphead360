@@ -288,6 +288,9 @@ namespace Cuphead360.Player
                     Tree(g.Transform, "    | ");
                     foreach (var c in g.Components)
                     {
+                        if (c is NSpriteRenderer dsr) { Console.WriteLine($"    SpriteRenderer enabled={dsr.Enabled} sprite={(dsr.Sprite != null ? dsr.Sprite.name : "null")} visible={RenderList.IsVisible(dsr)}"); continue; }
+                        if (c is NRigidbody2D drb) { Console.WriteLine($"    Rigidbody2D {drb.BodyType} simulated={drb.Simulated} gravity={drb.GravityScale} constraints={drb.Constraints} velocity={drb.Velocity}"); continue; }
+                        if (c is NCollider2D dc) { Console.WriteLine($"    {dc.Kind} collider enabled={dc.Enabled} trigger={dc.IsTrigger} live={dc.Live}"); continue; }
                         if (!(c is NBehaviour b)) { Console.WriteLine("    " + c.Managed.GetType().Name); continue; }
                         Console.WriteLine("    " + b.Managed.GetType().FullName + (b.Enabled ? "" : " (disabled)"));
                         foreach (var fi in Serialization.Fields(b.Managed.GetType()))

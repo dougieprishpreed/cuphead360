@@ -134,8 +134,12 @@ namespace Cuphead360.Engine
             wide.RemoveAll(c => c.Destroyed);
         }
 
-        /// <summary>The colliders whose world box may meet [xMin, xMax] in x, in creation order (a list reused by the next call).</summary>
-        public static List<NCollider2D> Candidates(float xMin, float xMax)
+        /// <summary>
+        /// The colliders whose world box may meet the box in x, and whose box as last placed meets it in y, in creation
+        /// order (a list reused by the next call). The y test leaves out what the x order can't: Treetop Trouble's
+        /// climb stacks its floors and walls in one x range, every cast there looked at 40-60 of them.
+        /// </summary>
+        public static List<NCollider2D> Candidates(float xMin, float xMax, float yMin, float yMax)
         {
             Update();
             scratch.Clear();
@@ -147,9 +151,10 @@ namespace Cuphead360.Engine
             {
                 var c = sorted[i];
                 if (c.IndexMinX > xMax) break;
+                if (c.AABB.yMin > yMax || c.AABB.yMax < yMin) continue;
                 scratch.Add(c);
             }
-            scratch.AddRange(wide);
+            foreach (var c in wide) if (!(c.AABB.yMin > yMax || c.AABB.yMax < yMin)) scratch.Add(c);
             if (scratch.Count > 1) scratch.Sort((x, y) => x.Seq.CompareTo(y.Seq));
             return scratch;
         }
@@ -173,6 +178,9 @@ namespace Cuphead360.Engine
         // The physics queries' index (QueryIndex).
         public int Seq;
         public bool IndexDirty, InIndex, IndexWide;
+        // The contact messages its objects hear (Physics.ListenersOf), kept while their components and body stay.
+        internal int ListenFlags = -1, ListenGoV, ListenRbV;
+        internal NRigidbody2D ListenRb;
         public float IndexMinX;
         public readonly List<Shape> World = new List<Shape>();
         public Rect AABB;
@@ -855,7 +863,7 @@ namespace Cuphead360.Engine
         /// </summary>
         public static void ForgetScene()
         {
-            stepColliders.Clear(); castHits.Clear(); overlapHits.Clear(); resolveMine.Clear(); sendList.Clear();
+            stepColliders.Clear(); castHits.Clear(); overlapHits.Clear(); resolveMine.Clear(); resolveSolid.Clear(); solidBody.Clear(); sendList.Clear();
             Array.Clear(bodiesBuf, 0, bodiesBuf.Length);
             QueryIndex.ForgetScene();
         }
@@ -909,7 +917,8 @@ namespace Cuphead360.Engine
                 origin.x + castBounds.xMax + Math.Max(0, dir.x * distance), origin.y + castBounds.yMax + Math.Max(0, dir.y * distance));
             // Only the colliders whose x extent meets the sweep's (QueryIndex), in creation order as the
             // walk of all was; then the cheap filters before Live's walks up the hierarchy.
-            var all = QueryIndex.Candidates(sweep.xMin, sweep.xMax);
+            var all = QueryIndex.Candidates(sweep.xMin, sweep.xMax, sweep.yMin, sweep.yMax);
+            if (StatsEvery > 0) { statCasts++; statCastCands += all.Count; }
             for (int ci = 0; ci < all.Count; ci++)
             {
                 var c = all[ci];
@@ -1000,7 +1009,8 @@ namespace Cuphead360.Engine
             var r = overlapHits;
             r.Clear();
             var b = world.Bounds();
-            var all = QueryIndex.Candidates(b.xMin, b.xMax);
+            var all = QueryIndex.Candidates(b.xMin, b.xMax, b.yMin, b.yMax);
+            if (StatsEvery > 0) { statOverlaps++; statOverlapCands += all.Count; }
             for (int ci = 0; ci < all.Count; ci++)
             {
                 var c = all[ci];
@@ -1099,12 +1109,17 @@ namespace Cuphead360.Engine
             if (TraceContact != null)
                 foreach (var c in cols) if (Traced(c)) Log.Line($"TRACE contact frame {Clock.FrameCount} collider {Describe(c)}");
             var bodyOf = BodiesOf(cols);
+            var listen = ListenersOf(cols, bodyOf);
             var now = spareContacts ?? new Dictionary<(NCollider2D, NCollider2D), Contact>();
             spareContacts = null;
             now.Clear();
             // Sort and sweep on the boxes' x ranges: only pairs whose ranges meet are looked at (every pair,
             // each step, was most of the run-and-gun levels' physics). The pairs found are put back in index
-            // order, so the contacts and their callbacks come in the same order as from the full loop.
+            // order, so the contacts and their callbacks come in the same order as from the full loop. A pair
+            // is kept only when its boxes meet in y too and a side listens for contact messages: Treetop
+            // Trouble's climb stacks its colliders in x (2,400 pairs a step to sort for 245 colliders), and its
+            // floors, walls and ceilings are trigger boxes with no script, tested against each other and every
+            // log (the game asks for no IsTouching, so a contact nobody hears changes nothing).
             int nc = cols.Count;
             if (sweepOrder.Length < nc) { sweepOrder = new int[nc * 2]; sweepMin = new float[nc * 2]; }
             for (int i = 0; i < nc; i++) { sweepOrder[i] = i; sweepMin[i] = cols[i].AABB.xMin; }
@@ -1113,14 +1128,17 @@ namespace Cuphead360.Engine
             for (int oi = 0; oi < nc; oi++)
             {
                 int i = sweepOrder[oi];
-                float maxX = cols[i].AABB.xMax;
+                var box = cols[i].AABB;
+                float maxX = box.xMax;
                 for (int oj = oi + 1; oj < nc && sweepMin[oj] <= maxX; oj++)
                 {
                     int j = sweepOrder[oj];
+                    if ((listen[i] | listen[j]) == 0 || !box.Overlaps(cols[j].AABB)) continue;
                     sweepPairs.Add(i < j ? ((long)i << 32) | (uint)j : ((long)j << 32) | (uint)i);
                 }
             }
             sweepPairs.Sort();
+            if (StatsEvery > 0) { statSteps++; statCols += nc; statPairs += sweepPairs.Count; }
             foreach (long pair in sweepPairs)
             {
                 int i = (int)(pair >> 32), j = (int)(pair & 0xFFFFFFFF);
@@ -1137,10 +1155,11 @@ namespace Cuphead360.Engine
                         bool bFull = rb != null && rb.BodyType == RigidbodyType2D.Kinematic && rb.UseFullKinematicContacts;
                         if (!aDyn && !bDyn && !aFull && !bFull) continue;
                     }
+                    if (((listen[i] | listen[j]) & (trigger ? 1 : 2)) == 0) continue;
                     if (!LayersCollide(a.GameObject.Layer, b.GameObject.Layer)) continue;
-                    if (!a.AABB.Overlaps(b.AABB)) continue;
                     if (Ignored(a, b)) continue;
                     bool touch = false;
+                    if (StatsEvery > 0) { statTests++; var pk = StatName(a) + " / " + StatName(b); statBy[pk] = statBy.TryGetValue(pk, out var na) ? na + 1 : 1; }
                     foreach (var sa in a.World) { foreach (var sb in b.World) if (Geometry.Overlap(sa, sb)) { touch = true; break; } if (touch) break; }
                     if (TraceContact != null && (Traced(a) || Traced(b)))
                         Log.Line($"TRACE contact frame {Clock.FrameCount} {(touch ? "touch" : "boxes meet, shapes don't")}: {Describe(a)} / {Describe(b)}");
@@ -1174,9 +1193,67 @@ namespace Cuphead360.Engine
             finally { simulating--; }
             // Kept for the next step; a nested step's last set is the outer one's current set.
             if (simulating == 0) { old.Clear(); spareContacts = old; }
+            if (StatsEvery > 0) { statTouch += now.Count; if (Clock.FrameCount >= statNext) Stats(); }
+        }
+
+        // CH360_PHYS_STATS=N: every N frames, the contact pass's counts per step and the objects in the most shape tests.
+        static readonly int StatsEvery = int.TryParse(Environment.GetEnvironmentVariable("CH360_PHYS_STATS"), out var se) ? se : 0;
+        static long statSteps, statCols, statPairs, statTests, statTouch, statResolve, statBodies, statCasts, statCastCands, statOverlaps, statOverlapCands;
+        static int statNext, statFrom;
+        static readonly Dictionary<string, int> statBy = new Dictionary<string, int>();
+        static string StatName(NCollider2D c) => (c.GameObject.Transform.Parent != null ? c.GameObject.Transform.Parent.GameObject.Name + "/" : "") + c.GameObject.Name + "(" + c.Kind + " " + c.World.Count + (c.IsTrigger ? " trig" : "") + (c.Rigidbody != null ? " " + c.Rigidbody.BodyType : "") + ")";
+        static void Stats()
+        {
+            int frames = Math.Max(1, Clock.FrameCount - statFrom);
+            statFrom = Clock.FrameCount;
+            statNext = Clock.FrameCount + StatsEvery;
+            if (statSteps == 0) { statCasts = statCastCands = statOverlaps = statOverlapCands = 0; return; }
+            var top = new List<KeyValuePair<string, int>>(statBy);
+            top.Sort((x, y) => y.Value.CompareTo(x.Value));
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < Math.Min(30, top.Count); i++) sb.Append(i == 0 ? "" : ", ").Append(top[i].Key).Append(' ').Append((top[i].Value / (double)statSteps).ToString("0.#"));
+            Log.Line($"PHYS frame {Clock.FrameCount}: per step {statCols / statSteps} colliders, {statPairs / statSteps} sweep pairs, {statTests / statSteps} shape tests, {statTouch / statSteps} contacts, {statBodies / statSteps} dynamic bodies, {statResolve / statSteps} resolve tests; per frame {statCasts / frames} casts looking at {statCastCands / frames} colliders, {statOverlaps / frames} overlaps looking at {statOverlapCands / frames}; most tested: {sb}");
+            statSteps = statCols = statPairs = statTests = statTouch = statResolve = statBodies = statCasts = statCastCands = statOverlaps = statOverlapCands = 0;
+            statBy.Clear();
         }
 
         static NRigidbody2D[] bodiesBuf = new NRigidbody2D[64];
+        static byte[] listenBuf = new byte[64];
+
+        /// <summary>
+        /// The contact messages each collider's objects hear (MessageSet.Contacts of the behaviours on its GameObject
+        /// and its rigidbody's, where Deliver sends them), in a buffer kept from call to call.
+        /// </summary>
+        static byte[] ListenersOf(List<NCollider2D> cols, NRigidbody2D[] bodyOf)
+        {
+            if (listenBuf.Length < cols.Count) listenBuf = new byte[Math.Max(cols.Count, listenBuf.Length * 2)];
+            for (int i = 0; i < cols.Count; i++)
+            {
+                // Worked out again only when a component came or went on its object or its body's, or its body
+                // changed (each step for every collider, it was 5% of the physics on the PC).
+                var c = cols[i];
+                var go = c.GameObject;
+                var rb = bodyOf[i];
+                var rbGo = rb?.GameObject;
+                if (c.ListenFlags < 0 || c.ListenGoV != go.ComponentsVersion || c.ListenRb != rb || (rbGo != null && c.ListenRbV != rbGo.ComponentsVersion))
+                {
+                    int f = Hears(go);
+                    if (rbGo != null && rbGo != go) f |= Hears(rbGo);
+                    c.ListenFlags = f; c.ListenGoV = go.ComponentsVersion; c.ListenRb = rb; c.ListenRbV = rbGo?.ComponentsVersion ?? 0;
+                }
+                listenBuf[i] = (byte)c.ListenFlags;
+            }
+            return listenBuf;
+        }
+
+        static int Hears(NGameObject go)
+        {
+            int f = 0;
+            var comps = go.Components;
+            for (int k = 0; k < comps.Count; k++)
+                if (comps[k] is NBehaviour b && !b.Destroyed && b.Messages != null) f |= b.Messages.Contacts;
+            return f;
+        }
 
         /// <summary>The rigidbody of each collider (NCollider2D.Rigidbody), in a buffer kept from call to call.</summary>
         static NRigidbody2D[] BodiesOf(List<NCollider2D> cols)
@@ -1199,12 +1276,26 @@ namespace Cuphead360.Engine
             List<NCollider2D> all = null;
             NRigidbody2D[] bodyOf = null;
             var mine = resolveMine;
+            var solid = resolveSolid;
             foreach (var b in bodies)
             {
                 if (b.BodyType != RigidbodyType2D.Dynamic || !b.Simulated || !b.Enabled || b.GameObject == null || !b.GameObject.ActiveInHierarchy) continue;
-                if (all == null) { all = LiveColliders(stepColliders); bodyOf = BodiesOf(all); }
+                // A body frozen in both axes is never moved by the solver (Treetop Trouble's log floors and ceilings:
+                // dynamic, FreezeAll, overlapping the logs and the woodpeckers, separated four times a step).
+                bool freezeX = (b.Constraints & RigidbodyConstraints2D.FreezePositionX) != 0, freezeY = (b.Constraints & RigidbodyConstraints2D.FreezePositionY) != 0;
+                if (freezeX && freezeY) continue;
+                if (all == null)
+                {
+                    // The colliders that block, once a step: most of a run-and-gun level's are triggers (its floors,
+                    // walls and ceilings), which each body's collider walked every iteration.
+                    all = LiveColliders(stepColliders); bodyOf = BodiesOf(all);
+                    solid.Clear(); solidBody.Clear();
+                    for (int k = 0; k < all.Count; k++)
+                        if (!all[k].IsTrigger) { solid.Add(all[k]); solidBody.Add(bodyOf[k]); }
+                }
+                if (StatsEvery > 0) statBodies++;
                 mine.Clear();
-                for (int k = 0; k < all.Count; k++) if (!all[k].IsTrigger && bodyOf[k] == b) mine.Add(all[k]);
+                for (int k = 0; k < solid.Count; k++) if (solidBody[k] == b) mine.Add(solid[k]);
                 if (mine.Count == 0) continue;
                 var t = b.GameObject.Transform;
                 for (int iter = 0; iter < 4; iter++)
@@ -1213,13 +1304,14 @@ namespace Cuphead360.Engine
                     foreach (var c in mine)
                     {
                         c.Shapes();
-                        for (int k = 0; k < all.Count; k++)
+                        for (int k = 0; k < solid.Count; k++)
                         {
-                            var o = all[k];
-                            if (o.IsTrigger || bodyOf[k] == b || o.UsedByEffector) continue;
-                            if (!LayersCollide(c.GameObject.Layer, o.GameObject.Layer) || Ignored(c, o)) continue;
+                            var o = solid[k];
+                            if (solidBody[k] == b || o.UsedByEffector) continue;
                             o.Shapes();
+                            if (StatsEvery > 0) statResolve++;
                             if (!c.AABB.Overlaps(o.AABB)) continue;
+                            if (!LayersCollide(c.GameObject.Layer, o.GameObject.Layer) || Ignored(c, o)) continue;
                             foreach (var sa in c.World)
                                 foreach (var sb in o.World)
                                 {
@@ -1230,6 +1322,8 @@ namespace Cuphead360.Engine
                                 }
                         }
                     }
+                    if (freezeX) push.x = 0;
+                    if (freezeY) push.y = 0;
                     if (push.sqrMagnitude < 1e-12f) break;
                     var p = t.Position;
                     SetWorld(t, new Vector2(p.x, p.y) + push);
@@ -1238,25 +1332,32 @@ namespace Cuphead360.Engine
                     if (into < 0) b.Velocity -= n * into;
                 }
             }
-            mine.Clear();
+            mine.Clear(); solid.Clear(); solidBody.Clear();
         }
-        static readonly List<NCollider2D> resolveMine = new List<NCollider2D>();
+        static readonly List<NCollider2D> resolveMine = new List<NCollider2D>(), resolveSolid = new List<NCollider2D>();
+        static readonly List<NRigidbody2D> solidBody = new List<NRigidbody2D>();
 
         static void SetWorld(NTransform t, Vector2 p)
         {
             var z = t.Position.z;
             if (t.Parent == null) t.LocalPosition = new Vector3(p.x, p.y, z);
-            else { MathX.Invert(t.Parent.LocalToWorld, out var inv); t.LocalPosition = inv.MultiplyPoint3x4(new Vector3(p.x, p.y, z)); }
+            else t.LocalPosition = t.Parent.WorldToLocal.MultiplyPoint3x4(new Vector3(p.x, p.y, z));
             t.Invalidate();
         }
 
-        // CH360_TRACE_CONTACT=NAME: each step's pairs whose boxes meet, for colliders on objects whose name has NAME.
+        // CH360_TRACE_CONTACT=NAME: each step's pairs whose boxes meet, for colliders on objects whose name, or a parent's, has NAME.
         public static readonly string TraceContact = Environment.GetEnvironmentVariable("CH360_TRACE_CONTACT");
-        static bool Traced(NCollider2D c) => c.GameObject != null && c.GameObject.Name.Contains(TraceContact);
+        static bool Traced(NCollider2D c)
+        {
+            for (var t = c.GameObject?.Transform; t != null; t = t.Parent)
+                if (t.GameObject.Name.Contains(TraceContact)) return true;
+            return false;
+        }
         static string Describe(NCollider2D c)
         {
             var go = c.GameObject;
             var sb = new System.Text.StringBuilder();
+            if (go.Transform?.Parent != null) sb.Append(go.Transform.Parent.GameObject.Name).Append('/');
             sb.Append(go.Name).Append(" [").Append(go.Tag).Append(", layer ").Append(go.Layer).Append(c.IsTrigger ? ", trigger" : "").Append("]");
             foreach (var s in c.World)
             {
@@ -1616,7 +1717,7 @@ namespace Cuphead360.Engine
             var t = r.GameObject.Transform;
             var z = t.Position.z;
             if (t.Parent == null) t.LocalPosition = new Vector3(value.x, value.y, z);
-            else { MathX.Invert(t.Parent.LocalToWorld, out var inv); t.LocalPosition = inv.MultiplyPoint3x4(new Vector3(value.x, value.y, z)); }
+            else t.LocalPosition = t.Parent.WorldToLocal.MultiplyPoint3x4(new Vector3(value.x, value.y, z));
             t.Invalidate();
         }
         public static void UnityEngine_Rigidbody2D__MovePosition_Injected(Rigidbody2D self, ref Vector2 position) { var r = Rb(self); if (r != null) { r.MoveTo = position; Physics.Track(r); } }

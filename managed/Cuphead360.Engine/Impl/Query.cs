@@ -303,6 +303,7 @@ namespace Cuphead360.Engine
                     dc = Objects.Register(managed, Builtins.Create(managed.GetType()), go.Name);
                     dc.GameObject = go; dc.Enabled = sc.Enabled;
                     go.Components.Add(dc);
+                    go.ComponentsVersion++;
                 }
                 map[sc] = dc;
             }

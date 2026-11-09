@@ -298,7 +298,6 @@ namespace Cuphead360.Engine
         {
             if (r == null || !r.Enabled || r.GameObject == null || !r.GameObject.ActiveInHierarchy) return false;
             if (!(r is NSpriteRenderer sr)) return true;   // other renderers: no bounds worked out here
-            if (sr.Sprite == null) return false;
             if (visibleFrame != Clock.FrameCount)
             {
                 visibleFrame = Clock.FrameCount;
@@ -312,11 +311,21 @@ namespace Cuphead360.Engine
             return false;
         }
 
+        /// <remarks>
+        /// A renderer with no sprite has Unity's empty bounds at its transform (Renderer.bounds here too) and is seen
+        /// when that point is: Treetop Trouble's flying beetles draw a child sprite and switch their colliders on by
+        /// their own sprite-less renderer's isVisible, so they could be neither shot nor touched.
+        /// </remarks>
         static bool SpriteSeen(NCamera cam, in CamXform xf, NSpriteRenderer sr)
         {
-            if (!sr.Enabled || sr.Sprite == null) return false;
-            var info = Sprites.Of(sr.Sprite);
-            if (info == null || info.Vertices.Length == 0) return false;
+            if (!sr.Enabled) return false;
+            Vector4 b = default;
+            if (sr.Sprite != null)
+            {
+                var info = Sprites.Of(sr.Sprite);
+                if (info == null || info.Vertices.Length == 0) return false;
+                b = info.LocalBounds;
+            }
             var t = sr.GameObject.Transform;
             float depth = xf.Viewport(t.Position).z;
             if (depth < cam.Near || depth > cam.Far) return false;
@@ -325,7 +334,6 @@ namespace Cuphead360.Engine
             float hx = 0.5f * xf.Pixel.width, hy = 0.5f * xf.Pixel.height, fx = sr.FlipX ? -1f : 1f, fy = sr.FlipY ? -1f : 1f;
             float a00 = hx * pvm.m00 * fx, a01 = hx * pvm.m01 * fy, b0 = xf.Pixel.x + hx * (pvm.m03 + 1f);
             float a10 = hy * pvm.m10 * fx, a11 = hy * pvm.m11 * fy, b1 = xf.Pixel.y + hy * (pvm.m13 + 1f);
-            var b = info.LocalBounds;
             float cx = 0.5f * (b.x + b.z), cy = 0.5f * (b.y + b.w), ex = 0.5f * (b.z - b.x), ey = 0.5f * (b.w - b.y);
             float sx = a00 * cx + a01 * cy + b0, rx = Math.Abs(a00) * ex + Math.Abs(a01) * ey + 1f;
             float sy = a10 * cx + a11 * cy + b1, ry = Math.Abs(a10) * ex + Math.Abs(a11) * ey + 1f;
@@ -358,7 +366,8 @@ namespace Cuphead360.Engine
         /// Every sprite the active scene's objects show, or their animators' clips play, active or not, read
         /// ahead: the console's boot reads the logo's and the title's pages while the screen is still black
         /// (ConsoleHost's hold). The number of sprites asked for; unbound: those whose atlas isn't here, asked for
-        /// (Atlases.Touch, as a draw would: the DLC title's came only as it was revealed).
+        /// (Atlases.Touch, as a draw would: the DLC title's came only as it was revealed). The fonts its texts use are
+        /// read too (the slot select's came from the drive as its menu text appeared).
         /// </summary>
         public static int ReadAheadScene(out int unbound)
         {
@@ -384,6 +393,7 @@ namespace Cuphead360.Engine
                     else if (c is NAnimator a && a.Controller != null && ControllerData.Of(a.Controller) is ControllerData d)
                         foreach (var clip in d.Clips) { if (clip != null) foreach (var o in clip.PPtrs) One(o as Sprite); }
                     else if (c.Managed is UnityEngine.UI.Image img) One(img.sprite);
+                    else if (c.Managed is UnityEngine.UI.Text text && text.font != null) FontState.Of(text.font);
                 }
             }
             unbound = missing;

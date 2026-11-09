@@ -778,7 +778,11 @@ namespace Cuphead360.Player
             levelFrames++;
             if (levelFrames % 5 == 1 && Atlases.Outstanding == 0)
             {
-                int read = RenderList.ReadAheadFirst(out int unbound);
+                // A menu (the slot select, the shop, the results) shows most of what it has only as it plays: its
+                // whole scene, active or not, with its texts' fonts (the slot select's atlas came from the drive two
+                // seconds in, a 234 ms frame as it faded in). A level, map or cutscene: what it shows first.
+                bool menu = !name.StartsWith("scene_level_") && !name.StartsWith("scene_map_") && !name.StartsWith("scene_cutscene_");
+                int read = menu ? RenderList.ReadAheadScene(out int unbound) : RenderList.ReadAheadFirst(out unbound);
                 levelSprites = Math.Max(levelSprites, read);
                 levelSettled = unbound == 0 || unbound == levelUnbound;
                 levelUnbound = unbound;

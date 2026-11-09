@@ -247,7 +247,7 @@ namespace Cuphead360.Engine
             var t = Objects.Tr(self);
             if (t == null) return;
             if (t.Parent == null) t.LocalPosition = value;
-            else { MathX.Invert(t.Parent.LocalToWorld, out var inv); t.LocalPosition = inv.MultiplyPoint3x4(value); }
+            else t.LocalPosition = t.Parent.WorldToLocal.MultiplyPoint3x4(value);
             t.Invalidate();
         }
         public static void UnityEngine_Transform__INTERNAL_get_localPosition(Transform self, out Vector3 value) => value = Objects.Tr(self)?.LocalPosition ?? default;
@@ -296,7 +296,7 @@ namespace Cuphead360.Engine
         }
         public static void UnityEngine_Transform__INTERNAL_get_worldToLocalMatrix(Transform self, out Matrix4x4 value)
         {
-            MathX.Invert(Objects.Tr(self)?.LocalToWorld ?? Matrix4x4.identity, out value);
+            value = Objects.Tr(self)?.WorldToLocal ?? Matrix4x4.identity;
         }
         public static void UnityEngine_Transform__INTERNAL_get_localToWorldMatrix(Transform self, out Matrix4x4 value) => value = Objects.Tr(self)?.LocalToWorld ?? Matrix4x4.identity;
         public static void UnityEngine_Transform__INTERNAL_CALL_SetPositionAndRotation(Transform self, ref Vector3 position, ref Quaternion rotation)
@@ -308,8 +308,7 @@ namespace Cuphead360.Engine
             => value = (Objects.Tr(self)?.LocalToWorld ?? Matrix4x4.identity).MultiplyPoint3x4(position);
         public static void UnityEngine_Transform__INTERNAL_CALL_InverseTransformPoint(Transform self, ref Vector3 position, out Vector3 value)
         {
-            MathX.Invert(Objects.Tr(self)?.LocalToWorld ?? Matrix4x4.identity, out var inv);
-            value = inv.MultiplyPoint3x4(position);
+            value = (Objects.Tr(self)?.WorldToLocal ?? Matrix4x4.identity).MultiplyPoint3x4(position);
         }
         public static void UnityEngine_Transform__INTERNAL_CALL_TransformDirection(Transform self, ref Vector3 direction, out Vector3 value)
             => value = (Objects.Tr(self)?.Rotation ?? Quaternion.identity) * direction;
@@ -319,8 +318,7 @@ namespace Cuphead360.Engine
             => value = (Objects.Tr(self)?.LocalToWorld ?? Matrix4x4.identity).MultiplyVector(vector);
         public static void UnityEngine_Transform__INTERNAL_CALL_InverseTransformVector(Transform self, ref Vector3 vector, out Vector3 value)
         {
-            MathX.Invert(Objects.Tr(self)?.LocalToWorld ?? Matrix4x4.identity, out var inv);
-            value = inv.MultiplyVector(vector);
+            value = (Objects.Tr(self)?.WorldToLocal ?? Matrix4x4.identity).MultiplyVector(vector);
         }
         public static void UnityEngine_Transform__INTERNAL_CALL_RotateAroundInternal(Transform self, ref Vector3 axis, float angle)
         {

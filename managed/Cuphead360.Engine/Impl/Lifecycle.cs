@@ -36,6 +36,7 @@ namespace Cuphead360.Engine
             tr.GameObject = go;
             go.Transform = tr;
             go.Components.Add(tr);
+            go.ComponentsVersion++;
             return go;
         }
 
@@ -58,6 +59,7 @@ namespace Cuphead360.Engine
             var rec = Objects.Register(managed, Builtins.Create(type), go.Name);
             rec.GameObject = go;
             go.Components.Add(rec);
+            go.ComponentsVersion++;
             Builtins.OnAdded(rec);
             return rec;
         }
@@ -204,6 +206,7 @@ namespace Cuphead360.Engine
             }
             else Builtins.OnDestroyed(c);
             c.GameObject.Components.Remove(c);
+            c.GameObject.ComponentsVersion++;
             Objects.Release(c);
         }
 

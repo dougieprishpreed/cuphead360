@@ -85,6 +85,8 @@ namespace Cuphead360.Engine
         public MethodInfo OnTriggerEnter2D, OnTriggerStay2D, OnTriggerExit2D, OnCollisionEnter2D, OnCollisionStay2D, OnCollisionExit2D;
         public MethodInfo OnApplicationQuit, OnLevelWasLoaded, OnBecameVisible, OnBecameInvisible, OnWillRenderObject, OnRenderImage;
         public bool StartIsCoroutine;
+        /// <summary>The contact messages the type has: 1 a trigger message (OnTrigger*2D), 2 a collision message (OnCollision*2D).</summary>
+        public byte Contacts;
 
         static readonly Dictionary<Type, MessageSet> cache = new Dictionary<Type, MessageSet>();
 
@@ -104,6 +106,8 @@ namespace Cuphead360.Engine
                 OnWillRenderObject = Find(t, "OnWillRenderObject"), OnRenderImage = Find(t, "OnRenderImage", 2),
             };
             s.StartIsCoroutine = s.Start != null && typeof(IEnumerator).IsAssignableFrom(s.Start.ReturnType);
+            s.Contacts = (byte)((s.OnTriggerEnter2D != null || s.OnTriggerStay2D != null || s.OnTriggerExit2D != null ? 1 : 0)
+                | (s.OnCollisionEnter2D != null || s.OnCollisionStay2D != null || s.OnCollisionExit2D != null ? 2 : 0));
             cache[t] = s;
             return s;
         }
@@ -163,6 +167,7 @@ namespace Cuphead360.Engine
             rec.Order = ++order;
             rec.ExecOrder = ScriptOrder.Of(mb.GetType());
             go.Components.Add(rec);
+            go.ComponentsVersion++;
             PlayerLoop.Track(rec);
             if (rec.Messages.OnWillRenderObject != null) RenderList.WillRender.Add(rec);
             return rec;

@@ -183,9 +183,12 @@ namespace Cuphead360.Engine
             Atlases.Flush();
             P(7); RenderList.PreRender();
             bool capture = Capture.Wanted(Clock.FrameCount);
-            if (capture || (Gaps.Every > 0 && Clock.FrameCount % Gaps.Every == 0))
+            bool listStats = ListStats.Every > 0 && Clock.FrameCount % ListStats.Every == 0;
+            if (capture || listStats || (Gaps.Every > 0 && Clock.FrameCount % Gaps.Every == 0))
             {
+                long built = System.Diagnostics.Stopwatch.GetTimestamp();
                 var views = RenderList.Build();
+                if (listStats) ListStats.Count(views, System.Diagnostics.Stopwatch.GetTimestamp() - built);
                 if (Gaps.Every > 0) Gaps.Scan(views);
                 if (capture) Capture.Write(Clock.FrameCount, views);
             }
