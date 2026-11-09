@@ -25,10 +25,10 @@ namespace Cuphead360.Player
                         catch (Exception e)
                         {
                             // The console's log otherwise ends at a bare "Unhandled exception."
-                            Console.WriteLine("CRASH " + Describe(e));
+                            Test64.Line("CRASH " + Describe(e));
                             string where = null;
                             try { where = e.StackTrace; } catch { }
-                            if (where != null) Console.WriteLine(where);
+                            if (where != null) Test64.Line(where);
                             rc = 1001;
                         }
                         Console.Out.Flush();
@@ -131,7 +131,7 @@ namespace Cuphead360.Player
         {
             string data = "work/GameData", save = "work/managed/save";
             int frames = 600, report = 60, seed = 360;
-            bool live = false, console = false;
+            bool live = false, console = false, test64 = false;
             for (int i = 0; i + 1 < a.Length; i += 2)
                 switch (a[i])
                 {
@@ -151,6 +151,7 @@ namespace Cuphead360.Player
                         break;
                     case "--live": live = true; break;
                     case "--console": console = a[i + 1] != "0"; break;
+                    case "--test64": test64 = a[i + 1] != "0"; break;   // the console's test build: Test64
                     case "--shot": foreach (var f in a[i + 1].Split(',')) LiveHost.Shots.Add(int.Parse(f)); break;
                     case "--shot-dir": LiveHost.ShotDir = a[i + 1]; break;
                     case "--max-frames": LiveHost.MaxFrames = int.Parse(a[i + 1]); break;
@@ -189,13 +190,28 @@ namespace Cuphead360.Player
             Platform.SaveRoot = System.IO.Path.GetFullPath(save);
             Platform.Guard(Platform.SaveRoot);
             Platform.AssemblyDumpDir = System.IO.Path.GetFullPath("work/managed/dumped");
+            if (console)
+            {
+                // The 64-bit check: failures only in play builds; the test build logs every result and stops
+                // before the saves (Test64).
+                Test64.HostLog = true;
+                Test64.Run(test64);
+                Test64.Step("fonts");
+            }
             // Unity's dynamic fonts fall back to an OS font for characters no game font has.
             // (the console has no OS fonts: the staging step copies the PC's Arial into GameData/fonts)
             foreach (var arial in new[] { System.IO.Path.Combine(data, "fonts", "arial.ttf"),
                                           System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), "arial.ttf") })
                 if (System.IO.File.Exists(arial)) { FontState.OsFallback = new TrueType(System.IO.File.ReadAllBytes(arial)); break; }
+            Test64.Step("ConsoleHost.SelfCheck");
             if (console) ConsoleHost.SelfCheck();
+            Test64.Step("AssetDb.Init");
             AssetDb.Init(System.IO.Path.GetFullPath(data));
+            if (test64)
+            {
+                Test64.Line("T64 done: the test build stops here, before the game reads the saves");
+                return 0;
+            }
             if (audioOut != null) Audio.StartCapture(audioOut);
             Cuphead360.Engine.SceneLoader.Load(0, false);
             var sw = System.Diagnostics.Stopwatch.StartNew();

@@ -10,6 +10,7 @@
 //   game:\GameData\fonts\    arial.ttf (the PC's own, copied by the staging step)
 //   game:\save\              the game's saves and settings
 //   game:\cuphead360.txt     log
+//   game:\cuphead360_test.xex, cuphead360_test.txt: the 64-bit test build (CH360_TEST64) and its log
 //
 // Pad: the game's own controls. Back writes the log now; hold Back + Start
 // to quit to the dashboard.
@@ -73,6 +74,13 @@ volatile bool g_log_loading = false;    // the last frame the game drew was the 
 unsigned g_log_dropped = 0;             // lines left out past LOG_QUEUE_MAX
 // Lines queued at most: past it they are left out (counted) rather than written during play.
 const size_t LOG_QUEUE_MAX = 4u << 20;
+// The test build (CH360_TEST64: rarely-run code -Os, Test64.cs logging every result, then stopping before the
+// saves) keeps its own log beside the play build's, written as each line comes.
+#ifdef CH360_TEST64
+#define CH360_LOG_PATH "game:/cuphead360_test.txt"
+#else
+#define CH360_LOG_PATH "game:/cuphead360.txt"
+#endif
 
 void flush_log(bool sync = false) {
     std::string lines;
@@ -86,7 +94,7 @@ void flush_log(bool sync = false) {
     }
     pthread_mutex_unlock(&g_log_lock);
     if (lines.empty()) return;
-    if (!g_log_file) g_log_file = fopen("game:/cuphead360.txt", "ab");
+    if (!g_log_file) g_log_file = fopen(CH360_LOG_PATH, "ab");
     if (g_log_file) {
         fwrite(lines.data(), 1, lines.size(), g_log_file);
         fflush(g_log_file);
@@ -3038,7 +3046,12 @@ extern "C" void ch360_plat_audio(const unsigned char* s, int frames) {
     pthread_mutex_unlock(&g_audio_lock);
 }
 
-extern "C" void ch360_plat_log(const char* text, size_t len) { log_text(text, len); }
+extern "C" void ch360_plat_log(const char* text, size_t len) {
+    log_text(text, len);
+#ifdef CH360_TEST64
+    flush_log(true);   // on the drive before the next check, which may stop the console
+#endif
+}
 
 // The wasm runtime's waits (poll_oneoff, wasi clocks) and sleeps, marked for
 // the heartbeat; a sleep over two seconds is logged (in hex).
@@ -3119,11 +3132,15 @@ extern "C" int __wrap_srt_plat_commit(void* base, unsigned long long from, unsig
 
 
 int main() {
-    FILE* fresh = fopen("game:/cuphead360.txt", "wb");
+    FILE* fresh = fopen(CH360_LOG_PATH, "wb");
     if (fresh) fclose(fresh);
     logf("Cuphead360 (xSDK) %s", CH360_GIT_COMMIT);
     {
+#ifdef CH360_TEST64
+        FILE* q = NULL;   // the test build logs whatever nolog.txt says
+#else
         FILE* q = fopen("game:/nolog.txt", "rb");
+#endif
         if (q) {
             fclose(q);
             ch360_quiet = 1;
@@ -3150,7 +3167,12 @@ int main() {
     flush_log(true);
     // The player's linear memory is reserved first (committed as it grows):
     // xsdk's heap takes the free address space at its first growth.
+#ifdef CH360_TEST64
+    static const char* const argv[] = { "cuphead360", "run", "--console", "1", "--data", "/GameData", "--save", "/save",
+                                        "--test64", "1" };
+#else
     static const char* const argv[] = { "cuphead360", "run", "--console", "1", "--data", "/GameData", "--save", "/save" };
+#endif
     ch360_staged_names = 1;   // GameData/ctex and audio as stage_console.py writes them
     if (ch360_prepare("game:/", (int)(sizeof(argv) / sizeof(argv[0])), argv, 448) != 0) {
         logf("player set-up failed");

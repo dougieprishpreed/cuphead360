@@ -11,7 +11,8 @@
 # JOBS compilers at once (default 2; GCC takes over 1 GB on each of the
 # player's large files). Output: $CH360_XSDK_BUILD/default.xex (default
 # /opt/cuphead360-xsdk/output), copied to work/console/xsdk/ with the
-# licences it ships under.
+# licences it ships under. CH360_TEST64=1: the 64-bit test build instead
+# (cuphead360_test.xex beside default.xex; the C stage's --cold-os code).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DEPS=/opt/ctr360-xsdk
@@ -23,6 +24,7 @@ CH360_RUNTIME="${CH360_RUNTIME:-$(cd "$ROOT/.." && pwd)/spire360}"
 OUT="${CH360_XSDK_BUILD:-/opt/cuphead360-xsdk/output}"
 PLAYER="$ROOT/work/managed/c"
 JOBS="${JOBS:-2}"
+if [ "${CH360_TEST64:-0}" = 1 ]; then TEST64=ON; NAME=cuphead360_test.xex; else TEST64=OFF; NAME=default.xex; fi
 mkdir -p "$OUT"
 for f in "$XSDK/build/libxsdk.a" "$XSDK/build/host/libxsc.so" "$VULKAN4XENON/build/libvulkan4xenon.a" "$GLSLANG" \
   "$PLAYER/player.h" "$CH360_RUNTIME/runtime/src/srt_core.c"; do
@@ -55,17 +57,17 @@ fi
 cmake -S "$ROOT/console/xsdk" -B "$OUT/cmake" -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE="$XSDK/cmake/xsdk.cmake" -DXSDK_TOOLCHAIN="$XSDK_TOOLCHAIN" -DCMAKE_BUILD_TYPE=Release \
   -DVULKAN4XENON="$VULKAN4XENON" -DCH360_SHADERS="$SH" -DCH360_PLAYER_C="$PLAYER" -DCH360_RUNTIME="$CH360_RUNTIME" \
-  -DCH360_GIT_COMMIT="$COMMIT"
+  -DCH360_GIT_COMMIT="$COMMIT" -DCH360_TEST64="$TEST64"
 cmake --build "$OUT/cmake" -j"$JOBS"
 
-cp "$OUT/cmake/cuphead360.xex" "$OUT/default.xex"
+cp "$OUT/cmake/cuphead360.xex" "$OUT/$NAME"
 DST="$ROOT/work/console/xsdk"
 mkdir -p "$DST/licenses"
-cp "$OUT/default.xex" "$DST/default.xex"
+cp "$OUT/$NAME" "$DST/$NAME"
 # The module's data segments, which the XEX reads from GameData at start (the C stage's file: this build's).
 cp "$PLAYER/PLAYER.DAT" "$DST/PLAYER.DAT"
 cp "$XSDK/LICENSE" "$DST/licenses/xsdk.txt"
 cp "$XSDK/THIRD_PARTY_NOTICES.md" "$DST/licenses/xsdk-third-party.md" 2>/dev/null || true
 cp "$VULKAN4XENON/LICENSE" "$DST/licenses/vulkan4xenon.txt"
 cp "$XSDK_TOOLCHAIN"/share/*-licenses/* "$DST/licenses/" 2>/dev/null || true
-echo "Built $DST/default.xex ($(stat -c %s "$OUT/default.xex") bytes, source $COMMIT)"
+echo "Built $DST/$NAME ($(stat -c %s "$OUT/$NAME") bytes, source $COMMIT)"

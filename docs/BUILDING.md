@@ -116,7 +116,11 @@ with `tools\sample_native.py --raw --save-stacks` and
 `tools\hot_functions.py` (see their help) as
 `work\managed\hot_functions.txt`. Adding `--cold-os` to the C stage then
 splits each file into its often-run functions and a `_cold.c` twin for the
-rest.
+rest. `python tools\build_console.py --stage xsdk --test64` on that C makes
+`cuphead360_test.xex`, which goes beside `default.xex` and shares its
+`GameData\PLAYER.DAT` (both XEXs from one wasm build). It checks .NET's
+64-bit number code, writes every result to `cuphead360_test.txt`, and quits
+before the game reads the saves.
 
 **Check:** both commands end with `BUILD_MANAGED OK`, and
 `work\managed\c\player.h` exists with about 78 `.c` files beside it, and

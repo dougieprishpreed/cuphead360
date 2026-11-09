@@ -93,12 +93,13 @@ def stage_xsdk(a):
     script = os.path.join(ROOT, "console", "xsdk", "build.sh")
     wsl_root = "/mnt/" + ROOT[0].lower() + ROOT[2:].replace("\\", "/")
     # --jobs reaches build.sh's JOBS (compilers at once) through WSLENV
-    env = dict(os.environ, MSYS_NO_PATHCONV="1", JOBS=str(a.jobs))
-    env["WSLENV"] = ":".join(v for v in (os.environ.get("WSLENV", ""), "JOBS/u") if v)
+    env = dict(os.environ, MSYS_NO_PATHCONV="1", JOBS=str(a.jobs), CH360_TEST64="1" if a.test64 else "0")
+    env["WSLENV"] = ":".join(v for v in (os.environ.get("WSLENV", ""), "JOBS/u", "CH360_TEST64/u") if v)
     run(["wsl.exe", "-d", a.distro, "--", "bash", wsl_root + "/console/xsdk/build.sh"], env=env)
     dst = os.path.join(OUT, "xsdk")
     os.makedirs(dst, exist_ok=True)
-    print("XEX: /opt/cuphead360-xsdk/output/default.xex (copied to %s by build.sh)" % dst)
+    name = "cuphead360_test.xex" if a.test64 else "default.xex"
+    print("XEX: /opt/cuphead360-xsdk/output/%s (copied to %s by build.sh)" % (name, dst))
 
 
 def main():
@@ -107,6 +108,9 @@ def main():
     ap.add_argument("--opt", default="1")
     ap.add_argument("--jobs", type=int, default=2)
     ap.add_argument("--cc")
+    ap.add_argument("--test64", action="store_true",
+                    help="xsdk stage: the 64-bit test build (cuphead360_test.xex: its own log, Test64 logging every "
+                         "result, stopping before the saves); build the C with build_managed.py --cold-os for it")
     ap.add_argument("--distro", default="CTR360-XSDK", help="the WSL distro holding the xSDK toolchain (xsdk stage)")
     a = ap.parse_args()
     for s in a.stage.split(","):

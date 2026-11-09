@@ -63,6 +63,12 @@ set_source_files_properties("${CONSOLE}/xsdk/big_alloc.c" "${CONSOLE}/xsdk/probe
 if(CH360_GIT_COMMIT)
     target_compile_definitions(cuphead360 PRIVATE CH360_GIT_COMMIT="${CH360_GIT_COMMIT}")
 endif()
+# The 64-bit test build (build.sh with CH360_TEST64=1: cuphead360_test.xex): its own log, the player started
+# with --test64 (Test64.cs logs every result and stops before the saves).
+option(CH360_TEST64 "the 64-bit test build" OFF)
+if(CH360_TEST64)
+    target_compile_definitions(cuphead360 PRIVATE CH360_TEST64)
+endif()
 
 target_link_libraries(cuphead360 PRIVATE ch360_player "${VULKAN4XENON}/build/libvulkan4xenon.a")
 set_property(TARGET cuphead360 APPEND PROPERTY LINK_DEPENDS "${VULKAN4XENON}/build/libvulkan4xenon.a")

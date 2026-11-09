@@ -57,6 +57,14 @@ void i5_ch36010_hostX5Fstats(wasmModuleInstance* inst, U32 out, U32 n) {
     }
 }
 
+/* A line from the 64-bit check (Test64.cs) straight to the host's log, past the game's console output,
+ * which the console's test build compiles -Os like the code under test. */
+void i5_ch3608_logX5Fline(wasmModuleInstance* inst, U32 text, U32 len) {
+    (void)inst;
+    if (len == 0 || !srt_mem_ok(text, len)) return;
+    ch360_plat_log((const char*)srt_mem_ptr(text), len);
+}
+
 U32 i5_ch3603_pad(wasmModuleInstance* inst, U32 index, U32 state) {
     ch360_pad p;
     U8* s;
