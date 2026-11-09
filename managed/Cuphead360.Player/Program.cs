@@ -20,7 +20,17 @@ namespace Cuphead360.Player
                 case "run":
                     {
                         // Native input threads (Rewired) would keep the process alive.
-                        int rc = Run(args.Skip(1).ToArray());
+                        int rc;
+                        try { rc = Run(args.Skip(1).ToArray()); }
+                        catch (Exception e)
+                        {
+                            // The console's log otherwise ends at a bare "Unhandled exception."
+                            Console.WriteLine("CRASH " + Describe(e));
+                            string where = null;
+                            try { where = e.StackTrace; } catch { }
+                            if (where != null) Console.WriteLine(where);
+                            rc = 1001;
+                        }
                         Console.Out.Flush();
                         Environment.Exit(rc);
                         return rc;
@@ -38,6 +48,20 @@ namespace Cuphead360.Player
             }
             Console.Error.WriteLine("usage: Cuphead360.Player census [assembly...] | smoke");
             return 2;
+        }
+
+        /// <summary>An exception's type and message, and its inner ones', each part guarded (formatting can
+        /// itself fail when memory or the code that formats is what broke).</summary>
+        internal static string Describe(Exception e)
+        {
+            var sb = new System.Text.StringBuilder();
+            for (int depth = 0; e != null && depth < 4; e = e.InnerException, depth++)
+            {
+                if (depth > 0) sb.Append(" <- ");
+                try { sb.Append(e.GetType().FullName); } catch { sb.Append("(type unknown)"); }
+                try { sb.Append(": ").Append(e.Message); } catch { sb.Append(": (no message)"); }
+            }
+            return sb.ToString();
         }
 
         // Every type loads and every method body compiles against this

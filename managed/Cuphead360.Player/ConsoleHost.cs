@@ -524,6 +524,17 @@ namespace Cuphead360.Player
         /// </summary>
         public static void SelfCheck()
         {
+            // A check that throws is named in the FAIL line with what it threw (the first -Os build
+            // stopped here with a bare "Unhandled exception.").
+            var bad = new List<string>();
+            string step = "set-up";
+            try { SelfCheck(bad, ref step); }
+            catch (Exception e) { bad.Add(step + " threw " + Program.Describe(e)); }
+            Console.WriteLine(bad.Count == 0 ? "I64CHECK ok" : "I64CHECK FAIL: " + string.Join("; ", bad));
+        }
+
+        static void SelfCheck(List<string> bad, ref string step)
+        {
             // The console reports slow loads and keeps a smaller decoded-audio cache (32 MB).
             Cuphead360.Engine.SceneLoader.Timing = true;
             Audio.OpenReader = HostClip.Open;
@@ -533,12 +544,14 @@ namespace Cuphead360.Player
             ChobFile.BlockBudget = 8L << 20;   // large files' blocks kept
             Cuphead360.Engine.SceneLoader.CollectEveryBytes = 32L << 20;   // collections while scenes load (the memory's peak stays)
             RenderList.HostTransforms = !managedDraw;   // sprites' vertices go to the host untransformed
-            var bad = new List<string>();
+            step = "long.Parse and ToString";
             foreach (var s in new[] { "5848540871337674781", "-2592357432173453771", "4294967296", "-4294967296", "2147483648", "-1" })
                 if (long.Parse(s).ToString() != s) bad.Add("format " + s + " -> " + long.Parse(s));
             long two32 = long.Parse("4294967296"), one = long.Parse("1"), two31 = long.Parse("2147483648"), zero = long.Parse("0");
+            step = "IdText.Of";
             foreach (var s in new[] { "5848540871337674781", "-2592357432173453771", "-9223372036854775808", "0" })
                 if (IdText.Of(long.Parse(s)) != s) bad.Add("IdText " + s + " -> " + IdText.Of(long.Parse(s)));
+            step = "compares";
             if (!(two32 > one)) bad.Add("2^32 > 1");
             if (!(two31 > zero)) bad.Add("2^31 > 0");
             if (two32 + 5 == long.Parse("5")) bad.Add("2^32+5 == 5");
@@ -547,16 +560,17 @@ namespace Cuphead360.Player
             // What 32-bit mode could still get wrong after record_forms.py: signs
             // and zero tests of 64-bit results, carries, shifts of negatives.
             long neg2_32 = -two32, mixed = long.Parse("-4294967295");   // 0xFFFFFFFF_00000000, 0xFFFFFFFF_00000001
+            step = "signs, division and shifts";
             if (Math.Sign(two31) != 1 || Math.Sign(neg2_32) != -1 || Math.Sign(mixed) != -1) bad.Add("Math.Sign");
             if (two31.CompareTo(zero) != 1 || neg2_32.CompareTo(zero) != -1) bad.Add("CompareTo 0");
             if (Math.Abs(neg2_32) != two32 || Math.Abs(two31) != two31) bad.Add("Math.Abs");
             if (neg2_32 / 16 != long.Parse("-268435456") || mixed / 2 != long.Parse("-2147483647")) bad.Add("signed / 2^n");
             if (neg2_32 >> 4 != long.Parse("-268435456")) bad.Add("signed >> 4");
             if ((two32 & two32) == 0 || (neg2_32 & long.Parse("-4294967296")) == 0) bad.Add("high-word & != 0");
+            step = "ulong.Parse and compares";
             ulong ua = ulong.Parse("4294967296"), ub = ulong.Parse("4294967295"), uc = ulong.Parse("18446744069414584320");
             if (!(ua > ub) || !(uc > ua) || Math.Max(ua, ub) != ua || Math.Min(uc, ua) != ua) bad.Add("unsigned compare");
             if (ub + 1 != ua || ua - 1 != ub || unchecked(uc + ua) != 0) bad.Add("carry");
-            Console.WriteLine(bad.Count == 0 ? "I64CHECK ok" : "I64CHECK FAIL: " + string.Join("; ", bad));
         }
 
         static void PollPads()

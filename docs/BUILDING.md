@@ -106,15 +106,17 @@ NuGet feed). It writes the module's data segments to
 which the console reads from its drive and decodes into the player's memory
 at start, so the executable the console keeps in memory doesn't carry them.
 
-Optional, for a smaller executable: functions that rarely run can be
-compiled for size. That needs a list of the ones that run often, sampled
-while a PC build of the console code (`python tools\build_console.py
---stage native`, which writes `work\console\native\host_native.exe`) plays
-every level; with `work\managed\hot_functions.txt` present, the C stage splits each
-file into its often-run functions and a `_cold.c` twin for the rest. The
-list is made with `tools\sample_native.py --raw --save-stacks` and
-`tools\hot_functions.py` (see their help). Without it everything is
-compiled for speed, which is also fine.
+Experimental, off by default: functions that rarely run can be compiled
+for size (10 MB less code). The first console build made this way stopped
+at start-up, so leave it off. It needs a list of the functions that run
+often, sampled while a PC build of the console code (`python
+tools\build_console.py --stage native`, which writes
+`work\console\native\host_native.exe`) plays every level. The list is made
+with `tools\sample_native.py --raw --save-stacks` and
+`tools\hot_functions.py` (see their help) as
+`work\managed\hot_functions.txt`. Adding `--cold-os` to the C stage then
+splits each file into its often-run functions and a `_cold.c` twin for the
+rest.
 
 **Check:** both commands end with `BUILD_MANAGED OK`, and
 `work\managed\c\player.h` exists with about 78 `.c` files beside it, and
