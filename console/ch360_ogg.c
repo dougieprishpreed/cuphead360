@@ -47,6 +47,9 @@ typedef struct ch360_ogg {
 static ch360_ogg oggs[OGG_MAX];
 static void pcm_finish_one(void);   /* a clip still decoding finished, its handle let go */
 static void ogg_close_now(U32 h);
+static void game_lock(void);        /* the mixer held by the game's thread (the mix carried on, below) */
+static void game_unlock(void);
+static void conts_forget(U32 kind, U32 id);
 static const char* ogg_root = ".";
 
 /* Decoding ahead. A streamed clip's Vorbis decoding ran on the game's thread
@@ -575,7 +578,9 @@ U32 i5_ch3608_oggX5Fopen(wasmModuleInstance* inst, U32 path, U32 len, U32 info) 
     for (h = 0; h < OGG_MAX && (oggs[h].v != NULL || oggs[h].loading); h++) {
     }
     if (h == OGG_MAX) {   /* clips still decoding hold handles: one finished now lets its go */
+        game_lock();
         pcm_finish_one();
+        game_unlock();
         for (h = 0; h < OGG_MAX && (oggs[h].v != NULL || oggs[h].loading); h++) {
         }
     }
@@ -671,6 +676,7 @@ U32 i5_ch3608_oggX5Fread(wasmModuleInstance* inst, U32 h, U32 samples, U32 frame
     o = &oggs[h];
     if (frames == 0 || frames > 1u << 20 || !srt_mem_ok(samples, frames * (U32)o->channels * 4)) return 0;
     dst = srt_mem_ptr(samples);
+    game_lock();
     ogg_lock(h);
     while (done < frames) {
         unsigned want = frames - done, n, i;
@@ -686,6 +692,7 @@ U32 i5_ch3608_oggX5Fread(wasmModuleInstance* inst, U32 h, U32 samples, U32 frame
         done += n;
     }
     ogg_unlock(h);
+    game_unlock();
     if (o->ring != NULL) ahead_wake();
     return done;
 }
@@ -703,15 +710,18 @@ U32 i5_ch3608_oggX5Fseek(wasmModuleInstance* inst, U32 h, U32 frame) {
     U32 ok;
     (void)inst;
     if (h >= OGG_MAX) return 0;
+    game_lock();
     ogg_lock(h);
     if (oggs[h].loading) {
         oggs[h].seek_asked = 1;
         oggs[h].seek_frame = frame;
         ogg_unlock(h);
+        game_unlock();
         return 1;
     }
     if (oggs[h].v == NULL) {
         ogg_unlock(h);
+        game_unlock();
         return 0;
     }
     ok = ogg_seek_locked(&oggs[h], frame);
@@ -719,6 +729,7 @@ U32 i5_ch3608_oggX5Fseek(wasmModuleInstance* inst, U32 h, U32 frame) {
     oggs[h].sstart = frame;
     oggs[h].sframes = 0;
     ogg_unlock(h);
+    game_unlock();
     if (oggs[h].ring != NULL) ahead_wake();
     return ok;
 }
@@ -750,11 +761,15 @@ void i5_ch3609_oggX5Fclose(wasmModuleInstance* inst, U32 h) {
         ogg_unlock(h);
     }
     if (h >= OGG_MAX || oggs[h].v == NULL) return;
+    game_lock();
+    conts_forget(2, h);
     if (oggs[h].pcm_owner >= 0) {   /* a clip still decoding from it: closed when it's done */
         oggs[h].close_asked = 1;
+        game_unlock();
         return;
     }
     ogg_close_now(h);
+    game_unlock();
 }
 
 /* ---- the native mixer ----
@@ -840,6 +855,44 @@ static void pcm_finish_one(void) {
 static float mix_block[MIX_MAX_FRAMES * 2];
 static unsigned mix_frames;
 
+/* ---- the mix carried on through a late frame ----
+ * The game's thread mixes each frame's samples a little ahead of the output (ConsoleHost.AudioLead,
+ * 15 ms): a frame later than that ran the output dry, a gap (the twenty-ninth run: the sound crackled at
+ * every slow frame, and the loading screen's crackle paused through hold-ups). Each mix's voices are kept
+ * as it left them (clip, position, step, gains), and when the output runs low before the next mix the
+ * host's audio thread mixes them on from there (ch360_mix_extend), as Unity's own audio thread goes on
+ * through the game's slow frames. The next mix starts each voice carried on where it got to, and the
+ * voices it starts at once; mix_begin returns the frames carried on, which the engine counts as played. */
+enum { CONT_MAX = 128 };
+typedef struct mix_cont {
+    U32 key, kind, id, loop, total, channels, f0, istep, ended;
+    float t, fstep, gl, gr;
+} mix_cont;
+static mix_cont conts[CONT_MAX], conts_next[CONT_MAX];
+static unsigned cont_count, cont_next_count, cont_frames;   /* voices kept; frames carried on since the last mix */
+static unsigned long long carried_frames;                   /* all the frames carried on (the frame lines) */
+/* The mixer's state, one thread at a time: 0 free, 1 the game's thread (a mix from mix_begin to mix_end, a
+ * clip opened or let go), 2 the audio thread carrying the mix on (it never waits: the game's block comes). */
+static volatile int mix_owner;
+static int game_depth, mix_open;   /* the game's thread's hold on it; a mix begun and not ended */
+
+static void game_lock(void) {
+    if (game_depth++ == 0)
+        while (!__sync_bool_compare_and_swap(&mix_owner, 0, 1)) {
+        }
+}
+
+static void game_unlock(void) {
+    if (game_depth > 0 && --game_depth == 0) __sync_lock_release(&mix_owner);
+}
+
+/* A clip let go: the voices carried on with it stop. */
+static void conts_forget(U32 kind, U32 id) {
+    unsigned k;
+    for (k = 0; k < cont_count; k++)
+        if (conts[k].kind == kind && conts[k].id == id) conts[k].ended = 1;
+}
+
 /* pcm_decode(handle, frames_out): a clip just opened, decoded whole into host
  * memory: an id for mix_voice (frames_out its frames), -1 without memory. The
  * handle stays open (ogg_close it). */
@@ -851,14 +904,17 @@ U32 i5_ch36010_pcmX5Fdecode(wasmModuleInstance* inst, U32 h, U32 out) {
     (void)inst;
     if (h < OGG_MAX) wait_loaded(h);
     if (h >= OGG_MAX || oggs[h].v == NULL || !srt_mem_ok(out, 4)) return (U32)-1;
+    game_lock();
     for (id = 0; id < PCM_MAX && pcms[id].data != NULL; id++) {
     }
-    if (id == PCM_MAX) return (U32)-1;
     o = &oggs[h];
-    length = stb_vorbis_stream_length_in_samples(o->v);
-    if (length > (1u << 26) / (unsigned)o->channels) return (U32)-1;
-    data = (short*)malloc((size_t)(length ? length : 1) * o->channels * sizeof(short));
-    if (data == NULL) return (U32)-1;
+    length = id == PCM_MAX ? 0 : stb_vorbis_stream_length_in_samples(o->v);
+    data = id == PCM_MAX || length > (1u << 26) / (unsigned)o->channels ? NULL
+                                                                        : (short*)malloc((size_t)(length ? length : 1) * o->channels * sizeof(short));
+    if (data == NULL) {
+        game_unlock();
+        return (U32)-1;
+    }
     (void)got;
     (void)n;
     pcms[id].data = data;
@@ -872,6 +928,7 @@ U32 i5_ch36010_pcmX5Fdecode(wasmModuleInstance* inst, U32 h, U32 out) {
     pcm_pending++;
     /* its first frames now (all of a short clip), the rest as it plays (pcm_more) */
     pcm_more(id, ch360_pcm_whole || length <= 2 * PCM_FIRST_FRAMES ? length : PCM_FIRST_FRAMES);
+    game_unlock();
     put_u32(srt_mem_ptr(out), length);
     return (U32)id;
 }
@@ -880,6 +937,8 @@ U32 i5_ch36010_pcmX5Fdecode(wasmModuleInstance* inst, U32 h, U32 out) {
 void i5_ch3608_pcmX5Ffree(wasmModuleInstance* inst, U32 id) {
     (void)inst;
     if (id >= PCM_MAX || pcms[id].data == NULL) return;
+    game_lock();
+    conts_forget(1, id);
     if (pcms[id].h >= 0) {   /* still decoding: its handle let go */
         int h = pcms[id].h;
         pcms[id].h = -1;
@@ -890,6 +949,7 @@ void i5_ch3608_pcmX5Ffree(wasmModuleInstance* inst, U32 id) {
     pcm_live -= (size_t)(pcms[id].frames ? pcms[id].frames : 1) * pcms[id].channels * sizeof(short);
     free(pcms[id].data);
     pcms[id].data = NULL;
+    game_unlock();
 }
 
 /* The audio's memory (the frame lines): out[0] decoded clips, [1] their KB (32-bit floats), [2] the most
@@ -916,9 +976,14 @@ void ch360_audio_memory(unsigned out[7]) {
     out[6] = decoders;
 }
 
-/* mix_begin(frames): the block to mix into, silent. */
-void i5_ch3609_mixX5Fbegin(wasmModuleInstance* inst, U32 frames) {
+/* mix_begin(frames): the block to mix into, silent; the frames the audio thread carried the last mix on
+ * since (its voices go on from there in this one). The mixer is the game's until mix_end. */
+U32 i5_ch3609_mixX5Fbegin(wasmModuleInstance* inst, U32 frames) {
     (void)inst;
+    if (mix_open) game_unlock();   /* one begun and never ended */
+    game_lock();
+    mix_open = 1;
+    cont_next_count = 0;
     mix_frames = frames > MIX_MAX_FRAMES ? MIX_MAX_FRAMES : frames;
     memset(mix_block, 0, (size_t)mix_frames * 2 * sizeof(float));
     /* the clips still decoding: this mix's share, one clip after another */
@@ -933,6 +998,7 @@ void i5_ch3609_mixX5Fbegin(wasmModuleInstance* inst, U32 frames) {
             pcm_next = id;
         }
     }
+    return cont_frames;
 }
 
 /* The stream buffer holds frame f0 and, when the clip has it, the next one (the engine's Fill). */
@@ -957,37 +1023,19 @@ static int stream_fill(ch360_ogg* o, U32 f0) {
     return f0 < o->sstart + o->sframes;
 }
 
-/* mix_voice(kind, id, start, frames, loop, total, channels, f0, t, istep, fstep, gl, gr, out):
- * one voice into the block's samples [start, frames): kind 1 a decoded clip
- * (pcm_decode's id), 2 a streamed clip's handle, 0 silence (it only moves on).
- * The position f0 + t steps istep + fstep each sample; total is the clip's
- * frames. Returns 1 when a clip that doesn't loop ended. out: f0, t, the
- * samples stepped since the start or the last wrap, 1 if it wrapped, and the
- * position at the wrap (f0, t). */
-U32 i5_ch3609_mixX5Fvoice(wasmModuleInstance* inst, U32 kind, U32 id, U32 start, U32 frames, U32 loop, U32 total,
-                          U32 channels, U32 f0, F32 t, U32 istep, F32 fstep, F32 gl, F32 gr, U32 out) {
+/* One voice into dst's samples [start, frames) (the mixer held): kind 1 a decoded clip, 2 a streamed
+ * clip's handle, 0 silence (it only moves on). The position *pf0 + *pt steps istep + fstep each sample
+ * and is left where it ended; *pstepped counts the samples since the start or the last wrap (*pwrapped
+ * then 1, at *pwrap_f0 + *pwrap_t). Returns 1 when a clip that doesn't loop ended. */
+static U32 mix_one(U32 kind, U32 id, U32 start, U32 frames, U32 loop, U32 total, U32 channels, U32* pf0, float* pt,
+                   U32 istep, float fstep, float gl, float gr, float* dst, U32* pstepped, U32* pwrapped, U32* pwrap_f0,
+                   float* pwrap_t) {
     const short* pcm = NULL;
     const float k16 = 1.0f / 32767.0f;   /* the decoded clips' samples to the mix's scale */
     ch360_ogg* o = NULL;
     unsigned ch = channels ? channels : 1;
-    U32 i, stepped = 0, wrapped = 0, wrap_f0 = 0, ended = 0;
-    float wrap_t = 0.0f;
-    union { float f; U32 u; } bits;
-    U8* res;
-    (void)inst;
-    if (!srt_mem_ok(out, 24)) return 1;
-    if (frames > mix_frames) frames = mix_frames;
-    if (kind == 2 && id < OGG_MAX && oggs[id].loading) {   /* still being read: silent, where it was */
-        res = srt_mem_ptr(out);
-        put_u32(res, f0);
-        bits.f = t;
-        put_u32(res + 4, bits.u);
-        put_u32(res + 8, 0);
-        put_u32(res + 12, 0);
-        put_u32(res + 16, 0);
-        put_u32(res + 20, 0);
-        return 0;
-    }
+    U32 i, f0 = *pf0, stepped = 0, ended = 0;
+    float t = *pt;
     if (kind == 1) {
         if (id < PCM_MAX && pcms[id].data != NULL) {
             /* the frames this block can reach, decoded now if they weren't yet */
@@ -1021,9 +1069,9 @@ U32 i5_ch3609_mixX5Fvoice(wasmModuleInstance* inst, U32 kind, U32 id, U32 start,
                 break;
             }
             f0 -= total;
-            wrapped = 1;
-            wrap_f0 = f0;
-            wrap_t = t;
+            *pwrapped = 1;
+            *pwrap_f0 = f0;
+            *pwrap_t = t;
             stepped = 0;
             if (o != NULL) {
                 o->sstart = f0;
@@ -1042,8 +1090,8 @@ U32 i5_ch3609_mixX5Fvoice(wasmModuleInstance* inst, U32 kind, U32 id, U32 start,
                 l = l0 + (l1 - l0) * t;
                 r = r0 + (r1 - r0) * t;
             }
-            mix_block[i * 2] += l * gl;
-            mix_block[i * 2 + 1] += r * gr;
+            dst[i * 2] += l * gl;
+            dst[i * 2 + 1] += r * gr;
         } else if (o != NULL && stream_fill(o, f0)) {
             U32 rel1 = f0 + 1 - o->sstart;
             size_t b0 = (size_t)(f0 - o->sstart) * ch, b1;
@@ -1056,8 +1104,8 @@ U32 i5_ch3609_mixX5Fvoice(wasmModuleInstance* inst, U32 kind, U32 id, U32 start,
                 l = o->sbuf[b0] + (o->sbuf[b1] - o->sbuf[b0]) * t;
                 r = o->sbuf[b0 + 1] + (o->sbuf[b1 + 1] - o->sbuf[b0 + 1]) * t;
             }
-            mix_block[i * 2] += l * gl;
-            mix_block[i * 2 + 1] += r * gr;
+            dst[i * 2] += l * gl;
+            dst[i * 2 + 1] += r * gr;
         }
         f0 += istep;
         t += fstep;
@@ -1071,6 +1119,68 @@ U32 i5_ch3609_mixX5Fvoice(wasmModuleInstance* inst, U32 kind, U32 id, U32 start,
         ogg_unlock(id);
         if (o->ring != NULL) ahead_wake();
     }
+    *pf0 = f0;
+    *pt = t;
+    *pstepped = stepped;
+    return ended;
+}
+
+/* mix_voice(key, kind, id, start, frames, loop, total, channels, f0, t, istep, fstep, gl, gr, out): one
+ * voice (key: the engine's, the same each mix while it plays) into the block's samples [start, frames)
+ * (mix_one). A voice the audio thread carried on goes on from where it got to. out: f0, t, the samples
+ * stepped since the start or the last wrap, 1 if it wrapped, and the position at the wrap (f0, t); a
+ * voice carried on is given as wrapped at its new position as the block starts. */
+U32 i5_ch3609_mixX5Fvoice(wasmModuleInstance* inst, U32 key, U32 kind, U32 id, U32 start, U32 frames, U32 loop, U32 total,
+                          U32 channels, U32 f0, F32 t, U32 istep, F32 fstep, F32 gl, F32 gr, U32 out) {
+    U32 stepped = 0, wrapped = 0, wrap_f0 = 0, ended = 0, k;
+    float wrap_t = 0.0f;
+    union { float f; U32 u; } bits;
+    U8* res;
+    (void)inst;
+    if (!srt_mem_ok(out, 24)) return 1;
+    if (frames > mix_frames) frames = mix_frames;
+    if (kind == 2 && id < OGG_MAX && oggs[id].loading) {   /* still being read: silent, where it was */
+        res = srt_mem_ptr(out);
+        put_u32(res, f0);
+        bits.f = t;
+        put_u32(res + 4, bits.u);
+        put_u32(res + 8, 0);
+        put_u32(res + 12, 0);
+        put_u32(res + 16, 0);
+        put_u32(res + 20, 0);
+        return 0;
+    }
+    if (cont_frames > 0)
+        for (k = 0; k < cont_count; k++)
+            if (conts[k].key == key && conts[k].kind == kind && conts[k].id == id) {
+                if (conts[k].ended) ended = 1;
+                f0 = conts[k].f0;
+                t = conts[k].t;
+                wrapped = 1;
+                wrap_f0 = f0;
+                wrap_t = t;
+                start = 0;
+                break;
+            }
+    if (!ended)
+        ended = mix_one(kind, id, start, frames, loop, total, channels, &f0, &t, istep, fstep, gl, gr, mix_block, &stepped,
+                        &wrapped, &wrap_f0, &wrap_t);
+    if (!ended && cont_next_count < CONT_MAX) {
+        mix_cont* c = &conts_next[cont_next_count++];
+        c->key = key;
+        c->kind = kind;
+        c->id = id;
+        c->loop = loop;
+        c->total = total;
+        c->channels = channels;
+        c->f0 = f0;
+        c->t = t;
+        c->istep = istep;
+        c->fstep = fstep;
+        c->gl = gl;
+        c->gr = gr;
+        c->ended = 0;
+    }
     res = srt_mem_ptr(out);
     put_u32(res, f0);
     bits.f = t;
@@ -1083,9 +1193,51 @@ U32 i5_ch3609_mixX5Fvoice(wasmModuleInstance* inst, U32 kind, U32 id, U32 start,
     return ended;
 }
 
-/* mix_end(frames): the block to the platform. */
+/* mix_end(frames): the block to the platform; its voices are what the audio thread carries on. */
 void i5_ch3607_mixX5Fend(wasmModuleInstance* inst, U32 frames) {
     (void)inst;
     if (frames > mix_frames) frames = mix_frames;
     if (frames > 0) ch360_plat_audio_native(mix_block, (int)frames);
+    memcpy(conts, conts_next, cont_next_count * sizeof(mix_cont));
+    cont_count = cont_next_count;
+    cont_frames = 0;
+    if (mix_open) {
+        mix_open = 0;
+        game_unlock();
+    }
 }
+
+/* The audio thread, its output running low: the last mix's voices on for frames more (at most
+ * MIX_MAX_FRAMES), straight to the output; the frames, or 0 while the game's thread holds the mixer (its
+ * block is coming) or nothing plays. */
+int ch360_mix_extend(int frames) {
+    static float block[MIX_MAX_FRAMES * 2];
+    unsigned k, live = 0;
+    if (frames <= 0 || frames > MIX_MAX_FRAMES || !__sync_bool_compare_and_swap(&mix_owner, 0, 2)) return 0;
+    memset(block, 0, (size_t)frames * 2 * sizeof(float));
+    for (k = 0; k < cont_count; k++) {
+        mix_cont* c = &conts[k];
+        U32 stepped = 0, wrapped = 0, wrap_f0 = 0;
+        float wrap_t = 0.0f;
+        if (c->ended) continue;
+        /* a clip let go or still being read is not mixed (conts_forget marks the first) */
+        if ((c->kind == 1 && (c->id >= PCM_MAX || pcms[c->id].data == NULL)) ||
+            (c->kind == 2 && (c->id >= OGG_MAX || oggs[c->id].v == NULL || oggs[c->id].loading))) {
+            c->ended = 1;
+            continue;
+        }
+        c->ended = mix_one(c->kind, c->id, 0, (U32)frames, c->loop, c->total, c->channels, &c->f0, &c->t, c->istep, c->fstep,
+                           c->gl, c->gr, block, &stepped, &wrapped, &wrap_f0, &wrap_t);
+        live++;
+    }
+    if (live > 0) {
+        ch360_plat_audio_native(block, frames);
+        cont_frames += (unsigned)frames;
+        carried_frames += (unsigned)frames;
+    }
+    __sync_lock_release(&mix_owner);
+    return live > 0 ? frames : 0;
+}
+
+/* All the frames the audio thread has carried on (the frame lines). */
+unsigned long long ch360_mix_carried(void) { return carried_frames; }

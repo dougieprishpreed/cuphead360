@@ -87,7 +87,26 @@ static void trace_frame(void) {
     }
 }
 
+/* A check of the console's audio carry-on (ch360_mix_extend: its audio thread mixing the last mix's voices on
+ * while the game is late): CH360_TEST_CARRY="N,F": every Nth frame, F frames carried on before it, as if
+ * that frame had come F frames late. The WAV should run on without a seam (CARRY lines: where). */
+static void test_carry(void) {
+    static int every = -1, frames = 0;
+    if (every < 0) {
+        const char* e = getenv("CH360_TEST_CARRY");
+        every = 0;
+        if (e != NULL && sscanf(e, "%d,%d", &every, &frames) != 2) every = 0;
+    }
+    if (every > 0 && frame_no > 0 && frame_no % every == 0) {
+        unsigned long at = audio_frames;
+        int done = 0, n;
+        while (done < frames && (n = ch360_mix_extend(frames - done < 256 ? frames - done : 256)) > 0) done += n;
+        printf("CARRY frame %ld: %d frames carried on at output frame %lu\n", frame_no, done, at);
+    }
+}
+
 int ch360_plat_frame_begin(void) {
+    test_carry();
     if (frame_ms > 0) {
         while ((clock() - frame_start) * 1000 / CLOCKS_PER_SEC < frame_ms) {
         }

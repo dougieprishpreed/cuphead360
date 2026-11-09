@@ -118,8 +118,7 @@ namespace Cuphead360.Engine
                             stage = 5;
                             tPrep = prepAt = System.Diagnostics.Stopwatch.GetTimestamp();
                             prepBest = int.MaxValue;
-                            if (name.StartsWith("scene_level_") || name.StartsWith("scene_map_"))
-                                (prepSprites, prepClips) = RenderList.ReadAheadLoad(scene.Handle);
+                            if (Prepared(name)) (prepSprites, prepClips) = RenderList.ReadAheadLoad(scene.Handle);
                             if (Over()) return false;
                             break;
                         case 5:
@@ -170,6 +169,17 @@ namespace Cuphead360.Engine
         }
         static readonly List<Pending> pending = new List<Pending>();
         public static int Loads;
+
+        /// <summary>
+        /// Whether a scene's first frames are prepared behind the loader's black: its pages read ahead (its
+        /// load's last stage) and, once it is active, the game held until its frames draw without waiting
+        /// (ConsoleHost.LevelHold). Every scene that comes in from black: levels, maps, the slot select, the
+        /// win screen, cutscenes. Only levels and maps were (the slot select read its fonts and pages as it
+        /// faded in, a 250 ms frame in every run). Not the boot's scenes (ConsoleHost.BootHold) nor the
+        /// loader's empty one.
+        /// </summary>
+        public static bool Prepared(string name) =>
+            name != null && name != "scene_start" && name != "scene_title" && name != "scene_load_helper";
 
         public static int IndexOf(string nameOrPath)
         {

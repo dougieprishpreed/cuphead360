@@ -160,6 +160,12 @@ void ch360_ogg_root(const char* root_dir);
 /* The audio's memory: decoded clips, their KB and peak KB, open and kept compressed KB, stream buffer KB,
  * open decoders (ch360_ogg.c). */
 void ch360_audio_memory(unsigned out[7]);
+/* The platform's audio thread, its output running low before the game's next mix: the last mix's voices
+ * mixed on for frames more, straight to ch360_plat_audio_native; the frames, or 0 (the game is mixing,
+ * or nothing plays). */
+int ch360_mix_extend(int frames);
+/* All the frames ch360_mix_extend has mixed on. */
+unsigned long long ch360_mix_carried(void);
 /* Staged names (tools/stage_console.py): on the console, converted textures
  * and clips are <folder>/XX/YYYYYYYY.CTX/.OGG, XX the top byte and YYYYYYYY
  * the low word of FNV-1a 64 of the file's key, so no folder holds thousands

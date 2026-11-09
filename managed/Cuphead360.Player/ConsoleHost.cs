@@ -71,9 +71,9 @@ namespace Cuphead360.Player
         [DllImport("ch360", EntryPoint = "pcm_free"), WasmImportLinkage]
         static extern void PcmFree(int id);
         [DllImport("ch360", EntryPoint = "mix_begin"), WasmImportLinkage]
-        static extern void MixBegin(int frames);
+        static extern int MixBegin(int frames);
         [DllImport("ch360", EntryPoint = "mix_voice"), WasmImportLinkage]
-        static extern int MixVoice(int kind, int id, int start, int frames, int loop, int total, int channels, int f0, float t, int istep, float fstep,
+        static extern int MixVoice(int key, int kind, int id, int start, int frames, int loop, int total, int channels, int f0, float t, int istep, float fstep,
                                    float gl, float gr, int* result);
         [DllImport("ch360", EntryPoint = "mix_end"), WasmImportLinkage]
         static extern void MixEnd(int frames);
@@ -91,13 +91,13 @@ namespace Cuphead360.Player
 
             public void Free(int id) => PcmFree(id);
             public int Handle(Audio.IClipReader r) => r is HostClip hc ? hc.Handle : -1;
-            public void Begin(int frames) => MixBegin(frames);
+            public int Begin(int frames) => MixBegin(frames);
 
-            public bool Voice(int kind, int id, int start, int frames, bool loop, long total, int channels, long f0, float t, long istep, float fstep,
+            public bool Voice(int key, int kind, int id, int start, int frames, bool loop, long total, int channels, long f0, float t, long istep, float fstep,
                               float gl, float gr, out int stepped, out bool wrapped, out long wrapF0, out float wrapT)
             {
                 int* r = stackalloc int[6];
-                bool ended = MixVoice(kind, id, start, frames, loop ? 1 : 0, (int)Math.Min(total, int.MaxValue), channels, (int)f0, t, (int)istep, fstep,
+                bool ended = MixVoice(key, kind, id, start, frames, loop ? 1 : 0, (int)Math.Min(total, int.MaxValue), channels, (int)f0, t, (int)istep, fstep,
                                       gl, gr, r) != 0;
                 stepped = r[2];
                 wrapped = r[3] != 0;
@@ -461,7 +461,8 @@ namespace Cuphead360.Player
                 long built = System.Diagnostics.Stopwatch.GetTimestamp(), allocBuilt = PlayerLoop.Profile ? GC.GetAllocatedBytesForCurrentThread() : 0;
                 var views = RenderList.Build();
                 long listed = System.Diagnostics.Stopwatch.GetTimestamp(), allocListed = PlayerLoop.Profile ? GC.GetAllocatedBytesForCurrentThread() : 0;
-                Draw(views);
+                if (BootBlack()) DrawBlack();
+                else Draw(views);
                 long drawn = System.Diagnostics.Stopwatch.GetTimestamp(), allocDrawn = PlayerLoop.Profile ? GC.GetAllocatedBytesForCurrentThread() : 0;
                 perf.Frame(n, (drawn - now) * 1000.0 / hz, PlayerLoop.PhaseMs, (listed - built) * 1000.0 / hz, (drawn - listed) * 1000.0 / hz);
                 perf.Allocs(PlayerLoop.PhaseBytes, allocListed - allocBuilt, allocDrawn - allocListed);
@@ -480,20 +481,20 @@ namespace Cuphead360.Player
         /// The mix's length this frame: the frame's time, corrected toward a little ahead of what the host's
         /// output still holds. Mixing the frame's time alone left the output nothing to spare (a frame a
         /// little longer than the one before ran it dry: 7,351 empty audio frames in the twenty-sixth run's
-        /// first minute), and after a long frame the next mixed up to 250 ms at once, which stayed queued as
-        /// that much more delay. Now it keeps AudioLeadPlay ahead in play (a frame's jitter) and
-        /// AudioLeadLoading under the loading screen (its frames run 100-400 ms; the host loops the screen's
-        /// sound through longer hold-ups), and a surplus is played off at up to half the frame's time.
+        /// first minute). It keeps AudioLead ahead (a frame's jitter); a surplus is played off at up to half
+        /// the frame's time. A frame later than that no longer runs the output dry: the host's audio thread
+        /// carries the last mix's voices on until the next (the twenty-ninth run crackled at every slow
+        /// frame), so what the frame took is already played and the next mix covers one frame (at most a
+        /// 30 fps one), not the whole hold-up: mixing that (up to 250 ms) stayed queued as that much delay.
         /// </summary>
-        const float AudioLeadPlay = 0.015f, AudioLeadLoading = 0.15f;
-        static bool loadingShown;
+        const float AudioLeadSeconds = 0.015f;
 
         static float AudioLead(float real)
         {
-            float mix = Math.Clamp(real, 0f, 0.25f);
             int queued = AudioQueued();
-            if (queued < 0) return mix;   // no output playing in real time (the PC host)
-            float gap = (loadingShown ? AudioLeadLoading : AudioLeadPlay) - queued / (float)Audio.Rate;
+            if (queued < 0) return Math.Clamp(real, 0f, 0.25f);   // no output playing in real time (the PC host)
+            float mix = Math.Clamp(real, 0f, 1f / 30f);
+            float gap = AudioLeadSeconds - queued / (float)Audio.Rate;
             return Math.Clamp(mix + Math.Clamp(gap, -0.5f * mix, 0.25f), 0f, 0.5f);
         }
 
@@ -669,6 +670,7 @@ namespace Cuphead360.Player
                 if (Cuphead360.Engine.Scenes.Active?.Name != "scene_title") return false;
                 bootHold = 1;
                 bootFrom = bootProgressAt = now;
+                MakeSceneLoader();
             }
             bootFrames++;
             if (bootFrames % 10 == 1 && Atlases.Outstanding == 0)
@@ -694,12 +696,59 @@ namespace Cuphead360.Player
         }
 
         /// <summary>
+        /// The boot's frames drawn black: scene_start's (its build held frames for up to 1.4 s) and the boot
+        /// hold's (the game's clock all but stopped). They showed the film grain on black, which stopped
+        /// whenever a frame was held: the user saw the screen before the MDHR logo hitch in every run. The
+        /// grain is still listed (its frames are read ahead the first time, under the hold) and shows from
+        /// the title's own black second on.
+        /// </summary>
+        static bool BootBlack() => !managedDraw && (bootHold == 1 || Cuphead360.Engine.Scenes.Active?.Name == "scene_start");
+
+        static void DrawBlack()
+        {
+            LoadingScreenFlag(0);
+            float* vh = stackalloc float[13];
+            vh[0] = 0f; vh[1] = 0f; vh[2] = Icalls.ScreenWidth; vh[3] = Icalls.ScreenHeight;
+            ((uint*)vh)[4] = 3u;   // the colour cleared, and depth and stencil
+            vh[5] = vh[6] = vh[7] = 0f; vh[8] = 1f;
+            ((uint*)vh)[9] = 0u;   // the screen
+            ((uint*)vh)[10] = (uint)Icalls.ScreenWidth;
+            ((uint*)vh)[11] = (uint)Icalls.ScreenHeight;
+            vh[12] = 1f;
+            DrawView(vh);
+            DrawEnd();
+        }
+
+        /// <summary>
+        /// The game makes its scene loader (the iris wipe and the hourglass: Resources "UI/Scene_Loader") the
+        /// first time it loads a scene, the title's button press: reading its 155 objects (74 sprites, 16
+        /// textures, 25 shaders) froze that frame for 230-245 ms in every run (the twenty-sixth to the
+        /// twenty-ninth, update 189-202 ms). It is made here, under the boot's black, as that press makes it
+        /// (SceneLoader.instance), and the boot hold reads its pages ahead with the other persistent objects.
+        /// </summary>
+        static void MakeSceneLoader()
+        {
+            try
+            {
+                var p = Type.GetType("SceneLoader, Assembly-CSharp")?.GetProperty("instance",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                Console.WriteLine($"BOOT scene loader {(p?.GetValue(null) != null ? "made" : "not found")}");
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"BOOT scene loader: {e.GetType().Name}: {e.Message}");
+            }
+        }
+
+        /// <summary>
         /// A level's start, as the boot's: the game held (its clock all but stopped, behind the load's black)
         /// until its frames draw without waiting for a page (three in a row), the clips its animators play now
         /// asked for ahead (RenderList.ReadAheadFirst). They came in its first frames, under the fade in: the
         /// twenty-sixth run's Frogs started with frames of 234, 308 and 196 ms. Not until every page asked for
         /// is in, as the boot's: the read-ahead's backlog (300-odd pages) ran it to its limit in the
-        /// twenty-seventh run. At most 3 s; CH360_LEVEL_HOLD=0: none.
+        /// twenty-seventh run. At most 3 s; CH360_LEVEL_HOLD=0: none. Every scene that comes in from the
+        /// loader's black, not only levels (SceneLoader.Prepared: the slot select's fonts and pages came as it
+        /// faded in, a 250 ms frame in every run).
         /// </summary>
         static int levelLoads = -1, levelFrames, levelSprites, levelUnbound, levelClear, levelPending;
         static long levelFrom, levelProgressAt;
@@ -718,7 +767,7 @@ namespace Cuphead360.Player
                 int loads = Cuphead360.Engine.SceneLoader.Loads;
                 if (loads == levelLoads || name == null) return false;
                 levelLoads = loads;
-                if (!name.StartsWith("scene_level_")) return false;
+                if (!Cuphead360.Engine.SceneLoader.Prepared(name)) return false;
                 levelHolding = true;
                 levelFrom = levelProgressAt = now;
                 levelPending = int.MaxValue;
@@ -761,7 +810,6 @@ namespace Cuphead360.Player
         static void Draw(List<RenderList.View> views)
         {
             uint state = LoadingScreen();
-            loadingShown = state != 0;
             uint cycle = (state >> 16) & 0x3FFF;
             if (state != 0 && cycle != 0 && !managedDraw)
             {
@@ -787,20 +835,26 @@ namespace Cuphead360.Player
             }
             else hourglassFrom = 0;
             DrawFrame(views, state);
-            RecordHourglass(state);
+            RecordHourglass(state, views);
         }
 
         // The hourglass's frames recorded ahead: one per slot of the host's 64 over its cycle, a few each frame
         // from the loading screen's first. The host kept only the frames the game drew, a part of the 2.2 s
         // cycle in a long load, and drew that part over and over (the twenty-first to twenty-third runs).
-        const int HourglassSlots = 64, HourglassSlotsAFrame = 8;
+        // Not while a scene still draws behind the fader (the one before the load, the level being held): the
+        // host keeps only the screen itself (the hourglass on black, under 24 items; main.cpp record_loading),
+        // and eight builds of the map a frame were for nothing.
+        const int HourglassSlots = 64, HourglassSlotsAFrame = 8, HourglassItems = 24;
         static int hourglassRecorded = -1;
 
-        static void RecordHourglass(uint state)
+        static void RecordHourglass(uint state, List<RenderList.View> drawn)
         {
             uint cycle = (state >> 16) & 0x3FFF;
             if (state == 0 || cycle == 0) { hourglassRecorded = -1; return; }
             if (hourglassRecorded >= HourglassSlots || managedDraw) return;
+            int items = 0;
+            foreach (var v in drawn) items += v.Items.Count;
+            if (items > HourglassItems) return;
             if (hourglassRecorded < 0) hourglassRecorded = 0;
             var inst = loaderInstance.GetValue(null) as UnityEngine.Object;
             var icon = inst != null ? loaderIcon.GetValue(inst) as UnityEngine.UI.Image : null;

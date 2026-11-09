@@ -2659,20 +2659,40 @@ unsigned loading_shape(const ch360_frame* f) {
 }
 
 void forget_loading() {
-    for (unsigned k = 0; k < RECORD; ++k) g_rec[k].kept = false;
+    for (unsigned k = 0; k < RECORD; ++k) {
+        g_rec[k].kept = false;
+        std::vector<ch360_view>().swap(g_rec[k].views);
+        std::vector<ch360_item>().swap(g_rec[k].items);
+        std::vector<ch360_vertex>().swap(g_rec[k].verts);
+    }
     g_rec_count = 0;
 }
 bool g_loading_screen = false;               // the last frame the game drew was the loading screen
 unsigned g_rec_period = 0;                   // the hourglass's cycle, ms (0: not known, the newest frame is drawn)
 double g_last_draw_ms = 0;
 
+// A loading screen's frame kept: the hourglass and the fader over the load's empty scene draw 6-10 items and
+// a few hundred vertices. Behind the fader the scene before it or the level being held can still draw (40-55
+// items, 8,000-38,000 vertices): those frames were kept too, each slot keeping its vectors' room after (16 MB
+// of the host's heap from Hilda Berg's hold on, the twenty-ninth run's textures 100 MB down to 82), and
+// forgot the hourglass's frames (one slot left for a 4 s hold-up). They are shown, and count as the loading
+// screen, but aren't kept.
+const unsigned RECORD_ITEMS = 24, RECORD_VERTICES = 2048;
+
 // After the game's draw (g_gpu_lock held); a frame recorded ahead (0x40000000: the hourglass's other
 // frames, ConsoleHost.RecordHourglass) only fills its slot.
 void record_loading(const ch360_frame* f) {
     bool ahead = (f->loading & 0x40000000u) != 0;
-    if (!f->loading || f->item_count > 256 || f->vertex_count > 16384) {
+    if (!f->loading) {
         g_loading_screen = false;   // the slots stay for the next loading screen
         if (!ahead) g_log_loading = false;
+        return;
+    }
+    if (f->item_count > RECORD_ITEMS || f->vertex_count > RECORD_VERTICES) {
+        if (ahead) return;
+        // the screen with a scene still drawing behind its fader: the kept frames show it as well
+        g_loading_screen = true;
+        g_log_loading = true;
         return;
     }
     unsigned period = (f->loading >> 16) & 0x3FFF, shape = loading_shape(f);
@@ -2758,9 +2778,11 @@ void* replay_thread(void*) {
 // ------------------------------------------------------------ audio
 
 // The player mixes 48 kHz stereo each frame (ch360_plat_audio); a thread
-// feeds xsdk's audio frames (256 samples, six channels) from a ring, silence
-// when it runs dry; a full ring drops the oldest samples. The player keeps the
-// ring a little ahead (ch360_plat_audio_queued, ConsoleHost.AudioLead).
+// feeds xsdk's audio frames (256 samples, six channels) from a ring; a full
+// ring drops the oldest samples. The player keeps the ring a little ahead
+// (ch360_plat_audio_queued, ConsoleHost.AudioLead), and when a frame comes
+// late and the ring runs low the thread mixes the last mix's voices on itself
+// (ch360_mix_extend): silence only when nothing plays.
 const unsigned AUDIO_RING = 96000; // frames (2 s)
 float g_ring[AUDIO_RING * 2];
 volatile unsigned g_ring_read = 0, g_ring_write = 0;
@@ -2768,28 +2790,15 @@ pthread_mutex_t g_audio_lock = PTHREAD_MUTEX_INITIALIZER;
 bool g_audio_open = false;
 unsigned g_audio_underruns = 0;
 
-// The loading screen's sound (the vinyl crackle) through a hold-up: the game's thread mixes nothing while a
-// load holds it (up to ~4 s: the twenty-sixth run's hold-ups, the hourglass drawn again by replay_thread),
-// so the crackle stopped. The thread keeps the last second it played and, when the ring runs dry under the
-// loading screen, plays the screen's own last 0.75 s again in a loop (crossfaded at the seam and back into
-// the game's samples), as replay_thread does with the hourglass's frames. Only what played under the
-// loading screen is looped (never the scene before it), and at least 0.3 s of it.
-const unsigned AUDIO_HIST = 48000;              // frames played, kept (1 s)
-const unsigned AUDIO_LOOP = 36000;              // frames looped (0.75 s)
-const unsigned AUDIO_LOOP_MIN = 14400;          // frames of the loading screen's sound needed first (0.3 s)
-const unsigned AUDIO_XFADE = 256;               // frames of each crossfade
-float g_hist[AUDIO_HIST * 2];
-unsigned g_hist_pos = 0;                        // frames written into g_hist (its newest at g_hist_pos - 1)
+// Under this many frames left before an output frame, the thread mixes the voices on (ch360_mix_extend),
+// 256 at a time. The loading screen's crackle through a load's hold-ups (up to ~4 s with nothing mixed)
+// and every slow frame's gap (the twenty-ninth run: a crackle at each) are the voices going on now. It
+// replaced a loop of the loading screen's last 0.75 s, which played what was heard last as the screen came
+// up (a sound repeating and skipping before Hilda Berg's load) and no other gap.
+const unsigned AUDIO_LOW = 512;
 
 void* audio_thread(void*) {
     xsdk_thread_move(4);
-    bool was_loading = false, looping = false;
-    unsigned loading_from = 0;                   // g_hist_pos where the loading screen's sound began
-    unsigned loop_a = 0, loop_b = 0, loop_at = 0;   // the loop [loop_a, loop_b) in g_hist positions, and where it plays
-    unsigned fade_in = 0, fade_out = 0;          // frames left of a crossfade into the loop / back to the ring
-    float held_l = 0, held_r = 0;                // the last sample played before the loop (faded out under it)
-    unsigned looped = 0;
-    double loop_started = 0;
     for (;;) {
         float* out = NULL;
         if (xsdk_audio_next_frame(0, &out) != 0 || !out) {
@@ -2802,83 +2811,24 @@ void* audio_thread(void*) {
         float* right = out + XSDK_AUDIO_FRONT_RIGHT * XSDK_AUDIO_FRAME_SAMPLES;
         pthread_mutex_lock(&g_audio_lock);
         unsigned avail = g_ring_write - g_ring_read;
-        bool loading = g_loading_screen;
-        // the screen's sound starts after what the ring already holds (mixed before it)
-        if (loading && !was_loading) loading_from = g_hist_pos + avail;
-        was_loading = loading;
-        if (avail < XSDK_AUDIO_FRAME_SAMPLES) {
-            ++g_audio_underruns;
-            unsigned have = (int)(g_hist_pos - loading_from) > 0 ? g_hist_pos - loading_from : 0;
-            if (!looping && loading && have >= AUDIO_LOOP_MIN && avail == 0) {
-                looping = true;
-                loop_b = g_hist_pos - AUDIO_XFADE;   // the seam crossfades the loop's start with the frames after it
-                loop_a = g_hist_pos - (have < AUDIO_LOOP + AUDIO_XFADE ? have : AUDIO_LOOP + AUDIO_XFADE);
-                loop_at = loop_a;
-                fade_in = AUDIO_XFADE;
-                unsigned last = ((g_hist_pos - 1) % AUDIO_HIST) * 2;
-                held_l = g_hist[last];
-                held_r = g_hist[last + 1];
-                looped = 0;
-                loop_started = now_ms();
-            }
+        pthread_mutex_unlock(&g_audio_lock);
+        // the game's frame is late: its voices go on (not under g_audio_lock: the mixer takes it to write)
+        for (int k = 0; k < 8 && avail < AUDIO_LOW; ++k) {
+            int n = ch360_mix_extend(XSDK_AUDIO_FRAME_SAMPLES);
+            if (n <= 0) break;
+            avail += (unsigned)n;
         }
-        if (looping && avail > 0 && fade_out == 0) fade_out = AUDIO_XFADE;   // the game's samples again: crossfaded back
-        for (int i = 0; i < XSDK_AUDIO_FRAME_SAMPLES; ++i) {
-            float l = 0, r = 0;
-            bool real = g_ring_read != g_ring_write;
-            if (real) {
-                unsigned at = (g_ring_read % AUDIO_RING) * 2;
-                l = g_ring[at];
-                r = g_ring[at + 1];
-                ++g_ring_read;
-                unsigned h = (g_hist_pos % AUDIO_HIST) * 2;
-                g_hist[h] = l;
-                g_hist[h + 1] = r;
-                ++g_hist_pos;
-            }
-            if (looping) {
-                // the loop's sample here, its seam crossfaded with the frames past its end
-                unsigned at = (loop_at % AUDIO_HIST) * 2, k = loop_at - loop_a;
-                float ll = g_hist[at], lr = g_hist[at + 1];
-                if (k < AUDIO_XFADE) {
-                    unsigned past = ((loop_b + k) % AUDIO_HIST) * 2;
-                    float t = (float)k / AUDIO_XFADE;
-                    ll = ll * t + g_hist[past] * (1 - t);
-                    lr = lr * t + g_hist[past + 1] * (1 - t);
-                }
-                if (++loop_at == loop_b) loop_at = loop_a;
-                if (fade_in > 0) {   // out of the last sample played, into the loop
-                    float t = 1.0f - (float)fade_in / AUDIO_XFADE;
-                    ll = ll * t + held_l * (1 - t);
-                    lr = lr * t + held_r * (1 - t);
-                    --fade_in;
-                }
-                if (real) {   // out of the loop, into the game's samples
-                    float t = (float)fade_out / AUDIO_XFADE;
-                    l = l * (1 - t) + ll * t;
-                    r = r * (1 - t) + lr * t;
-                    if (fade_out <= 1) {
-                        looping = false;
-                        fade_out = 0;
-                    } else {
-                        --fade_out;
-                    }
-                } else {
-                    l = ll;
-                    r = lr;
-                    ++looped;
-                }
-            }
+        pthread_mutex_lock(&g_audio_lock);
+        if (g_ring_write - g_ring_read < XSDK_AUDIO_FRAME_SAMPLES) ++g_audio_underruns;
+        for (int i = 0; i < XSDK_AUDIO_FRAME_SAMPLES && g_ring_read != g_ring_write; ++i) {
+            unsigned at = (g_ring_read % AUDIO_RING) * 2;
+            float l = g_ring[at], r = g_ring[at + 1];
+            ++g_ring_read;
             left[i] = l < -1.0f ? -1.0f : l > 1.0f ? 1.0f : l;
             right[i] = r < -1.0f ? -1.0f : r > 1.0f ? 1.0f : r;
         }
-        bool ended = !looping && looped > 0;
-        unsigned looped_ms = looped / 48;
-        double loop_ms = now_ms() - loop_started;
-        if (ended) looped = 0;
         pthread_mutex_unlock(&g_audio_lock);
         xsdk_audio_queue_frame();
-        if (ended) logf("HOST loading screen: its sound looped for %u ms of a %u ms hold-up", looped_ms, (unsigned)loop_ms);
     }
     return NULL;
 }
@@ -2954,11 +2904,12 @@ extern "C" int ch360_plat_frame_begin(void) {
         struct mallinfo mi = mallinfo();   // newlib's heap: grown to (arena), in use
         // Times in tenths of a millisecond (integers only in the log).
         logf("frame %u: %u ms/frame x10 (worst %u, %u over 17.5); gpu wait %u, present %u; memory %u MB free of %u, player %u MB, "
-             "textures %u MB (%u uploads, %u evicted), stored %u MB; host heap %u MB (%u in use); items left out for the vertex ring %u; audio underruns %u",
+             "textures %u MB (%u uploads, %u evicted), stored %u MB; host heap %u MB (%u in use); items left out for the vertex ring %u; audio underruns %u, "
+             "%u ms carried on",
              g_frames, (unsigned)(g_logic_ms / 60), (unsigned)(g_worst_ms * 10), g_slow, (unsigned)(g_renderer->gpu_wait_ms / 60),
              (unsigned)(g_renderer->present_ms / 60), f, tot, ch360_memory_kb() / 1024, (unsigned)(g_renderer->texture_bytes() >> 20),
              g_renderer->uploads, g_renderer->evictions, (unsigned)(g_renderer->stored_bytes() >> 20), (unsigned)(mi.arena >> 20),
-             (unsigned)(mi.uordblks >> 20), g_renderer->ring_drops, g_audio_underruns);
+             (unsigned)(mi.uordblks >> 20), g_renderer->ring_drops, g_audio_underruns, (unsigned)(ch360_mix_carried() / 48));
         unsigned am[7];
         ch360_audio_memory(am);
         logf("audio memory: %u clips decoded %u KB (peak %u), compressed %u KB open + %u KB kept, stream buffers %u KB, %u decoders",
@@ -3227,7 +3178,12 @@ int main() {
     if (xsdk_audio_open(0) == 0) {
         g_audio_open = true;
         pthread_t ath;
-        pthread_create(&ath, NULL, audio_thread, NULL);
+        // a big stack: carrying a streamed voice on decodes it here, and stb_vorbis's scratch is alloca'd
+        pthread_attr_t aattr;
+        pthread_attr_init(&aattr);
+        pthread_attr_setstacksize(&aattr, 512 * 1024);
+        pthread_create(&ath, &aattr, audio_thread, NULL);
+        pthread_attr_destroy(&aattr);
     } else {
         logf("no audio output");
     }

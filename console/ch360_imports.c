@@ -994,13 +994,13 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
     cfg.argc = argc;
     cfg.argv = argv;
     cfg.envc = (int)(sizeof(env) / sizeof(env[0]));
-    if (ch360_quiet || ch360_verbose) {
+    cfg.envp = env;
+    if (ch360_quiet || ch360_verbose) {   /* (set after env: the twenty-ninth build set it before, and env won) */
         static const char* list[7];
         memcpy(list, env, sizeof(env));
         list[6] = ch360_quiet ? "CH360_PROFILE=0" : "CH360_PROFILE=2";
         cfg.envp = list;
     }
-    cfg.envp = env;
 #ifndef __XSDK__
     {
         /* PC checks: CH360_GUEST_ENV="A=1 B=2" replaces the GC settings above

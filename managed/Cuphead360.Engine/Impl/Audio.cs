@@ -152,13 +152,18 @@ namespace Cuphead360.Engine
             void Free(int id);
             /// <summary>The host's handle of a streamed clip's reader, or -1.</summary>
             int Handle(IClipReader r);
-            void Begin(int frames);
             /// <summary>
-            /// One voice into the block over [start, frames): kind 1 a decoded clip, 2 a streamed one, 0 silence
-            /// (only the position moves). True when a clip that doesn't loop ended; stepped counts the samples
-            /// since the start or, when it wrapped, since the wrap at (wrapF0, wrapT).
+            /// A mix of frames begins (the host's mixer held until End); the frames the host carried the last
+            /// mix's voices on since, while the game was late (the console's audio thread), already played.
             /// </summary>
-            bool Voice(int kind, int id, int start, int frames, bool loop, long total, int channels, long f0, float t, long istep, float fstep,
+            int Begin(int frames);
+            /// <summary>
+            /// One voice (key: the same every mix while it plays) into the block over [start, frames): kind 1 a
+            /// decoded clip, 2 a streamed one, 0 silence (only the position moves). True when a clip that
+            /// doesn't loop ended; stepped counts the samples since the start or, when it wrapped, since the wrap
+            /// at (wrapF0, wrapT). A voice the host carried on is given as wrapped at where it got to.
+            /// </summary>
+            bool Voice(int key, int kind, int id, int start, int frames, bool loop, long total, int channels, long f0, float t, long istep, float fstep,
                        float gl, float gr, out int stepped, out bool wrapped, out long wrapF0, out float wrapT);
             /// <summary>The block to the output.</summary>
             void End(int frames);
@@ -171,6 +176,9 @@ namespace Cuphead360.Engine
 
         public sealed class Voice
         {
+            static int keys;
+            /// <summary>The host mixer's name for it (IHostMixer.Voice).</summary>
+            public readonly int Key = ++keys;
             public NAudioSource Src;
             public Clip Clip;
             public double Frame;          // position in the clip's frames
@@ -497,9 +505,9 @@ namespace Cuphead360.Engine
             int frames = (int)frameCarry;
             frameCarry -= frames;
             if (frames <= 0) return;
-            bool render = Render, host = HostMixer != null;
-            if (host) HostMixer.Begin(frames);
-            else if (render)
+            if (HostMixer != null) { StepHost(frames); return; }
+            bool render = Render;
+            if (render)
             {
                 if (mix.Length < frames * 2) mix = new float[frames * 2];
                 Array.Clear(mix, 0, frames * 2);
@@ -536,17 +544,128 @@ namespace Cuphead360.Engine
             }
             mixedFrames += frames;
             if (!render) return;
-            if (host)
-            {
-                HostMixer.End(frames);
-                return;
-            }
             Output?.Invoke(mix, frames);
             if (capture != null)
             {
                 for (int i = 0; i < frames * 2; i++) capture.Write((short)Math.Round(Math.Clamp(mix[i], -1f, 1f) * 32767f));
                 capturedFrames += frames;
             }
+        }
+
+        // A voice's mix in the host (StepHost's plan).
+        sealed class Plan
+        {
+            public Voice V;
+            public int Kind, Id, Start, Channels;
+            public bool Loop, Ended;
+            public long Total, F0, IStep;
+            public float T, FStep, Gl, Gr;
+            public double Step;
+        }
+
+        static readonly List<Plan> plans = new List<Plan>();
+
+        /// <summary>
+        /// Step with the host's mixer, in two passes: each voice's clip made ready and its mix worked out (a
+        /// clip's first play reads it from the drive or decodes its first frames), then the mix, which holds
+        /// the host's mixer from Begin to End: the console's audio thread carries the last mix's voices on
+        /// while the game is late (ch360_ogg.c), and waits for nothing slow. The frames it carried on count
+        /// as played (the clock and the voices' positions).
+        /// </summary>
+        static void StepHost(int frames)
+        {
+            var listener = NAudioListener.Active;
+            Vector3 hearAt = default, right = Vector3.right;
+            if (listener != null) { var lt = listener.GameObject.Transform; hearAt = lt.Position; right = lt.Rotation * Vector3.right; }
+            int planned = 0;
+            for (int vi = voices.Count - 1; vi >= 0; vi--)
+            {
+                var v = voices[vi];
+                var s = v.Src;
+                if (s == null || s.Destroyed) { Close(v); voices.RemoveAt(vi); continue; }
+                if (v.Paused || (ListenerPause && !s.IgnoreListenerPause)) continue;
+                int start = 0;
+                if (v.Delay > 0)
+                {
+                    double d = v.Delay * Rate;
+                    if (d >= frames) { v.Delay -= frames / (double)Rate; continue; }
+                    start = (int)d; v.Delay = 0;
+                }
+                GroupGain(s.Group, out float gain, out float gpitch);
+                gain *= s.Mute ? 0f : s.Volume * v.VolumeScale * (s.IgnoreListenerVolume ? 1f : ListenerVolume);
+                float pan = s.Pan;
+                if (listener != null && s.GameObject != null && (s.SpatialBlend > 0f || s.BlendCurve?.Count > 1)) Spatial(s, hearAt, right, ref gain, ref pan);
+                var c = v.Clip;
+                double step = c.Frequency / (double)Rate * Math.Max(0f, s.Pitch) * gpitch;
+                bool loop = !v.OneShot && s.Loop;
+                bool ended = c.Frames <= 0;
+                if (!ended && gain <= 0f)
+                {
+                    // silent: only its position moves (a streaming voice's buffer repositions itself when it next sounds)
+                    v.Frame += step * (frames - start);
+                    if (v.Frame >= c.Frames) { if (!loop) ended = true; else v.Frame %= c.Frames; }
+                    if (!ended) continue;
+                }
+                int kind = 0, id = -1;
+                if (!ended && !c.Stream)
+                {
+                    id = HostPcmOf(c);
+                    if (id >= 0) kind = 1;
+                }
+                else if (!ended)
+                {
+                    if (v.Reader == null && !c.Missing)
+                    {
+                        v.Reader = Open(c);
+                        if (v.Reader != null) v.Reader.SamplePosition = (long)v.Frame;
+                    }
+                    if (v.Reader != null && (id = HostMixer.Handle(v.Reader)) >= 0) kind = 2;
+                }
+                // decoding can correct the clip's frame count
+                if (ended || c.Frames <= 0)
+                {
+                    Close(v);
+                    voices.RemoveAt(vi);
+                    if (s.Main == v) s.Main = null;
+                    continue;
+                }
+                if (planned == plans.Count) plans.Add(new Plan());
+                var p = plans[planned++];
+                long f0 = (long)v.Frame, istep = (long)step;
+                p.V = v; p.Kind = kind; p.Id = id; p.Start = start; p.Channels = c.Channels; p.Loop = loop; p.Ended = false;
+                p.Total = c.Frames; p.F0 = f0; p.T = (float)(v.Frame - f0); p.IStep = istep; p.FStep = (float)(step - istep); p.Step = step;
+                p.Gl = gain * (pan > 0f ? 1f - pan : 1f); p.Gr = gain * (pan < 0f ? 1f + pan : 1f);
+            }
+            int carried = HostMixer.Begin(frames);
+            try
+            {
+                for (int i = 0; i < planned; i++)
+                {
+                    var p = plans[i];
+                    var v = p.V;
+                    double basePos = v.Frame;
+                    p.Ended = HostMixer.Voice(v.Key, p.Kind, p.Id, p.Start, frames, p.Loop, p.Total, p.Channels, p.F0, p.T, p.IStep, p.FStep, p.Gl, p.Gr,
+                                              out int stepped, out bool wrapped, out long wrapF0, out float wrapT);
+                    if (wrapped) basePos = wrapF0 + (double)wrapT;
+                    v.Frame = basePos + p.Step * stepped;
+                }
+            }
+            finally
+            {
+                HostMixer.End(frames);
+            }
+            for (int i = 0; i < planned; i++)
+            {
+                var p = plans[i];
+                if (p.Ended)
+                {
+                    Close(p.V);
+                    voices.Remove(p.V);
+                    if (p.V.Src != null && p.V.Src.Main == p.V) p.V.Src.Main = null;
+                }
+                p.V = null;
+            }
+            mixedFrames += frames + Math.Max(0, carried);
         }
 
         /// <summary>
@@ -592,7 +711,6 @@ namespace Cuphead360.Engine
                 if (v.Frame >= total) { if (!loop) return true; v.Frame %= total; }
                 return false;   // a streaming voice's buffer repositions itself when it next renders
             }
-            if (HostMixer != null) return AdvanceHost(v, start, frames, step, gain, pan, loop);
             int ch = c.Channels;
             float gl = gain * (pan > 0f ? 1f - pan : 1f), gr = gain * (pan < 0f ? 1f + pan : 1f);
             float[] pcm = c.Stream ? null : Pcm(c);
@@ -643,39 +761,6 @@ namespace Cuphead360.Engine
             }
             v.Frame = basePos + step * stepped;
             return false;
-        }
-
-        /// <summary>Advance's mix in the host's mixer (the same arithmetic, on native samples).</summary>
-        static bool AdvanceHost(Voice v, int start, int frames, double step, float gain, float pan, bool loop)
-        {
-            var c = v.Clip;
-            float gl = gain * (pan > 0f ? 1f - pan : 1f), gr = gain * (pan < 0f ? 1f + pan : 1f);
-            int kind = 0, id = -1;
-            if (!c.Stream)
-            {
-                id = HostPcmOf(c);
-                if (id >= 0) kind = 1;
-            }
-            else
-            {
-                if (v.Reader == null && !c.Missing)
-                {
-                    v.Reader = Open(c);
-                    if (v.Reader != null) v.Reader.SamplePosition = (long)v.Frame;
-                }
-                if (v.Reader != null && (id = HostMixer.Handle(v.Reader)) >= 0) kind = 2;
-            }
-            // Decoding can correct the clip's frame count.
-            long total = c.Frames;
-            if (total <= 0) return true;
-            double basePos = v.Frame;
-            long f0 = (long)basePos, istep = (long)step;
-            float t = (float)(basePos - f0), fstep = (float)(step - istep);
-            bool ended = HostMixer.Voice(kind, id, start, frames, loop, total, c.Channels, f0, t, istep, fstep, gl, gr,
-                                         out int stepped, out bool wrapped, out long wrapF0, out float wrapT);
-            if (wrapped) basePos = wrapF0 + (double)wrapT;
-            v.Frame = basePos + step * stepped;
-            return ended;
         }
 
         /// <summary>Make a streaming voice's buffer hold frame <paramref name="f0"/> and, when the clip has it, the next one.</summary>
