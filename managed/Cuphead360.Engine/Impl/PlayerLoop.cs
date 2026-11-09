@@ -144,7 +144,7 @@ namespace Cuphead360.Engine
             Clock.UnscaledTime += realDelta;
             Clock.DeltaTime = dt * Clock.TimeScale;
             Clock.Time += Clock.DeltaTime;
-            CountAllocs = Profile && Clock.FrameCount % AllocSampling == 0;
+            CountAllocs = Profile && ProfileScripts && Clock.FrameCount % AllocSampling == 0;
             Typed.Sweep();
 
             P(0); SceneLoader.Pump();
@@ -205,6 +205,8 @@ namespace Cuphead360.Engine
         /// step on every frame were ~4% of host_native's frame over the Forest Follies route.
         /// </summary>
         public static bool CountAllocs;
+        /// <summary>Script calls timed too (one frame in AllocSampling); off, only the phases are.</summary>
+        public static bool ProfileScripts = Environment.GetEnvironmentVariable("CH360_PROFILE_SCRIPTS") != "0";
         public const int AllocSampling = 4;
         public static readonly string[] PhaseNames = { "pump", "fixed", "physics", "update", "animators", "late", "ui", "end", "audio" };
         public static readonly double[] PhaseMs = new double[9];

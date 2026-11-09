@@ -66,6 +66,11 @@ def parse(path):
                 if g:
                     v["gpu"], v["host"], v["loads_ms"], v["uploads_ms"] = (float(g.group(k)) for k in range(1, 5))
                     v["underruns"], v["tex_mb"], v["free_mb"] = int(g.group(5)), int(g.group(6)), int(g.group(7))
+                    # without the per-texture lines (the default since the twenty-eighth run): the host's counts
+                    c = re.search(r"(\d+) loaded on demand, (\d+) read again", lines[j])
+                    n = re.search(r"; (\d+) textures loaded\)", lines[j])
+                    if c and n and v["tex"]["loads"] == 0:
+                        v["tex"] = collections.Counter({"loads": int(n.group(1)), "on demand": int(c.group(1)), "again": int(c.group(2))})
             visits.append(v)
             continue
         m = re.match(r"(BOOT|LEVEL) hold.*?: (\d+) frames, (\d+) ms", ln)

@@ -289,6 +289,33 @@ namespace Cuphead360.Engine
         }
 
         /// <summary>
+        /// The clips an animator with this controller plays first: each layer's default state's (all of a blend
+        /// tree's) and the states it can go to from there.
+        /// </summary>
+        public List<ClipData> StartClips()
+        {
+            var list = new List<ClipData>();
+            void Add(State s, int set)
+            {
+                var mo = s?.MotionOf(set);
+                if (mo == null) return;
+                if (mo.BlendClips != null) foreach (int ci in mo.BlendClips) { if (ci >= 0 && ci < Clips.Length && Clips[ci] != null) list.Add(Clips[ci]); }
+                else if (mo.Clip >= 0 && mo.Clip < Clips.Length && Clips[mo.Clip] != null) list.Add(Clips[mo.Clip]);
+            }
+            foreach (var l in Layers)
+            {
+                if (l.Machine < 0 || l.Machine >= Machines.Length) continue;
+                var m = Machines[l.Machine];
+                if (m.DefaultState < 0 || m.DefaultState >= m.States.Length) continue;
+                var s = m.States[m.DefaultState];
+                Add(s, l.MotionSet);
+                foreach (var tr in s.Transitions)
+                    if (tr.Destination >= 0 && tr.Destination < m.States.Length) Add(m.States[tr.Destination], l.MotionSet);
+            }
+            return list;
+        }
+
+        /// <summary>
         /// Whether a scene's load reads its controllers: the levels', whose first spawns hitched in play, and
         /// the title's and the slot select's (the title screen's first update built its dancers' controllers:
         /// StartScreen.Update 199 ms as the logo ended, the slot select 240 ms, the twenty-seventh run). Not
@@ -305,6 +332,14 @@ namespace Cuphead360.Engine
         // on the console (~83 MB from the drive for 13,000 objects lying in ~1,200 blocks, 38 MB) and took 8 s
         // more than before the warm-up (the twenty-seventh run: Hilda Berg's 7.3 s, Forest Follies' 11.8 s).
         static readonly List<RuntimeAnimatorController> warming = new List<RuntimeAnimatorController>();
+        // What the load in progress warmed: kept through the unload pass of its own activation (RetainLiveData).
+        // A scene loaded on its own (the title) runs that pass after its build, and the pass kept only live
+        // animators' data: the DLC title animation's, inactive until the logo ended, was read again then
+        // (a 241 ms frame as the title screen appeared, the twenty-eighth run).
+        static readonly List<ControllerData> warmedKeep = new List<ControllerData>();
+        internal static List<ControllerData> WarmedKeep => warmedKeep;
+        /// <summary>A scene load begins: what the last one warmed is no longer kept by the unload pass.</summary>
+        public static void NewLoad() => warmedKeep.Clear();
         static List<ChobObject> warmClips;
         static List<(ChobFile from, PPtr p, ChobObject at)> warmSprites;
         static int warmStage, warmAt;
@@ -371,7 +406,7 @@ namespace Cuphead360.Engine
                     {
                         var c = warming[warmAt++];
                         if (c == null || !(Objects.Of(c) is NAsset a) || a.Destroyed) continue;
-                        Of(c);
+                        if (Of(c) is ControllerData d) warmedKeep.Add(d);
                         Warmed++;
                         return true;
                     }
@@ -1714,6 +1749,11 @@ namespace Cuphead360.Engine
                 if (a.Destroyed || a.Data == null) continue;
                 ctls.Add(a.Data);
                 foreach (var c in a.Data.Clips) if (c != null) clips.Add(c);
+            }
+            foreach (var d in ControllerData.WarmedKeep)
+            {
+                ctls.Add(d);
+                foreach (var c in d.Clips) if (c != null) clips.Add(c);
             }
             ControllerData.Retain(ctls);
             ClipData.Retain(clips);

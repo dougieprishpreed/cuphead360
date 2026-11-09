@@ -36,8 +36,23 @@ namespace Cuphead360.Engine
         public static void SceneActivated(string name)
         {
             if (name == "scene_load_helper") { Run("after " + name); passedThisLoad = true; return; }
-            if (passedThisLoad) { passedThisLoad = false; return; }
+            if (passedThisLoad) { passedThisLoad = false; Settle(name); return; }
             Run("after " + name);
+        }
+
+        /// <summary>
+        /// A level or map just activated, the screen still black: a full, compacting collection, so play
+        /// starts without the load's garbage (the build, the warm-up, the activation). Its first gen1 and gen2
+        /// collections came in play instead: the twenty-eighth quiet run's Frogs paused 2.3 s for 5 gen1 and
+        /// 2 gen2 (60-90 and 300-600 ms each on the console).
+        /// </summary>
+        static void Settle(string name)
+        {
+            if (!(name.StartsWith("scene_level_") || name.StartsWith("scene_map_"))) return;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp(), heap0 = GC.GetTotalMemory(false);
+            GC.Collect(2, GCCollectionMode.Forced, true, true);
+            Log.Line($"GC after {name}: heap {heap0 >> 20} -> {GC.GetTotalMemory(false) >> 20} MB in "
+                + $"{(System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000 / System.Diagnostics.Stopwatch.Frequency} ms");
         }
 
         /// <summary>

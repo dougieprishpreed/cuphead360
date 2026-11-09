@@ -949,7 +949,7 @@ static void run_start(void* p) {
 }
 
 int ch360_staged_names = 0;
-int ch360_quiet = 0;
+int ch360_quiet = 0, ch360_verbose = 0, ch360_nolog = 0;
 
 void ch360_staged_name(const char* key, size_t len, char* out) {
     static const char hex[] = "0123456789ABCDEF";
@@ -986,14 +986,20 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
      * (scene builds sliced by the clock), so neither is set (2026-11-05). */
     static const char* const env[7] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCConserveMemory=0",
                                         "CH360_TREE_BUDGET_MB=4", "DOTNET_GCgen0size=100000", "DOTNET_GCLOHCompact=1",
-                                        "CH360_PROFILE=0" };   /* the last only in a quiet run */
+                                        "CH360_PROFILE=1" };   /* the last: 0 in a quiet run, 2 in a profile run */
     srt_config cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.root_dir = root_dir;
     ch360_ogg_root(root_dir);
     cfg.argc = argc;
     cfg.argv = argv;
-    cfg.envc = (int)(sizeof(env) / sizeof(env[0])) - (ch360_quiet ? 0 : 1);
+    cfg.envc = (int)(sizeof(env) / sizeof(env[0]));
+    if (ch360_quiet || ch360_verbose) {
+        static const char* list[7];
+        memcpy(list, env, sizeof(env));
+        list[6] = ch360_quiet ? "CH360_PROFILE=0" : "CH360_PROFILE=2";
+        cfg.envp = list;
+    }
     cfg.envp = env;
 #ifndef __XSDK__
     {

@@ -48,11 +48,12 @@ namespace Cuphead360.Engine
             Scenes.NScene scene;
             SceneBuild build;
             List<ChobObject> gameObjects;
-            int stage, next, frames, warmed0;
-            long t0, tWarm, tReady, files0, bytes0;
+            int stage, next, frames, warmed0, prepBest, prepSprites, prepClips, prepLeft;
+            long t0, tWarm, tPrep, tReady, files0, bytes0, prepAt;
 
             public static SceneLoad Begin(int index, bool additive)
             {
+                ControllerData.NewLoad();
                 var l = new SceneLoad { Index = index, Additive = additive, path = AssetDb.BuildScenes[index] };
                 l.name = System.IO.Path.GetFileNameWithoutExtension(l.path);
                 l.t0 = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -115,9 +116,25 @@ namespace Cuphead360.Engine
                                 if (Over()) return false;
                             Audio.PreloadFresh();
                             stage = 5;
-                            tReady = System.Diagnostics.Stopwatch.GetTimestamp();
-                            Progress = 1f;
-                            return true;
+                            tPrep = prepAt = System.Diagnostics.Stopwatch.GetTimestamp();
+                            prepBest = int.MaxValue;
+                            if (name.StartsWith("scene_level_") || name.StartsWith("scene_map_"))
+                                (prepSprites, prepClips) = RenderList.ReadAheadLoad(scene.Handle);
+                            if (Over()) return false;
+                            break;
+                        case 5:
+                            {
+                                // Their pages read while the hourglass turns: until none is coming, one second
+                                // without progress (memory holds the rest back), or eight in all.
+                                long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                                prepLeft = RenderList.TexturesPending?.Invoke() ?? 0;
+                                if (prepLeft < prepBest) { prepBest = prepLeft; prepAt = now; }
+                                if (prepLeft > 0 && now - prepAt < hz && now - tPrep < 8 * hz) return false;
+                                stage = 6;
+                                tReady = now;
+                                Progress = 1f;
+                                return true;
+                            }
                         default:
                             return true;
                     }
@@ -142,7 +159,8 @@ namespace Cuphead360.Engine
                 if (Timing)
                 {
                     Log.Line($"SCENE {name}: built in {Ms(t0, tReady)} ms over {frames} frames ({ChobFile.LoadedFiles - files0} files read, "
-                        + $"{(ChobFile.LoadedBytes - bytes0) >> 20} MB; {ControllerData.Warmed - warmed0} animator controllers read in {Ms(tWarm, tReady)} ms), "
+                        + $"{(ChobFile.LoadedBytes - bytes0) >> 20} MB; {ControllerData.Warmed - warmed0} animator controllers read in {Ms(tWarm, tPrep)} ms; "
+                        + $"pages read ahead for {prepSprites} sprites and {prepClips} clips in {Ms(tPrep, tReady)} ms, {prepLeft} still coming), "
                         + $"activated in {Ms(t1, System.Diagnostics.Stopwatch.GetTimestamp())} ms "
                         + $"({Instantiated(calls0, copied0, tree0, fields0, bind0, objs0, thunks0)})");
                     MemoryLine();
@@ -226,6 +244,7 @@ namespace Cuphead360.Engine
             string path = AssetDb.BuildScenes[index];
             string name = System.IO.Path.GetFileNameWithoutExtension(path);
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp(), files0 = ChobFile.LoadedFiles, bytes0 = ChobFile.LoadedBytes;
+            ControllerData.NewLoad();
             var file = AssetDb.File("level" + index);
             if (file == null) { Log.Line("SCENE level" + index + " (" + name + ") is not converted"); return; }
             if (!additive) UnloadAll();

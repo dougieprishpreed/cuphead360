@@ -69,11 +69,21 @@ volatile unsigned long long g_io_bytes = 0;
 volatile double g_io_ms = 0;
 
 volatile size_t g_texture_bytes = 0;   // the renderer's, for the heartbeat
+volatile bool g_log_loading = false;    // the last frame the game drew was the loading screen (record_loading)
+unsigned g_log_dropped = 0;             // lines left out past LOG_QUEUE_MAX
+// Lines queued at most: past it they are left out (counted) rather than written during play.
+const size_t LOG_QUEUE_MAX = 4u << 20;
 
 void flush_log(bool sync = false) {
     std::string lines;
     pthread_mutex_lock(&g_log_lock);
     lines.swap(g_log_queue);
+    if (g_log_dropped) {
+        char note[80];
+        int n = snprintf(note, sizeof(note), "log: %u lines left out (the queue was full during play)\n", g_log_dropped);
+        if (n > 0) lines.append(note, (size_t)n);
+        g_log_dropped = 0;
+    }
     pthread_mutex_unlock(&g_log_lock);
     if (lines.empty()) return;
     if (!g_log_file) g_log_file = fopen("game:/cuphead360.txt", "ab");
@@ -90,14 +100,19 @@ double now_ms();
 void memory_mb(unsigned* free_mb, unsigned* total_mb);
 extern "C" void srt_get_stats(void* out);
 
-// The USB drive is slow per write, and the texture loader reads from it: lines queue and a thread writes
-// them every 2 s, synced every 30 s (writes every 100 ms, synced twice a second, sat in the drive's queue
-// with the pages the frames waited for: the twenty-second run). Every 2 s for the first two minutes, then every 10 s, it logs a
-// heartbeat: the frame count and where the guest thread is, so a stall shows
-// its place, and a log that simply ends means the whole console froze.
+// The USB drive is slow per write, and the texture loader and the clip reader read from it: lines queue in
+// memory and a thread writes them only while nothing plays: the loading screen up, or no frame finished for
+// half a second (a load behind the black, or a hang: what led up to a freeze still reaches the drive), and
+// at quit (Back + Start); synced at most every 30 s. Past LOG_QUEUE_MAX queued, lines are left out instead. Written every 2 s whatever the
+// game did (and every 100 ms, synced twice a second, before the twenty-second run), each write and sync sat
+// in the drive's one queue ahead of the pages and sounds the frames waited for: the logo and play now write
+// nothing. Every 2 s for the first two minutes, then every 10 s, it logs a heartbeat: the frame count and
+// where the guest thread is, so a stall shows its place, and a log that simply ends means the whole
+// console froze.
 void* log_writer(void*) {
     xsdk_thread_move(5);
-    double start = now_ms();
+    double start = now_ms(), frame_at = start, synced_at = start;
+    unsigned frames_at = 0;
     for (unsigned tick = 1;; ++tick) {
         struct timespec ts = { 0, 100000000 };
         nanosleep(&ts, NULL);
@@ -115,8 +130,17 @@ void* log_writer(void*) {
                  s, g_frames_seen, (const char*)g_stage, free_mb, ch360_memory_kb() / 1024, (unsigned)(g_texture_bytes >> 20),
                  (unsigned)st.wasi_calls, g_io_opens, g_io_reads, (unsigned)(g_io_bytes >> 20), (unsigned)g_io_ms, g_io_seeks);
         }
-        // Written every 2 s, synced every 30: a freeze keeps most of what led up to it.
-        if (tick % 20 == 0) flush_log(tick % 300 == 0);
+        double now = now_ms();
+        if (g_frames_seen != frames_at) {
+            frames_at = g_frames_seen;
+            frame_at = now;
+        }
+        bool idle = g_log_loading || now - frame_at > 500;
+        if (tick % 20 == 0 && idle) {
+            bool sync = now - synced_at > 30000;
+            if (sync) synced_at = now;
+            flush_log(sync);
+        }
     }
     return NULL;
 }
@@ -128,8 +152,10 @@ struct Stage {
 };
 
 void log_text(const char* text, size_t len) {
+    if (ch360_nolog) return;
     pthread_mutex_lock(&g_log_lock);
-    g_log_queue.append(text, len);
+    if (g_log_queue.size() + len > LOG_QUEUE_MAX) ++g_log_dropped;
+    else g_log_queue.append(text, len);
     pthread_mutex_unlock(&g_log_lock);
     if (!g_log_thread) flush_log();
 }
@@ -442,7 +468,7 @@ struct Frame {
 // times in ms, fill in screens of pixels.
 struct HostStats {
     double frames, gpu_frames, gpu_ms, gpu_kind[GPU_KINDS], fence_ms, present_ms, host_ms, loads_ms, uploads_ms;
-    double textures, fill_screen, fill_offscreen, draws, passes, slow;
+    double textures, fill_screen, fill_offscreen, draws, passes, slow, demand, again;
 };
 
 class Renderer {
@@ -1740,7 +1766,9 @@ void Renderer::take_loads(bool all) {
                     record_copy(*t, buf, off);
                     t->unused_pre = j->pre;
                     g_texture_bytes = texture_bytes_;
-                    if (loads_logged_ < 1500 && !ch360_quiet) {
+                    if (!j->pre) stats_.demand += 1;
+                    if (t->reloads > 0) stats_.again += 1;
+                    if (loads_logged_ < 1500 && ch360_verbose) {
                         ++loads_logged_;
                         unsigned free_mb, total_mb;
                         memory_mb(&free_mb, &total_mb);
@@ -2555,7 +2583,7 @@ void Renderer::frame(const ch360_frame* f) {
     if (t6 - t0 > 12.0) {
         stats_.slow += 1;
         ++host_slow_;
-        if (host_slow_logged_ < 6 && !ch360_quiet) {
+        if (host_slow_logged_ < 6 && ch360_verbose) {
             ++host_slow_logged_;
             logf("HOST SLOW frame %u: %.1f ms: boxes+loads %.1f (%u textures), fence %.1f, uploads %.1f, acquire %.1f, record %.1f, "
                  "submit %.1f, present %.1f; %u draws, %u passes, %u items", frame_no_, t6 - t0, t1 - t0, uploads - uploads0, t2 - t1,
@@ -2644,6 +2672,7 @@ void record_loading(const ch360_frame* f) {
     bool ahead = (f->loading & 0x40000000u) != 0;
     if (!f->loading || f->item_count > 256 || f->vertex_count > 16384) {
         g_loading_screen = false;   // the slots stay for the next loading screen
+        if (!ahead) g_log_loading = false;
         return;
     }
     unsigned period = (f->loading >> 16) & 0x3FFF, shape = loading_shape(f);
@@ -2662,6 +2691,7 @@ void record_loading(const ch360_frame* f) {
     if (ahead) return;
     g_rec_head = slot;
     g_loading_screen = true;
+    g_log_loading = true;
 }
 
 // The kept frame to draw when the hourglass is at phase ms of its cycle: the newest of those
@@ -2901,7 +2931,7 @@ extern "C" void ch360_plat_host_stats(unsigned* out, int n) {
         s.frames, s.gpu_frames, s.gpu_ms * 100, s.gpu_kind[GPU_RT] * 100, s.gpu_kind[GPU_FX] * 100, s.gpu_kind[GPU_SCREEN] * 100,
         s.fence_ms * 100, s.present_ms * 100, s.host_ms * 100, s.loads_ms * 100, s.uploads_ms * 100, s.textures,
         s.fill_screen * 100, s.fill_offscreen * 100, s.draws, s.passes, (double)(g_audio_underruns - underruns_seen),
-        (double)(g_renderer->texture_bytes() >> 20), (double)f, s.slow };
+        (double)(g_renderer->texture_bytes() >> 20), (double)f, s.slow, s.demand, s.again };
     underruns_seen = g_audio_underruns;
     for (int i = 0; i < n && i < CH360_HOST_STATS; ++i) out[i] = v[i] < 0 ? 0 : v[i] > 4294967295.0 ? 0xFFFFFFFFu : (unsigned)v[i];
     memset(&s, 0, sizeof(s));
@@ -3139,11 +3169,21 @@ int main() {
     if (fresh) fclose(fresh);
     logf("Cuphead360 (xSDK) %s", CH360_GIT_COMMIT);
     {
-        FILE* q = fopen("game:/quiet.txt", "rb");
+        FILE* q = fopen("game:/nolog.txt", "rb");
         if (q) {
             fclose(q);
             ch360_quiet = 1;
-            logf("quiet run (quiet.txt): profiling off, texture and slow-part lines off");
+            logf("no log (nolog.txt): nothing more is written this session; no timing of phases or scripts");
+            flush_log(true);
+            ch360_nolog = 1;
+        } else if ((q = fopen("game:/quiet.txt", "rb")) != NULL) {
+            fclose(q);
+            ch360_quiet = 1;
+            logf("quiet run (quiet.txt): no timing of phases or scripts, no texture or slow-part lines");
+        } else if ((q = fopen("game:/profile.txt", "rb")) != NULL) {
+            fclose(q);
+            ch360_verbose = 1;
+            logf("profile run (profile.txt): scripts timed, texture and slow-part lines");
         }
     }
     unsigned f, t;

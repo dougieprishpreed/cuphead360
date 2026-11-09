@@ -375,7 +375,9 @@ namespace Cuphead360.Engine
             }
             foreach (var go in Typed.GameObjects)
             {
-                if (go.IsAsset || go.Scene != handle) continue;
+                // the persistent objects' too: the scene loader's iris wipe (16 textures) came from the drive as the
+                // title screen appeared and as the wipe played
+                if (go.IsAsset || (go.Scene != handle && go.Scene != Scenes.DontDestroy.Handle)) continue;
                 foreach (var c in go.Components)
                 {
                     if (c is NSpriteRenderer sr) One(sr.Sprite);
@@ -418,6 +420,63 @@ namespace Cuphead360.Engine
             return n;
         }
 
+        /// <summary>The host's textures still being read or queued (the console's; null elsewhere).</summary>
+        public static Func<int> TexturesPending;
+
+        /// <summary>
+        /// A level or map being loaded, before its activation (the hourglass still up: SceneLoad's last stage):
+        /// what its active renderers and images show and the clips its animators start with, read ahead, those
+        /// nearest the scene's camera first. Levels began with their pages read as their first frames drew
+        /// them (the Frogs' 234, 308 and 196 ms frames), and the map after a level read back what the level
+        /// had let go as it showed it (13-17 hitches a 1,000 frames against 3 on its first visit, the
+        /// twenty-eighth run). The sprites and clips asked for.
+        /// </summary>
+        // Active once its scene is (ActiveInHierarchy says no while the scene is still being built).
+        static bool ActiveOnceBuilt(NGameObject go)
+        {
+            for (var t = go.Transform; t != null; t = t.Parent)
+                if (!t.GameObject.ActiveSelf) return false;
+            return true;
+        }
+
+        public static (int sprites, int clips) ReadAheadLoad(int sceneHandle)
+        {
+            if (ReadAhead == null) return (0, 0);
+            Vector3 eye = default;
+            foreach (var c in Typed.Cameras)
+                if (!c.Destroyed && c.GameObject != null && c.GameObject.Scene == sceneHandle) { eye = c.GameObject.Transform.Position; break; }
+            var sprites = new List<(float d, Sprite s)>();
+            var clips = new List<(float d, ClipData c)>();
+            foreach (var go in Typed.GameObjects)
+            {
+                if (go.IsAsset || go.Scene != sceneHandle || !ActiveOnceBuilt(go)) continue;
+                var p = go.Transform.Position;
+                float d = (p.x - eye.x) * (p.x - eye.x) + (p.y - eye.y) * (p.y - eye.y);
+                foreach (var c in go.Components)
+                {
+                    if (c is NSpriteRenderer sr) { if (sr.Sprite != null) sprites.Add((d, sr.Sprite)); }
+                    else if (c.Managed is UnityEngine.UI.Image img) { if (img.sprite != null) sprites.Add((d, img.sprite)); }
+                    else if (c is NAnimator a && a.Controller != null && ControllerData.Of(a.Controller) is ControllerData cd)
+                        foreach (var clip in cd.StartClips()) clips.Add((d, clip));
+                }
+            }
+            sprites.Sort((x, y) => x.d.CompareTo(y.d));
+            clips.Sort((x, y) => x.d.CompareTo(y.d));
+            int si = 0, ci = 0;
+            // nearest first, sprites and clips in turn
+            while (si < sprites.Count || ci < clips.Count)
+            {
+                if (si < sprites.Count && (ci >= clips.Count || sprites[si].d <= clips[ci].d))
+                {
+                    var s = sprites[si++].s;
+                    if (Sprites.BoundTexture(s) == null) Atlases.Touch(s);
+                    else Ahead(s);
+                }
+                else AheadClip(clips[ci++].c);
+            }
+            return (sprites.Count, clips.Count);
+        }
+
         /// <summary>A clip's sprites read ahead (an animator's next states: NAnimator.ReadAheadNext).</summary>
         internal static void AheadClipOf(ClipData clip) { if (ReadAhead != null) AheadClip(clip); }
 
@@ -425,7 +484,9 @@ namespace Cuphead360.Engine
         {
             if (clip == null || Clock.FrameCount - clip.AheadFrame < ClipAheadFrames) return;
             clip.AheadFrame = Clock.FrameCount;
-            foreach (var o in clip.PPtrs) if (o is Sprite s) Ahead(s);
+            foreach (var o in clip.PPtrs)
+                if (o is Sprite s) Ahead(s);
+                else if (o is Texture2D t) ReadAhead(t, new Vector4(0, 0, 1, 1));   // a texture curve's (the scene loader's iris wipe)
         }
 
         public static List<View> Build()
@@ -750,7 +811,9 @@ namespace Cuphead360.Engine
                 var px = xf.Pixel;
                 if (sx + rx < px.x || sx - rx > px.x + px.width || sy + ry < px.y || sy - ry > px.y + px.height)
                 {
-                    float mx = 0.5f * px.width, my = 0.5f * px.height;
+                    // a screen to each side (run-and-gun levels scroll sideways: half a screen gave a page
+                    // well under a second, read at 50-80 ms each behind others), half above and below
+                    float mx = px.width, my = 0.5f * px.height;
                     if (ReadAhead != null && !(sx + rx < px.x - mx || sx - rx > px.x + px.width + mx || sy + ry < px.y - my || sy - ry > px.y + px.height + my))
                         Ahead(sr.Sprite);
                     return null;

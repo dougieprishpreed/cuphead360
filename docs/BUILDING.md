@@ -252,11 +252,15 @@ To compare runs scene by scene, keep each run's log in its own folder
 (`work\console\<run>\cuphead360.txt`) and run
 `python tools\compare_runs.py <run> <run> ...`.
 
-Measuring costs a little. To play without it, put an empty file named
-`quiet.txt` next to `default.xex`: the game then skips its per-script timing
-and its per-texture and slow-frame lines, and still logs each scene's frame
-times and hitch counts, so a quiet run can be compared with a normal one.
-Delete the file to go back.
+By default the game times its own phases and logs each scene's frame times,
+hitches and texture counts. Two empty files next to `default.xex` change
+that: `quiet.txt` turns the phase timing off too (only frame times and
+hitch counts stay), and `profile.txt` turns on everything (each script's
+time, a line per texture loaded and per slow frame), which costs some
+smoothness. `nolog.txt` writes nothing after the log's first line, to judge
+by feel what logging costs. Delete the file to go back. The log is written
+to the drive only while a loading screen is up, when the game stops for a
+moment, and when you quit, so play never waits behind it.
 
 ## After an update
 

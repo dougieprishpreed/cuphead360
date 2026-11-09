@@ -218,8 +218,8 @@ namespace Cuphead360.Player
             long lastGc0, lastGc1, lastGc2, lastPauseMs, lastAlloc, lastDecode, gcAt0, gcAt1, gcAt2, pauseAt, allocAt, decodeAt;
             int lastFrame, loadsAt;
             bool lastLoaded, activation;
-            readonly uint[] host = new uint[20];
-            readonly double[] hostSum = new double[20];
+            readonly uint[] host = new uint[22];
+            readonly double[] hostSum = new double[22];
             static bool noAlloc;
 
             static long Allocated()
@@ -394,7 +394,7 @@ namespace Cuphead360.Player
                     + $"screen {host[5] / 100.0 / gf:0.0}; {host[1]} frames timed); {host[15] / hf:0.0} passes, {host[14] / hf:0} draws a frame; fill {host[12] / 100.0 / hf:0.00} screens "
                     + $"+ {host[13] / 100.0 / hf:0.00} in render textures; host part {host[8] / 100.0 / hf:0.0} ms/frame (texture loads {host[9] / 100.0 / hf:0.0}, uploads {host[10] / 100.0 / hf:0.0}; "
                     + $"{host[11]} textures loaded), fence {host[6] / 100.0 / hf:0.0}, present {host[7] / 100.0 / hf:0.0}; {host[19]} slow host parts; audio underruns {host[16]}; "
-                    + $"textures {host[17]} MB, {host[18]} MB free");
+                    + $"textures {host[17]} MB, {host[18]} MB free; {host[20]} loaded on demand, {host[21]} read again");
                 Console.WriteLine($"SCENE TOP {sceneName} ms/frame:{top}");
                 if (!noAlloc) Console.WriteLine($"SCENE ALLOC {sceneName} KB/frame:{PlayerLoop.TopBytesOf(scene.Bytes, Math.Max(1, scene.Frames), 16)}");
             }
@@ -420,6 +420,8 @@ namespace Cuphead360.Player
                 var b = Encoding.UTF8.GetBytes(path);
                 fixed (byte* p = b) OggPreload(p, b.Length, batch);
             };
+            // A load's last step waits under the hourglass for the pages it read ahead (SceneLoad, RenderList.ReadAheadLoad).
+            RenderList.TexturesPending = () => TexturesPending();
             // An atlas the game loads: its pages read ahead (the boot's preload of the title's atlases readies the logo).
             Atlases.Prefetch = src => TexturePrefetch(FileTextureId(src));
             // Sprites near the view and the clips those on screen play: their pages read ahead (converted ones only).
@@ -439,6 +441,9 @@ namespace Cuphead360.Player
             long last = System.Diagnostics.Stopwatch.GetTimestamp(), hz = System.Diagnostics.Stopwatch.Frequency;
             // The log's per-phase and per-script figures (CH360_PROFILE=0, through CH360_GUEST_ENV on PC: off, to measure their cost).
             PlayerLoop.Profile = Environment.GetEnvironmentVariable("CH360_PROFILE") != "0";
+            // Per-script timing only in a profile run (profile.txt): with the host's texture lines it cost the
+            // twenty-eighth run a third of its hitches against a quiet one.
+            PlayerLoop.ProfileScripts = Environment.GetEnvironmentVariable("CH360_PROFILE") == "2";
             var perf = new PerfLog(hz);
             while (FrameBegin() != 0)
             {
@@ -696,8 +701,8 @@ namespace Cuphead360.Player
         /// is in, as the boot's: the read-ahead's backlog (300-odd pages) ran it to its limit in the
         /// twenty-seventh run. At most 3 s; CH360_LEVEL_HOLD=0: none.
         /// </summary>
-        static int levelLoads = -1, levelFrames, levelSprites, levelUnbound, levelClear;
-        static long levelFrom;
+        static int levelLoads = -1, levelFrames, levelSprites, levelUnbound, levelClear, levelPending;
+        static long levelFrom, levelProgressAt;
         static bool levelHolding, levelSettled;
         static readonly bool levelHoldOff = Environment.GetEnvironmentVariable("CH360_LEVEL_HOLD") == "0";
         // CH360_HOLD_SCRIPTED=1: the holds in scripted runs too (PC checks of them; scripted runs skip them otherwise)
@@ -715,7 +720,8 @@ namespace Cuphead360.Player
                 levelLoads = loads;
                 if (!name.StartsWith("scene_level_")) return false;
                 levelHolding = true;
-                levelFrom = now;
+                levelFrom = levelProgressAt = now;
+                levelPending = int.MaxValue;
                 levelFrames = levelSprites = levelClear = 0;
                 levelUnbound = -1;
                 levelSettled = false;
@@ -728,9 +734,12 @@ namespace Cuphead360.Player
                 levelSettled = unbound == 0 || unbound == levelUnbound;
                 levelUnbound = unbound;
             }
-            int waited = TexturesWaited(), atlases = Atlases.Outstanding;
+            int waited = TexturesWaited(), atlases = Atlases.Outstanding, pending = TexturesPending();
             levelClear = waited == 0 ? levelClear + 1 : 0;
-            bool done = levelFrames > 2 && levelSettled && atlases == 0 && levelClear >= 3;
+            if (pending < levelPending) { levelPending = pending; levelProgressAt = now; }
+            // and what it asked for (the player's first clips: the player is made after the load), until none
+            // is coming or half a second passes without a page read (memory holds the rest back)
+            bool done = levelFrames > 2 && levelSettled && atlases == 0 && levelClear >= 3 && (pending == 0 || (now - levelProgressAt) * 2 > hz);
             if (done || now - levelFrom > 3 * hz)
             {
                 levelHolding = false;

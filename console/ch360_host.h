@@ -41,8 +41,9 @@ int ch360_plat_frame_begin(void);
  * effects, screen, fence wait, present, host part (the frame's work before present),
  * texture loads, uploads (those times ms x 100), textures loaded, fill on the screen
  * and in render textures (screens x 100), draws, passes, audio underruns, texture MB
- * now, free MB now, slow host parts. Zero where a host has no such thing. */
-#define CH360_HOST_STATS 20
+ * now, free MB now, slow host parts, textures loaded that weren't read ahead, textures
+ * loaded that had been let go before. Zero where a host has no such thing. */
+#define CH360_HOST_STATS 22
 void ch360_plat_host_stats(unsigned* out, int n);
 /* Fills *out for pad 0..3; 0 if it is not connected. */
 int ch360_plat_pad(int index, ch360_pad* out);
@@ -165,10 +166,13 @@ void ch360_audio_memory(unsigned out[7]);
  * of long names (FAT32 scans a folder from the start for every open). The
  * console host sets ch360_staged_names; the PC reads the loose files. */
 extern int ch360_staged_names;
-/* A quiet run (the console host sets it when game:\quiet.txt exists): the player's profiling off
- * (CH360_PROFILE=0: no phase, script or slow-call timing) and the host's per-texture and slow-part lines
- * off; frame times, hitch counts and the per-scene summaries stay. To see what measuring costs. */
-extern int ch360_quiet;
+/* How much a console run measures (the console host sets them from files next to default.xex). By
+ * default the player times its phases (CH360_PROFILE=1) and the host keeps its tallies; per-script
+ * timing and the host's per-texture and slow-part lines cost the twenty-eighth run a third of its
+ * hitches (quiet 17.7 per 1,000 play frames against 26.5). profile.txt: all of it (CH360_PROFILE=2,
+ * ch360_verbose); quiet.txt: the phases off too (CH360_PROFILE=0); nolog.txt: as quiet, and nothing
+ * written to the log after its first lines (ch360_nolog: to judge by feel what logging at all costs). */
+extern int ch360_quiet, ch360_verbose, ch360_nolog;
 /* "XX/YYYYYYYY" and a NUL (12 bytes) for the len bytes of key. */
 void ch360_staged_name(const char* key, size_t len, char* out);
 /* FNV-1a 64 of key as two words. */
