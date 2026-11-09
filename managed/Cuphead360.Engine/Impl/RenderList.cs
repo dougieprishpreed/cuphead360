@@ -744,6 +744,8 @@ namespace Cuphead360.Engine
                     if (it == null) continue;
                     it.Sequence = seq++;
                     v.Add(it);
+                    // a large mesh's other strips on the view, in its order
+                    for (int k = 0; k < stripItems.Count; k++) { stripItems[k].Sequence = seq++; v.Add(stripItems[k]); }
                 }
                 // A mask adds to the stencil after the sprites at its back point and takes it away after those
                 // at its front point (Depth -infinity sorts it after everything at its layer and order), so the
@@ -784,15 +786,19 @@ namespace Cuphead360.Engine
             return new Vector2(p.x + vp.x * p.width, p.y + vp.y * p.height);
         }
 
+        // SpriteItem's strips after the one it returns (a large mesh: Sprites.StripsOf).
+        static readonly List<Item> stripItems = new List<Item>();
+
         static Item SpriteItem(NCamera cam, in CamXform xf, NSpriteRenderer sr)
         {
+            stripItems.Clear();
             var info = Sprites.Of(sr.Sprite);
             if (info == null || info.Vertices.Length == 0 || info.Triangles.Length == 0) return null;
             var m = sr.GameObject.Transform.LocalToWorld;
             var pos = sr.GameObject.Transform.Position;
             float depth = xf.Viewport(pos).z;
             if (depth < cam.Near || depth > cam.Far) return null;   // outside the clip planes
-            bool mapped = HostTransforms && xf.Ortho;
+            bool mapped = HostTransforms && xf.Ortho, inside = false;
             float a00 = 0, a01 = 0, b0 = 0, a10 = 0, a11 = 0, b1 = 0;
             if (mapped)
             {
@@ -819,6 +825,8 @@ namespace Cuphead360.Engine
                     return null;
                 }
                 if (ReadAhead != null) AheadClip(sr.Clip);
+                // wholly on the view: a large mesh drawn whole (its strips would all be drawn, as more items)
+                inside = sx - rx >= px.x && sx + rx <= px.x + px.width && sy - ry >= px.y && sy + ry <= px.y + px.height;
             }
             if (!Sprites.Binding(sr.Sprite, out var tex, out _, out _)) tex = null;
             var uv = Sprites.RenderUvs(sr.Sprite);
@@ -848,7 +856,42 @@ namespace Cuphead360.Engine
             it.Depth = depth; it.GoLayer = sr.GameObject.Layer;
             it.SpriteStencil = sr.MaskInteraction == SpriteMaskInteraction.VisibleInsideMask ? Item.MaskInside
                 : sr.MaskInteraction == SpriteMaskInteraction.VisibleOutsideMask ? Item.MaskOutside : 0;
+            if (mapped && !inside && tex != null && Sprites.StripsOf(info) is Sprites.Strip[] strips) return Strips(it, strips, xf.Pixel);
             return it;
+        }
+
+        /// <summary>
+        /// A large sprite's item as its strips on the view (Sprites.StripsOf): the first returned, the rest
+        /// in stripItems; null when none is. Each strip's box goes through the sprite's map as the whole
+        /// sprite's does, a pixel to spare.
+        /// </summary>
+        static Item Strips(Item whole, Sprites.Strip[] strips, Rect px)
+        {
+            Item first = null;
+            var uvAll = whole.Uv;   // the whole sprite's (the first strip takes the item over)
+            foreach (var s in strips)
+            {
+                var b = s.Bounds;
+                float cx = 0.5f * (b.x + b.z), cy = 0.5f * (b.y + b.w), ex = 0.5f * (b.z - b.x), ey = 0.5f * (b.w - b.y);
+                float sx = whole.A00 * cx + whole.A01 * cy + whole.B0, rx = Math.Abs(whole.A00) * ex + Math.Abs(whole.A01) * ey + 1f;
+                float sy = whole.A10 * cx + whole.A11 * cy + whole.B1, ry = Math.Abs(whole.A10) * ex + Math.Abs(whole.A11) * ey + 1f;
+                if (sx + rx < px.x || sx - rx > px.x + px.width || sy + ry < px.y || sy - ry > px.y + px.height) continue;
+                var it = first == null ? whole : NewItem();
+                if (first != null)
+                {
+                    it.A00 = whole.A00; it.A01 = whole.A01; it.B0 = whole.B0;
+                    it.A10 = whole.A10; it.A11 = whole.A11; it.B1 = whole.B1;
+                    it.BaseName = whole.BaseName; it.SpriteName = whole.SpriteName; it.Texture = whole.Texture;
+                    it.Material = whole.Material; it.Tint = whole.Tint; it.Layer = whole.Layer; it.Order = whole.Order;
+                    it.Depth = whole.Depth; it.GoLayer = whole.GoLayer; it.SpriteStencil = whole.SpriteStencil;
+                    stripItems.Add(it);
+                }
+                else first = whole;
+                it.Uv = Sprites.StripUvs(s, uvAll);
+                it.Local = s.Vertices;
+                it.Triangles = s.Triangles;
+            }
+            return first;
         }
 
         /// <summary>A sprite mask's stencil write at a sorting point: its sprite like a sprite's, its cutoff as the tint's alpha.</summary>
@@ -1117,7 +1160,15 @@ namespace Cuphead360.Engine
                     sb.Append(",\"tint\":[").Append(F(it.Tint.r)).Append(',').Append(F(it.Tint.g)).Append(',').Append(F(it.Tint.b)).Append(',').Append(F(it.Tint.a)).Append(']')
                       .Append(",\"layer\":").Append(it.Layer).Append(",\"order\":").Append(it.Order).Append(",\"depth\":").Append(F(it.Depth));
                     sb.Append(",\"xy\":[");
-                    for (int k = 0; k < it.Screen.Length; k++) { if (k > 0) sb.Append(','); sb.Append(F(it.Screen[k].x)).Append(',').Append(F(it.Screen[k].y)); }
+                    if (it.Screen != null)
+                        for (int k = 0; k < it.Screen.Length; k++) { if (k > 0) sb.Append(','); sb.Append(F(it.Screen[k].x)).Append(',').Append(F(it.Screen[k].y)); }
+                    else if (it.Local != null)   // HostTransforms: the vertices through the item's map, as the host maps them
+                        for (int k = 0; k < it.Local.Length; k++)
+                        {
+                            var lv = it.Local[k];
+                            if (k > 0) sb.Append(',');
+                            sb.Append(F(it.A00 * lv.x + it.A01 * lv.y + it.B0)).Append(',').Append(F(it.A10 * lv.x + it.A11 * lv.y + it.B1));
+                        }
                     sb.Append("],\"uv\":[");
                     for (int k = 0; k < it.Uv.Length; k++) { if (k > 0) sb.Append(','); sb.Append(F(it.Uv[k].x)).Append(',').Append(F(it.Uv[k].y)); }
                     sb.Append("],\"tris\":[");

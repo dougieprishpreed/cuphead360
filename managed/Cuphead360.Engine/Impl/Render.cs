@@ -302,6 +302,9 @@ namespace Cuphead360.Engine
                     return bounds;
                 }
             }
+            // StripsOf's split and the triangles it was made from.
+            internal Strip[] Strips;
+            internal ushort[] StripsFrom;
             public string[] AtlasTags = new string[0];
             public string RenderKey;                           // GUID + local id, matches SpriteAtlas render data
             public Texture2D Texture;                          // own texture (not late-bound)
@@ -314,6 +317,95 @@ namespace Cuphead360.Engine
         }
 
         static readonly ConditionalWeakTable<Sprite, Info> infos = new ConditionalWeakTable<Sprite, Info>();
+
+        /// <summary>A part of a large sprite mesh (StripsOf): its own vertices, triangles and box.</summary>
+        internal sealed class Strip
+        {
+            public Vector2[] Vertices;
+            public int[] Triangles;
+            public int[] From;          // each vertex's index in the whole mesh
+            public Vector4 Bounds;      // x0, y0, x1, y1 in the sprite's units
+            public Vector2[] Uv, UvFrom;   // the render uvs' share, and the whole array it was taken from
+        }
+
+        /// <summary>Corners (three a triangle) from which a sprite mesh is drawn in strips, and a strip's.</summary>
+        public const int StripCorners = 3000, StripPart = 1200;
+        // CH360_NO_STRIPS=1: large meshes drawn whole (a check against the strips)
+        static readonly bool noStrips = Environment.GetEnvironmentVariable("CH360_NO_STRIPS") == "1";
+
+        /// <summary>
+        /// A sprite mesh this large split once into strips across its longer side (its triangles in order of
+        /// their middles, StripPart corners each), or null. The render list leaves out the strips off its view
+        /// before the console's glue reads them: the glue moved every vertex of a mesh before culling its
+        /// triangles, ~10 ms a frame for Hilda Berg's star layers (37-44,000 vertices, wider than the screen;
+        /// the twenty-eighth run's moon). Any sprite this large in the game is split, not a list of known ones
+        /// (tools/simplify_meshes.py --strips reports them by level). The triangles keep their winding, and
+        /// a sprite's triangles don't overlap, so the strips draw the same pixels in any order.
+        /// </summary>
+        internal static Strip[] StripsOf(Info i)
+        {
+            if (noStrips || i.Triangles.Length < StripCorners) return null;
+            if (ReferenceEquals(i.StripsFrom, i.Triangles)) return i.Strips;
+            var tris = i.Triangles;
+            var verts = i.Vertices;
+            int nt = tris.Length / 3;
+            var b = i.LocalBounds;
+            bool across = b.z - b.x >= b.w - b.y;
+            var keys = new float[nt];
+            var order = new int[nt];
+            for (int t = 0; t < nt; t++)
+            {
+                Vector2 p0 = verts[tris[3 * t]], p1 = verts[tris[3 * t + 1]], p2 = verts[tris[3 * t + 2]];
+                keys[t] = across ? p0.x + p1.x + p2.x : p0.y + p1.y + p2.y;
+                order[t] = t;
+            }
+            Array.Sort(keys, order);
+            int per = StripPart / 3, count = (nt + per - 1) / per;
+            var strips = new Strip[count];
+            var map = new int[verts.Length];
+            for (int k = 0; k < map.Length; k++) map[k] = -1;
+            var from = new List<int>();
+            for (int s = 0; s < count; s++)
+            {
+                int t0 = s * per, t1 = Math.Min(nt, t0 + per);
+                var st = new int[(t1 - t0) * 3];
+                from.Clear();
+                for (int t = t0; t < t1; t++)
+                    for (int q = 0; q < 3; q++)
+                    {
+                        int v = tris[3 * order[t] + q];
+                        if (map[v] < 0) { map[v] = from.Count; from.Add(v); }
+                        st[(t - t0) * 3 + q] = map[v];
+                    }
+                var sv = new Vector2[from.Count];
+                float x0 = float.MaxValue, y0 = float.MaxValue, x1 = float.MinValue, y1 = float.MinValue;
+                for (int k = 0; k < sv.Length; k++)
+                {
+                    var p = verts[from[k]];
+                    sv[k] = p;
+                    if (p.x < x0) x0 = p.x;
+                    if (p.x > x1) x1 = p.x;
+                    if (p.y < y0) y0 = p.y;
+                    if (p.y > y1) y1 = p.y;
+                    map[from[k]] = -1;
+                }
+                strips[s] = new Strip { Vertices = sv, Triangles = st, From = from.ToArray(), Bounds = new Vector4(x0, y0, x1, y1) };
+            }
+            i.Strips = strips;
+            i.StripsFrom = tris;
+            return strips;
+        }
+
+        /// <summary>A strip's share of the sprite's render uvs (taken again when they change).</summary>
+        internal static Vector2[] StripUvs(Strip s, Vector2[] uv)
+        {
+            if (ReferenceEquals(s.UvFrom, uv) && s.Uv != null) return s.Uv;
+            var su = s.Uv != null && s.Uv.Length == s.From.Length ? s.Uv : new Vector2[s.From.Length];
+            for (int k = 0; k < su.Length; k++) su[k] = s.From[k] < uv.Length ? uv[s.From[k]] : default;
+            s.Uv = su;
+            s.UvFrom = uv;
+            return su;
+        }
 
         public static Info Of(Sprite s)
         {

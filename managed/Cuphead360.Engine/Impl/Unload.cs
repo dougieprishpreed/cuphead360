@@ -52,7 +52,24 @@ namespace Cuphead360.Engine
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp(), heap0 = GC.GetTotalMemory(false);
             GC.Collect(2, GCCollectionMode.Forced, true, true);
             Log.Line($"GC after {name}: heap {heap0 >> 20} -> {GC.GetTotalMemory(false) >> 20} MB in "
-                + $"{(System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000 / System.Diagnostics.Stopwatch.Frequency} ms");
+                + $"{(System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000 / System.Diagnostics.Stopwatch.Frequency} ms; {HeapSplit()}");
+        }
+
+        /// <summary>
+        /// What the collector holds after a full collection: committed (what it took of the player's linear
+        /// memory, which never shrinks), fragmented, and each generation's size. The player's linear memory
+        /// reached 167 MB in levels against a heap of 70-90 MB (the twenty-ninth run): where the rest is decides
+        /// how much more the textures can have.
+        /// </summary>
+        static string HeapSplit()
+        {
+            var info = GC.GetGCMemoryInfo(GCKind.FullBlocking);
+            var g = info.GenerationInfo;
+            string Mb(long b) => (b >> 20).ToString();
+            return $"collector committed {Mb(info.TotalCommittedBytes)} MB, heap {Mb(info.HeapSizeBytes)}, fragmented {Mb(info.FragmentedBytes)}; "
+                + $"after it gen0 {Mb(g.Length > 0 ? g[0].SizeAfterBytes : 0)}, gen1 {Mb(g.Length > 1 ? g[1].SizeAfterBytes : 0)}, "
+                + $"gen2 {Mb(g.Length > 2 ? g[2].SizeAfterBytes : 0)}, large {Mb(g.Length > 3 ? g[3].SizeAfterBytes : 0)}, "
+                + $"pinned {Mb(g.Length > 4 ? g[4].SizeAfterBytes : 0)} MB";
         }
 
         /// <summary>

@@ -152,6 +152,9 @@ namespace Cuphead360.Player
                         }
                 }
             if ((Capture.Frames.Count > 0 || Capture.Every > 0) && Capture.Path == null) Capture.Path = System.IO.Path.GetFullPath("work/preview/capture.jsonl");
+            // CH360_HOST_TRANSFORMS=1: sprites listed as the console lists them (their own vertices and a map,
+            // large meshes in strips), for captures of the console's path
+            if (Environment.GetEnvironmentVariable("CH360_HOST_TRANSFORMS") == "1") RenderList.HostTransforms = true;
             if (Capture.Path != null)
             {
                 System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Capture.Path));
