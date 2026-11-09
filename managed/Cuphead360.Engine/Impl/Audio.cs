@@ -78,6 +78,7 @@ namespace Cuphead360.Engine
     public sealed class NAudioListener : NComponent
     {
         static readonly List<NAudioListener> made = new List<NAudioListener>();
+        static readonly Predicate<NAudioListener> isDestroyed = l => l.Destroyed;
         public NAudioListener() { made.Add(this); }
 
         public static NAudioListener Active
@@ -86,7 +87,9 @@ namespace Cuphead360.Engine
             {
                 // The search below drops destroyed listeners newer than the live one only: older ones (every
                 // scene's camera) stayed, and held what they reached (3,900 destroyed records after six levels).
-                if (made.Count > 32) made.RemoveAll(l => l.Destroyed);
+                // Up to 32 were still kept: the map after three levels held 1,899 destroyed objects through them
+                // (the heap census); every destroyed one goes now.
+                made.RemoveAll(isDestroyed);
                 for (int i = made.Count - 1; i >= 0; i--)
                 {
                     var l = made[i];

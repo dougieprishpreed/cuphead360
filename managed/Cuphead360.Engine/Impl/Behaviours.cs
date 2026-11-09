@@ -117,9 +117,11 @@ namespace Cuphead360.Engine
             if (found.TryGetValue((t, name, parms), out var hit)) return hit;
             const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
             MethodInfo r = null;
+            // By name: GetMethods() made a MethodInfo for every method of every behaviour type and its bases, which
+            // the runtime keeps per type (71,000 of them, ~3 MB of the map's heap after three levels: the census).
             for (var c = t; r == null && c != null && c != typeof(MonoBehaviour) && c != typeof(Behaviour); c = c.BaseType)
-                foreach (var m in c.GetMethods(F))
-                    if (m.Name == name && m.GetParameters().Length == parms && !m.IsGenericMethodDefinition) { r = m; break; }
+                foreach (var mem in c.GetMember(name, MemberTypes.Method, F))
+                    if (mem is MethodInfo m && m.GetParameters().Length == parms && !m.IsGenericMethodDefinition) { r = m; break; }
             found[(t, name, parms)] = r;
             return r;
         }

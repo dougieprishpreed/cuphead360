@@ -63,11 +63,13 @@ namespace Cuphead360.Engine
                         // From the drive, through the block cache: the object's bytes, less its font data.
                         int pre = HoleLen > 0 ? (int)(HoleAt - Offset) : Length, post = HoleLen > 0 ? Length - pre - HoleLen : 0;
                         buf = new byte[pre + post];
+                        int blocks0 = ChobFile.BlockReads;
                         File.ReadAt(Offset, buf, 0, pre);
                         if (post > 0) File.ReadAt(HoleAt + HoleLen, buf, pre, post);
                         ChobFile.ObjectReads++;
                         ChobFile.ObjectBytes += buf.Length;
-                        if (ChobFile.TraceReads) Console.WriteLine($"READ {File?.Name} {Offset} {Length} {HoleLen} {Type} {PathId} frame {Clock.FrameCount}{(table != null ? " again" : "")}");
+                        if (ChobFile.TraceReads)
+                            Console.WriteLine($"READ {File?.Name} {Offset} {Length} {HoleLen} {Type} {PathId} frame {Clock.FrameCount}{(table != null ? " again" : "")} blocks {ChobFile.BlockReads - blocks0}");
                         at = 0;
                         if (HoleLen > 0) holeAt = pre;
                     }
@@ -217,8 +219,8 @@ namespace Cuphead360.Engine
         public static long LoadedBytes; public static int LoadedFiles;
         /// <summary>Objects read from the drive one at a time, and their bytes.</summary>
         public static long ObjectBytes; public static int ObjectReads;
-        /// <summary>Files above this many bytes are read per object rather than kept in memory.</summary>
-        public static int DiskThreshold = 2 << 20;
+        /// <summary>Files above this many bytes are read per object rather than kept in memory (CH360_WHOLE_FILE_KB).</summary>
+        public static int DiskThreshold = int.TryParse(Environment.GetEnvironmentVariable("CH360_WHOLE_FILE_KB"), out var wf) ? wf << 10 : 2 << 20;
         /// <summary>When set, files that take over 100 ms to read and index are reported (the console host sets it).</summary>
         public static Action<string> Trace;
 

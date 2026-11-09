@@ -118,7 +118,21 @@ namespace Cuphead360.Engine
         }
 
         /// <summary>AssetUnload's pass: the last query's candidates go (they would keep their scene's objects).</summary>
-        public static void ForgetScene() => scratch.Clear();
+        /// <summary>
+        /// The unload pass: destroyed colliders out of the lists. Update drops them only when a query runs, and
+        /// the map after a level runs few: it held 886 destroyed objects of the Frogs' (their colliders, game
+        /// objects and what they reached) through the dirty list and 302 through the sorted one (the heap census).
+        /// </summary>
+        public static void ForgetScene()
+        {
+            scratch.Clear();
+            foreach (var c in dirty) if (c.Destroyed) c.IndexDirty = false;
+            dirty.RemoveAll(c => c.Destroyed);
+            foreach (var c in sorted) if (c.Destroyed) c.InIndex = false;
+            foreach (var c in wide) if (c.Destroyed) c.InIndex = false;
+            sorted.RemoveAll(c => c.Destroyed);
+            wide.RemoveAll(c => c.Destroyed);
+        }
 
         /// <summary>The colliders whose world box may meet [xMin, xMax] in x, in creation order (a list reused by the next call).</summary>
         public static List<NCollider2D> Candidates(float xMin, float xMax)

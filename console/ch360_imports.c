@@ -983,9 +983,17 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
      * doubled the gen2s and their pause (2026-11-05). A hard limit (GCHeapHardLimit
      * 160 MB) or kept segments (GCRetainVM): the nineteenth run's route peaked at
      * 199-200 or 215-216 MB from run to run with either setting and without
-     * (scene builds sliced by the clock), so neither is set (2026-11-05). */
-    static const char* const env[7] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCConserveMemory=0",
+     * (scene builds sliced by the clock), so neither is set (2026-11-05).
+     * The converted files: none held whole (files under 2 MB were, 15-21 MB
+     * of the heap in every scene) and 4 MB of their blocks cached (16 MB): on
+     * the PC route the objects read in play were the same (71 against 67),
+     * the drive's block reads in play 10 against 8 beyond the level's first
+     * frame (which the level hold covers); loads read 18% more objects. The
+     * heap census (2026-11-09) had 24-29 MB of file bytes and index and 7.5-8.5
+     * MB of blocks on the map, of a 64-76 MB heap. */
+    static const char* const env[9] = { "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1", "DOTNET_gcServer=0", "DOTNET_GCConserveMemory=0",
                                         "CH360_TREE_BUDGET_MB=4", "DOTNET_GCgen0size=100000", "DOTNET_GCLOHCompact=1",
+                                        "CH360_WHOLE_FILE_KB=0", "CH360_BLOCK_BUDGET_MB=4",
                                         "CH360_PROFILE=1" };   /* the last: 0 in a quiet run, 2 in a profile run */
     srt_config cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -996,9 +1004,9 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
     cfg.envc = (int)(sizeof(env) / sizeof(env[0]));
     cfg.envp = env;
     if (ch360_quiet || ch360_verbose) {   /* (set after env: the twenty-ninth build set it before, and env won) */
-        static const char* list[7];
+        static const char* list[9];
         memcpy(list, env, sizeof(env));
-        list[6] = ch360_quiet ? "CH360_PROFILE=0" : "CH360_PROFILE=2";
+        list[8] = ch360_quiet ? "CH360_PROFILE=0" : "CH360_PROFILE=2";
         cfg.envp = list;
     }
 #ifndef __XSDK__

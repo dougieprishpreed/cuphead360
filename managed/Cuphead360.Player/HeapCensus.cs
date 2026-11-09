@@ -78,10 +78,17 @@ namespace Cuphead360.Player
             // Destroyed engine objects each root still reaches (what a destroyed scene leaves held), by type
             var deadByRoot = new Dictionary<string, Dictionary<string, long>>();
             var byType = new Dictionary<Type, (long bytes, long n)>();
+            // Sprite assets each root reaches first (what keeps a scene's sprites after it was left)
+            var spritesByRoot = new Dictionary<string, long>();
             var stack = new Stack<object>();
             long total = 0, objects = 0;
             var asms = AppDomain.CurrentDomain.GetAssemblies()
                 .OrderBy(a => a.GetName().Name == "Cuphead360.Engine" ? 0 : a.GetName().Name.StartsWith("UnityEngine") ? 2 : 1).ToList();
+            // The engine's tables of every object (the built assets, the object records) are walked last: they
+            // reach everything, and what matters is what else holds an object (the unload pass lets go of what
+            // only they hold).
+            var roots = new List<(Type t, FieldInfo f)>();
+            var late = new List<(Type t, FieldInfo f)>();
             foreach (var asm in asms)
             {
                 string an = asm.GetName().Name;
@@ -94,12 +101,19 @@ namespace Cuphead360.Player
                     FieldInfo[] sf;
                     try { sf = t.GetFields(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly); } catch { continue; }
                     foreach (var f in sf)
+                        ((t.FullName == "Cuphead360.Engine.AssetDb" && f.Name == "built") || (t.FullName == "Cuphead360.Engine.Objects" && (f.Name == "table" || f.Name == "byId")) ? late : roots).Add((t, f));
+                }
+            }
+            roots.AddRange(late);
+            {
+                {
+                    foreach (var (t, f) in roots)
                     {
                         if (f.IsLiteral || f.FieldType.IsPrimitive) continue;
                         object v;
                         try { v = f.GetValue(null); } catch { continue; }
                         if (v == null || seen.Contains(v)) continue;
-                        long rb = 0, rn = 0;
+                        long rb = 0, rn = 0, rs = 0;
                         Dictionary<string, long> dead = null;
                         seen.Add(v); stack.Push(v);
                         while (stack.Count > 0)
@@ -108,6 +122,7 @@ namespace Cuphead360.Player
                             long sz = Size(o);
                             rb += sz; rn++;
                             var ot = o.GetType();
+                            if (o is UnityEngine.Sprite) rs++;
                             if (o is Cuphead360.Engine.NObject no && no.Destroyed)
                             {
                                 dead ??= new Dictionary<string, long>();
@@ -136,6 +151,7 @@ namespace Cuphead360.Player
                         total += rb; objects += rn;
                         string key = (t.FullName ?? t.Name) + "::" + f.Name;
                         byRoot[key] = (rb, rn);
+                        if (rs > 0) spritesByRoot[key] = rs;
                         if (dead != null) deadByRoot[key] = dead;
                     }
                 }
@@ -145,6 +161,8 @@ namespace Cuphead360.Player
                 Console.WriteLine($"HEAP root {kv.Value.bytes / 1048576.0,8:0.00} MB {kv.Value.n,9}  {kv.Key}");
             foreach (var kv in byType.OrderByDescending(k => k.Value.bytes).Take(50))
                 Console.WriteLine($"HEAP type {kv.Value.bytes / 1048576.0,8:0.00} MB {kv.Value.n,9}  {kv.Key.FullName}");
+            foreach (var kv in spritesByRoot.OrderByDescending(k => k.Value).Take(12))
+                Console.WriteLine($"HEAP sprites {kv.Value,7} reached first from {kv.Key}");
             foreach (var kv in deadByRoot.OrderByDescending(k => k.Value.Values.Sum()).Take(20))
                 Console.WriteLine($"HEAP dead {kv.Value.Values.Sum(),7} destroyed objects held by {kv.Key}: "
                     + string.Join(", ", kv.Value.OrderByDescending(x => x.Value).Take(8).Select(x => $"{x.Key} {x.Value}")));
