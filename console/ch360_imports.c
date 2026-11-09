@@ -1035,7 +1035,9 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
         ch360_plat_log(msg, sizeof(msg) - 1);
         return 2;
     }
+    ch360_player_data_default(root_dir);
     m6_playerInstantiate(&instance, NULL);
+    ch360_player_data_close();
     srt_set_memory(m6_playerExport6_memory(&instance));
     /* after the module's memory (xsdk's heap takes the free address space at its first growth) */
     ch360_ctex_pack = ch360_pack_open(root_dir, "CTEX");

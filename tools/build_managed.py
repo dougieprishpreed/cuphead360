@@ -33,6 +33,7 @@ import argparse
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 
@@ -187,20 +188,150 @@ def stage_c(a):
             with open(stubs, "wb") as f:
                 f.write(text.encode("utf-8"))
     compress_data_segments(os.path.join(cdir, "player.c"))
+    hoist_memory_base(cdir)
+    split_cold(cdir, LINKMAP, HOT_LIST)
     print(len([f for f in os.listdir(cdir) if f.endswith(".c")]), "C files in", cdir)
 
 
+# The translated functions' run-time weight (tools/hot_functions.py: sampled on host_native over every level), by
+# method name, which stays with a method across builds where its number (fN) does not.
+HOT_LIST = os.path.join(OUT, "hot_functions.txt")
+LINKMAP = os.path.join(ROOT, "managed", "Cuphead360.Player", "obj", "Release", "net10.0", "wasi-wasm", "native",
+                       "Cuphead360.Player.linkmap")
+
+
+def function_names(linkmap, header):
+    """fN -> the method's name (wasm-ld's map: its CODE section's functions in index order, after the module's
+    imports, which the C names fN too). A name met again gets #2, #3... (3 of 159,000)."""
+    sec = re.compile(r"^\s+-\s+[0-9a-f]+\s+[0-9a-f]+ ([A-Z_]+)$")
+    fn = re.compile(r"^\s+-\s+[0-9a-f]+\s+[0-9a-f]+\s+\S.*?:\((.*)\)$")
+    names, inside = [], False
+    with open(linkmap, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.rstrip()
+            m = sec.match(line)
+            if m:
+                if inside:
+                    break
+                inside = m.group(1) == "CODE"
+                continue
+            if inside:
+                m = fn.match(line)
+                if m:
+                    names.append(m.group(1))
+    with open(header, encoding="utf-8", errors="replace") as f:
+        imports = len(set(re.findall(r"\b(i\d+_\w+)\(", f.read())))
+    seen, out = {}, {}
+    for k, n in enumerate(names):
+        seen[n] = seen.get(n, 0) + 1
+        out["f%d" % (imports + k)] = n if seen[n] == 1 else "%s#%d" % (n, seen[n])
+    return out
+
+
+def split_cold(cdir, linkmap, hot_list):
+    """Each player file's functions that ran rarely when sampled go to a twin, <file>_cold.c, which the console
+    compiles for size (-Os, console/xsdk/CMakeLists.txt: 12-16% smaller than -O2, and slower). The list names
+    each method of the sampled build hot or cold; a method it doesn't name (new since) stays -O2, as does
+    everything without a list."""
+    if not os.path.exists(hot_list) or not os.path.exists(linkmap):
+        print("no hot list (%s): every function -O2" % hot_list)
+        return
+    hot, cold = set(), set()
+    with open(hot_list, encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("H "):
+                hot.add(line[2:].rstrip("\n"))
+            elif line.startswith("C "):
+                cold.add(line[2:].rstrip("\n"))
+    names = function_names(linkmap, os.path.join(cdir, "player.h"))
+    sig = re.compile(r"^\w+ (f\d+)\(wasmModuleInstance\* instance")
+    n_hot = n_cold = n_new = 0
+    for name in sorted(os.listdir(cdir)):
+        if not re.match(r"m6_player\.s\d+\.c$", name):
+            continue
+        path = os.path.join(cdir, name)
+        with open(path, "rb") as f:
+            text = f.read().decode("utf-8")
+        eol = "\r\n" if "\r\n" in text else "\n"
+        head, keep, rare = [], [], []
+        cur, depth, fname = None, 0, None
+        for ln in text.split(eol):
+            if cur is None:
+                m = sig.match(ln)
+                if not m:
+                    (keep if keep or rare else head).append(ln)
+                    continue
+                cur, fname, depth = [], m.group(1), 0
+            cur.append(ln)
+            depth += ln.count("{") - ln.count("}")
+            if depth == 0:
+                method = names.get(fname)
+                if method in cold:
+                    rare.extend(cur)
+                    n_cold += 1
+                else:
+                    keep.extend(cur)
+                    n_hot += 1
+                    if method not in hot:
+                        n_new += 1
+                cur = None
+        if cur is not None:
+            sys.exit("%s: a function without its end" % name)
+        with open(path, "wb") as f:
+            f.write(eol.join(head + keep).encode("utf-8"))
+        with open(path[:-2] + "_cold.c", "wb") as f:
+            f.write(eol.join(head + rare).encode("utf-8"))
+    print("hot list: %d functions -O2 (%d not in the list), %d to the -Os files" % (n_hot, n_new, n_cold))
+
+
+ACCESS = re.compile(r"\b((?:i32|i64|f32|f64)_(?:load|store)(?:8|16|32)?(?:_[su])?)\(i->m0,")
+INSTANCE = re.compile(r"(m6_playerInstance\* i = \(m6_playerInstance\*\)instance;(\r?\n))")
+
+
+def hoist_memory_base(cdir):
+    """Each function that reads or writes the linear memory loads its base once (mb) and goes through the
+    accessors' base-pointer twins (console/w2c2/w2c2_base.h): through i->m0 every access loaded the memory
+    struct and its data pointer again, since a store might have changed them (2.3 million instructions,
+    8.9 MB of the console's code). The host never moves the block (W2C2_HOST_MEMORY), so the base holds for
+    the memory's life."""
+    funcs = accesses = 0
+    for name in sorted(os.listdir(cdir)):
+        if not name.endswith(".c"):
+            continue
+        path = os.path.join(cdir, name)
+        with open(path, "rb") as f:
+            text = f.read().decode("utf-8")
+        parts = INSTANCE.split(text)   # [before, line, eol, body, line, eol, body, ...]
+        if len(parts) == 1:
+            continue
+        out = [parts[0]]
+        for k in range(1, len(parts), 3):
+            line, eol, body = parts[k], parts[k + 1], parts[k + 2]
+            # the body up to the next function's instance line: this function's
+            body, n = ACCESS.subn(r"\1_b(mb,", body)
+            out.append(line + ("U8* const mb = i->m0->data;" + eol if n else "") + body)
+            if n:
+                funcs += 1
+                accesses += n
+        with open(path, "wb") as f:
+            f.write("".join(out).encode("utf-8"))
+    print("memory base hoisted: %d functions, %d accesses" % (funcs, accesses))
+
+
 def compress_data_segments(path):
-    """The module's data segments (20 MB) as LZ4 blocks, decoded into the linear memory at start
-    (ch360_lz4_decode, console/ch360_pack.c): the XEX image is resident on the console, and its copy
-    of the segments was only read once, at start (10 MB of memory back)."""
+    """The module's data segments (20 MB) as LZ4 blocks in PLAYER.DAT beside the C (staged to GameData), read
+    and decoded into the linear memory at start (ch360_player_data, console/ch360_pack.c). The XEX image is
+    resident on the console: the segments were raw there (20 MB), then LZ4 arrays (10 MB), each read only once.
+    The file:  'CHPD' u32 version (1) u32 count u32 0; count entries u32 offset stored size fnv (FNV-1a 32 of
+    the stored bytes, which the call in the C checks); the bytes."""
     import lz4.block
     with open(path, "rb") as f:
         text = f.read().decode("utf-8")
     sizes = {}
     for m in re.finditer(r"LOAD_DATA\(\(\*i->m0\), (\d+)U, (m6_playerData\d+), (\d+)\);", text):
         sizes[m.group(2)] = (int(m.group(1)), int(m.group(3)))
-    out, at, before, after = [], 0, 0, 0
+    out, at, before, blobs = [], 0, 0, []
+    calls = {}
     for name, (offset, size) in sizes.items():
         if size < 65536:
             continue
@@ -211,27 +342,34 @@ def compress_data_segments(path):
         if len(data) != size:
             sys.exit("data segment %s: %d bytes, LOAD_DATA says %d" % (name, len(data), size))
         packed = lz4.block.compress(data, mode="high_compression", compression=12, store_size=False)
-        lines = [",".join(str(b) for b in packed[k:k + 32]) for k in range(0, len(packed), 32)]
+        fnv = 0x811c9dc5
+        for b in packed:
+            fnv = ((fnv ^ b) * 0x01000193) & 0xffffffff
         out.append(text[at:start])
-        out.append(head + "\n" + ",\n".join(lines) + "\n")
-        at = end
-        sizes[name] = (offset, size, len(packed))
+        out.append("/* %s: in PLAYER.DAT */\n" % name)
+        at = end + 2
+        calls[name] = (len(blobs), offset, size, len(packed), fnv)
+        blobs.append((packed, size, fnv))
         before += size
-        after += len(packed)
     out.append(text[at:])
     text = "".join(out)
-    for name, v in sizes.items():
-        if len(v) != 3:
-            continue
-        offset, size, packed = v
+    for name, (index, offset, size, stored, fnv) in calls.items():
         call = "LOAD_DATA((*i->m0), %dU, %s, %d);" % (offset, name, size)
-        text = text.replace(call, "wasmMemoryCheckRange(i->m0, %dU, %d);\nif (ch360_lz4_decode(%s, %d, i->m0->data + %dU, %d) != %d) abort();"
-                            % (offset, size, name, packed, offset, size, size))
-    decl = "int ch360_lz4_decode(const unsigned char* src, unsigned srclen, unsigned char* dst, unsigned dstlen);\n"
+        if text.count(call) != 1:
+            sys.exit("data segment %s: its LOAD_DATA call not found once" % name)
+        text = text.replace(call, "wasmMemoryCheckRange(i->m0, %dU, %d);\nif (ch360_player_data(%d, %d, 0x%08xu, i->m0->data + %dU, %d) != 0) abort();"
+                            % (offset, size, index, stored, fnv, offset, size))
+    decl = "int ch360_player_data(unsigned index, unsigned stored, unsigned fnv, unsigned char* dst, unsigned size);\n"
     text = text.replace("static void m6_playerInitDataSegments(", decl + "static void m6_playerInitDataSegments(", 1)
     with open(path, "wb") as f:
         f.write(text.encode("utf-8"))
-    print("data segments: %d KB as %d KB of LZ4" % (before // 1024, after // 1024))
+    table, pos = b"", 16 + 16 * len(blobs)
+    for packed, size, fnv in blobs:
+        table += struct.pack("<IIII", pos, len(packed), size, fnv)
+        pos += len(packed)
+    with open(os.path.join(os.path.dirname(path), "PLAYER.DAT"), "wb") as f:
+        f.write(struct.pack("<4sIII", b"CHPD", 1, len(blobs), 0) + table + b"".join(p for p, _, _ in blobs))
+    print("data segments: %d KB as %d KB of LZ4 in PLAYER.DAT" % (before // 1024, (pos - 16 - 16 * len(blobs)) // 1024))
 
 
 def main():

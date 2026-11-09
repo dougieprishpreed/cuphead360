@@ -62,6 +62,8 @@ cp "$OUT/cmake/cuphead360.xex" "$OUT/default.xex"
 DST="$ROOT/work/console/xsdk"
 mkdir -p "$DST/licenses"
 cp "$OUT/default.xex" "$DST/default.xex"
+# The module's data segments, which the XEX reads from GameData at start (the C stage's file: this build's).
+cp "$PLAYER/PLAYER.DAT" "$DST/PLAYER.DAT"
 cp "$XSDK/LICENSE" "$DST/licenses/xsdk.txt"
 cp "$XSDK/THIRD_PARTY_NOTICES.md" "$DST/licenses/xsdk-third-party.md" 2>/dev/null || true
 cp "$VULKAN4XENON/LICENSE" "$DST/licenses/vulkan4xenon.txt"

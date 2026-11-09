@@ -101,12 +101,24 @@ The first command patches the game's assemblies and checks them on .NET
 (a few minutes); it ends with `BUILD_MANAGED OK`. The second compiles the
 player to WebAssembly and C (about 15 minutes; the first run also downloads
 the NativeAOT-LLVM packages, a few hundred MB, from the dotnet-experimental
-NuGet feed). It stores the module's data segments in `player.c` as LZ4
-blocks (the `lz4` package from step 1), which the console decodes into the
-player's memory at start.
+NuGet feed). It writes the module's data segments to
+`work\managed\c\PLAYER.DAT` as LZ4 blocks (the `lz4` package from step 1),
+which the console reads from its drive and decodes into the player's memory
+at start, so the executable the console keeps in memory doesn't carry them.
+
+Optional, for a smaller executable: functions that rarely run can be
+compiled for size. That needs a list of the ones that run often, sampled
+while a PC build of the console code (`python tools\build_console.py
+--stage native`, which writes `work\console\native\host_native.exe`) plays
+every level; with `work\managed\hot_functions.txt` present, the C stage splits each
+file into its often-run functions and a `_cold.c` twin for the rest. The
+list is made with `tools\sample_native.py --raw --save-stacks` and
+`tools\hot_functions.py` (see their help). Without it everything is
+compiled for speed, which is also fine.
 
 **Check:** both commands end with `BUILD_MANAGED OK`, and
-`work\managed\c\player.h` exists with about 78 `.c` files beside it.
+`work\managed\c\player.h` exists with about 78 `.c` files beside it, and
+`PLAYER.DAT`.
 
 ## 5. Convert the game's data
 
@@ -225,8 +237,10 @@ them to load. Then it copies what is new or changed to the drive. Saves already
 on the drive are kept.
 
 **Check:** `E:\Apps\cuphead360` holds `default.xex`, `GameData\` (with
-`objects`, `fonts`, the `.PAK` files and `AUDIOINFO.BIN`), `licenses\`
-and `save\`.
+`objects`, `fonts`, the `.PAK` files, `AUDIOINFO.BIN` and `PLAYER.DAT`),
+`licenses\` and `save\`. `default.xex` and `PLAYER.DAT` belong together:
+copy both after every build (the console stops at start, saying so in its
+log, if they come from different builds).
 
 ## 9. Play
 

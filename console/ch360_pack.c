@@ -341,3 +341,54 @@ int ch360_pack_read_with(ch360_pack_reader* r, const ch360_pack_entry* e, unsign
     }
     return 0;
 }
+
+/* The module's large data segments (tools/build_managed.py's C stage): <root>/GameData/PLAYER.DAT, read once
+ * at start into the linear memory, instead of LZ4 arrays in the XEX image, which the console keeps resident
+ * whole (10 MB read once and then held for the session).
+ *   'CHPD' u32 version (1) u32 count u32 0
+ *   count entries: u32 offset stored size fnv (FNV-1a 32 of the stored bytes), then the bytes */
+static char player_data_path[1024];
+static srt_file* player_data;
+
+void ch360_player_data_at(const char* path) {
+    if (strlen(path) < sizeof(player_data_path)) strcpy(player_data_path, path);
+}
+
+void ch360_player_data_default(const char* root) {
+    size_t rl = strlen(root);
+    if (player_data_path[0] != 0 || rl + 24 > sizeof(player_data_path)) return;
+    if (rl > 0 && root[rl - 1] == '/') rl--;
+    sprintf(player_data_path, "%.*s/GameData/PLAYER.DAT", (int)rl, root);
+}
+
+static int player_data_fail(const char* why) {
+    char msg[1200];
+    sprintf(msg, "ch360: %s: %s (the XEX and GameData/PLAYER.DAT must come from the same build)\n", player_data_path, why);
+    ch360_plat_log(msg, strlen(msg));
+    return -1;
+}
+
+int ch360_player_data(unsigned index, unsigned stored, unsigned fnv, unsigned char* dst, unsigned size) {
+    unsigned char head[16], entry[16], *buf;
+    unsigned count, at, k, h = 0x811c9dc5u;
+    if (player_data == NULL && srt_plat_open(player_data_path, SRT_OPEN_READ, &player_data) != 0) return player_data_fail("not found");
+    if (read_at(player_data, 0, head, 16) != 0 || rd32(head) != 0x44504843u || rd32(head + 4) != 1) return player_data_fail("not a player data file");
+    count = rd32(head + 8);
+    if (index >= count || read_at(player_data, 16 + index * 16, entry, 16) != 0) return player_data_fail("no such segment");
+    at = rd32(entry);
+    if (rd32(entry + 4) != stored || rd32(entry + 8) != size || rd32(entry + 12) != fnv) return player_data_fail("another build's segments");
+    buf = (unsigned char*)malloc(stored);
+    if (buf == NULL) return player_data_fail("no memory to read it");
+    if (read_at(player_data, at, buf, stored) != 0) { free(buf); return player_data_fail("read failed"); }
+    for (k = 0; k < stored; k++) h = (h ^ buf[k]) * 0x01000193u;
+    if (h != fnv) { free(buf); return player_data_fail("damaged"); }
+    k = (unsigned)ch360_lz4_decode(buf, stored, dst, size);
+    free(buf);
+    if (k != size) return player_data_fail("didn't decode");
+    return 0;
+}
+
+void ch360_player_data_close(void) {
+    if (player_data != NULL) srt_plat_close(player_data);
+    player_data = NULL;
+}

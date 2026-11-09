@@ -35,6 +35,7 @@ ap.add_argument('--focus', action='append', default=[])
 ap.add_argument('--callers', action='append', default=[], help='functions to list the callers of (the frame above each)')
 ap.add_argument('--out')
 ap.add_argument('--top', type=int, default=50)
+ap.add_argument('--raw', action='store_true', help="name the translated functions fN, as the C has them (build_managed.py's hot list)")
 ap.add_argument('--imports', type=int, help="the wasm module's imported functions (default: counted in work/managed/c/player.h)")
 ap.add_argument('cmd', nargs=argparse.REMAINDER)
 a = ap.parse_args()
@@ -90,15 +91,15 @@ if a.load_stacks:
     with open(a.load_stacks, encoding='utf-8') as f:
         report([ln.rstrip('\n').split(';') for ln in f if ln.strip()], 0)
     sys.exit(0)
-if not (a.wasm_map and a.exe_map and a.log and a.after):
-    ap.error('--wasm-map, --exe-map, --log and --after are needed to run')
+if not ((a.wasm_map or a.raw) and a.exe_map and a.log and a.after):
+    ap.error('--wasm-map (or --raw), --exe-map, --log and --after are needed to run')
 
 # wasm-ld map (the ILC build's .linkmap): CODE section input functions, in index order after the imports.
 wnames = []
 _inc = False
 _sec = re.compile(r'^\s+-\s+[0-9a-f]+\s+[0-9a-f]+ ([A-Z_]+)$')
 _fn = re.compile(r'^\s+-\s+[0-9a-f]+\s+[0-9a-f]+\s+\S.*?:\((.*)\)$')
-with open(a.wasm_map, encoding='utf-8', errors='replace') as f:
+with open(a.wasm_map or os.devnull, encoding='utf-8', errors='replace') as f:
     for line in f:
         line = line.rstrip()
         m = _sec.match(line)
@@ -209,7 +210,7 @@ def name_at(pc):
         return '?%x' % pc
     s = syms[i]
     m = re.match(r'^f(\d+)$', s)
-    return wname(int(m.group(1))) if m else s
+    return (s if a.raw else wname(int(m.group(1)))) if m else s
 
 
 samples = []

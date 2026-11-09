@@ -47,7 +47,10 @@ def stage_native(a):
     sources = sorted(os.path.join(CDIR, f) for f in os.listdir(CDIR) if f.endswith(".c"))
     sources += [os.path.join(rt, "src", f) for f in ("srt_core.c", "srt_wasi.c", "srt_wasi_p2.c", plat)]
     sources += [os.path.join(ROOT, "console", f) for f in ("ch360_imports.c", "ch360_ogg.c", "ch360_pack.c", "host_native.c")]
-    incs = [os.path.join(rt, "include"), os.path.join(rt, "src"), os.path.join(SPIRE, "third_party", "w2c2", "w2c2"),
+    # console/w2c2 first, as the console's build has it: its w2c2_base.h carries the accessors' base-pointer
+    # twins the C stage writes (hoist_memory_base), so the PC check runs the same header.
+    incs = [os.path.join(ROOT, "console", "w2c2"), os.path.join(rt, "include"), os.path.join(rt, "src"),
+            os.path.join(SPIRE, "third_party", "w2c2", "w2c2"),
             CDIR, os.path.join(ROOT, "console")]
     cc = a.cc or next((c for c in ("clang", "gcc", "cc") if shutil.which(c)), None)
     if not cc:

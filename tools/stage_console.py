@@ -4,7 +4,8 @@
     stage_console.py --to <folder> [--data work/GameData] [--xex work/console/xsdk/default.xex] [--dry-run]
                      [--workers 2]
 
-Writes <folder>/default.xex, <folder>/GameData/{objects,fonts}, the packs
+Writes <folder>/default.xex, <folder>/GameData/PLAYER.DAT (the module's data
+segments, read at start: from the same build as the XEX), <folder>/GameData/{objects,fonts}, the packs
 <folder>/GameData/CTEX0.PAK... and AUDIO0.PAK..., and <folder>/licenses/,
 the layout console/xsdk/main.cpp reads from game:\\.
 
@@ -287,6 +288,12 @@ def main():
         shutil.copy2(arial, os.path.join(gd, "fonts", "arial.ttf"))
     if not a.dry_run and not a.no_xex:
         shutil.copy2(a.xex, os.path.join(a.to, "default.xex"))
+        # the module's data segments, read at start: the XEX's own build's (build.sh copies them beside it)
+        pd = os.path.join(os.path.dirname(a.xex), "PLAYER.DAT")
+        if not os.path.exists(pd):
+            sys.exit("no PLAYER.DAT beside %s (console/xsdk/build.sh copies it from the C stage)" % a.xex)
+        os.makedirs(gd, exist_ok=True)
+        shutil.copy2(pd, os.path.join(gd, "PLAYER.DAT"))
         lic = os.path.join(os.path.dirname(a.xex), "licenses")
         if os.path.isdir(lic):
             shutil.copytree(lic, os.path.join(a.to, "licenses"), dirs_exist_ok=True)

@@ -43,6 +43,10 @@ target_compile_definitions(ch360_player PRIVATE W2C2_HOST_MEMORY)
 # No unwind tables for the C: nothing unwinds through it (the runtime traps with longjmp; an uncaught
 # exception ends the title either way), and they were 10 MB of the image the console keeps in memory.
 target_compile_options(ch360_player PRIVATE ${COMMON_FLAGS} -std=gnu99 -w -fno-asynchronous-unwind-tables -fno-unwind-tables)
+# The functions that rarely run (the C stage's split: tools/hot_functions.py's list of those sampled over every
+# level, the rest in <file>_cold.c) compiled for size: 12-16% smaller, the console keeping all code resident.
+file(GLOB PLAYER_COLD "${CH360_PLAYER_C}/*_cold.c")
+set_source_files_properties(${PLAYER_COLD} PROPERTIES COMPILE_OPTIONS "-Os")
 
 add_executable(cuphead360 "${CONSOLE}/xsdk/main.cpp" "${CONSOLE}/xsdk/big_alloc.c" "${CONSOLE}/xsdk/probe64.c"
     "${CONSOLE}/xsdk/probe64_raw.S" "${CH360_SHADERS}/ch360_shaders.c")

@@ -209,6 +209,13 @@ int ch360_pack_decode_stored(ch360_pack_reader* r, const ch360_pack_entry* e, co
 /* Bytes [from, from + n) of the entry into dst: 0, or -1 on a bad read. */
 int ch360_pack_read(const ch360_pack_entry* e, unsigned from, void* dst, unsigned n);
 int ch360_lz4_decode(const unsigned char* src, unsigned srclen, unsigned char* dst, unsigned dstlen);
+/* The module's data segments (ch360_pack.c): the file they are read from at start (default
+ * <root>/GameData/PLAYER.DAT, set by ch360_prepare unless the host named one), segment index's stored bytes
+ * decoded into dst (0, or -1 with a log line), and the file closed once the module is made. */
+void ch360_player_data_at(const char* path);
+void ch360_player_data_default(const char* root);
+int ch360_player_data(unsigned index, unsigned stored, unsigned fnv, unsigned char* dst, unsigned size);
+void ch360_player_data_close(void);
 /* The textures' pack, opened by ch360_prepare when the root has CTEX0.PAK
  * (-1 otherwise: the PC reads GameData/ctex's loose files). */
 extern int ch360_ctex_pack;

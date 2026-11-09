@@ -319,6 +319,9 @@ int main(int argc, char** argv) {
         }
     }
     frame_ms = getenv("CH360_FRAME_MS") ? atol(getenv("CH360_FRAME_MS")) : 0;
+    /* The module's data segments: the C stage's file (work/managed/c, from the repository's root), or
+     * CH360_PLAYER_DATA; the console reads <root>/GameData/PLAYER.DAT (stage_console.py puts it there). */
+    ch360_player_data_at(getenv("CH360_PLAYER_DATA") ? getenv("CH360_PLAYER_DATA") : "work/managed/c/PLAYER.DAT");
     for (i = 0; i < TRACE_IDS; i++) tex_bytes[i] = -1;
     started = clock();
     code = ch360_run(root, guestc, guest, memory_mb, 64, -1);
