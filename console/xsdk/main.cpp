@@ -77,7 +77,7 @@ const size_t LOG_QUEUE_MAX = 4u << 20;
 // The test build (CH360_TEST64: rarely-run code -Os, Test64.cs logging every result, then stopping before the
 // saves) keeps its own log beside the play build's, written as each line comes.
 #ifdef CH360_TEST64
-#define CH360_LOG_PATH "game:/cuphead360_test.txt"
+#define CH360_LOG_PATH "game:/" CH360_TEST_NAME ".txt"
 #else
 #define CH360_LOG_PATH "game:/cuphead360.txt"
 #endif
@@ -3174,6 +3174,10 @@ int main() {
     static const char* const argv[] = { "cuphead360", "run", "--console", "1", "--data", "/GameData", "--save", "/save" };
 #endif
     ch360_staged_names = 1;   // GameData/ctex and audio as stage_console.py writes them
+#ifdef CH360_TEST64
+    // Its own data segments file, so a test build from another wasm build sits beside the play build.
+    ch360_player_data_at("game:/GameData/PLAYER_TEST.DAT");
+#endif
     if (ch360_prepare("game:/", (int)(sizeof(argv) / sizeof(argv[0])), argv, 448) != 0) {
         logf("player set-up failed");
         flush_log();

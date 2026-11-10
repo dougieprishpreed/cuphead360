@@ -230,6 +230,10 @@ typedef WasmPtr WasmMemoryAddress;
 #define W2C2_INLINE __inline
 #elif defined(PLAN9)
 #define W2C2_INLINE inline
+#elif defined(W2C2_ALWAYS_INLINE)
+/* cuphead360: the helpers inlined whatever the optimisation level (-Os otherwise calls the accessors and
+ * memory helpers out of line, a copy in each file: the console's -Os test variant) */
+#define W2C2_INLINE __inline__ __attribute__((always_inline))
 #else
 #define W2C2_INLINE __inline__
 #endif

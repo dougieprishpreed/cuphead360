@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Cuphead360.Engine;
 
 namespace Cuphead360.Player
@@ -129,6 +131,315 @@ namespace Cuphead360.Player
 
             if (all || failed > 0) Line("T64 " + (failed == 0 ? "ok" : "FAIL") + ": " + checks + " checks, " + failed + " wrong");
             return failed;
+        }
+
+        /// <summary>
+        /// The test build's probes (T64 probe lines): what start-up code does, each result printed rather than
+        /// checked, so the console's lines are compared with the PC's (host_native prints the same ones; a line
+        /// that differs names the broken code). The second -O2/-Os test (hw32) passed every 64-bit check and
+        /// stopped in the fallback font's load (KeyNotFoundException 'head'), so the font's load comes first,
+        /// taken apart, then the library code start-up leans on. Values are printed by this class's own -O2 code.
+        /// </summary>
+        internal static void Probes(string data)
+        {
+            string arial = System.IO.Path.Combine(data, "fonts", "arial.ttf");
+            byte[] font = null;
+            Probe("font bytes", () =>
+            {
+                font = System.IO.File.ReadAllBytes(arial);
+                return "len " + Hex((ulong)font.Length) + " fnv " + Hex(Fnv(font, 0, font.Length)) + " head " + HexBytes(font, 0, 16);
+            });
+            if (font == null || font.Length < 12) return;
+            int n = (font[4] << 8) | font[5];
+            Probe("font directory", () =>
+            {
+                var sb = new char[n * 9];
+                for (int i = 0; i < n; i++)
+                    for (int k = 0; k < 4; k++)
+                    {
+                        byte b = font[12 + i * 16 + k];
+                        sb[i * 9 + k * 2] = Nibble((uint)b >> 4);
+                        sb[i * 9 + k * 2 + 1] = Nibble(b);
+                        if (k == 3) sb[i * 9 + 8] = ' ';
+                    }
+                return "n " + Hex((ulong)n) + " tags " + new string(sb);
+            });
+            var tags = new string[n];
+            Probe("ASCII.GetString tags", () =>
+            {
+                string all = "";
+                for (int i = 0; i < n; i++)
+                {
+                    tags[i] = System.Text.Encoding.ASCII.GetString(font, 12 + i * 16, 4);
+                    all += Chars(tags[i]) + " ";
+                }
+                return all;
+            });
+            Probe("UTF8/Latin1.GetString tag 0", () => Chars(System.Text.Encoding.UTF8.GetString(font, 12, 4)) + " " + Chars(System.Text.Encoding.Latin1.GetString(font, 12, 4)));
+            Probe("Dictionary of GetString tags", () => Lookups(tags));
+            Probe("Dictionary of hand-made tags", () =>
+            {
+                var own = new string[n];
+                for (int i = 0; i < n; i++)
+                {
+                    var c = new char[4];
+                    for (int k = 0; k < 4; k++) c[k] = (char)font[12 + i * 16 + k];
+                    own[i] = new string(c);
+                }
+                return Lookups(own);
+            });
+            Probe("TrueType", () => { var t = new TrueType(font); return "upem " + Hex((ulong)t.UnitsPerEm) + " glyphs " + Hex((ulong)t.NumGlyphs); });
+
+            Probe("FileStream seek and read", () =>
+            {
+                using var fs = new System.IO.FileStream(arial, System.IO.FileMode.Open, System.IO.FileAccess.Read);
+                fs.Seek(100, System.IO.SeekOrigin.Begin);
+                var b = new byte[16];
+                int got = fs.Read(b, 0, 16);
+                return "len " + Hex((ulong)fs.Length) + " got " + Hex((ulong)got) + " pos " + Hex((ulong)fs.Position) + " " + HexBytes(b, 0, 16);
+            });
+            Probe("File.Exists, FileInfo", () => (System.IO.File.Exists(arial) ? "y" : "n") + (System.IO.File.Exists(arial + ".none") ? "y" : "n") + " " + Hex((ulong)new System.IO.FileInfo(arial).Length));
+
+            Probe("string.Format", () => string.Format("{0}|{1:X8}|{2,5}|{3}|{4:D6}", 42, 48879, "ab", true, -17));
+            Probe("Split, Join", () => { var p = "a,b,,c,dd".Split(','); return p.Length + ":" + string.Join("|", p); });
+            Probe("case, Replace, IndexOf, Substring, Trim", () => "Hello World".ToUpperInvariant() + " " + "Hello World".ToLowerInvariant() + " " +
+                "Hello World".Replace("o", "0") + " " + "Hello World".IndexOf("World") + " " + "Hello World".Substring(3, 4) + " [" + "  x y  ".Trim() + "] " +
+                ("Hello".StartsWith("He") ? "s" : "-") + ("Hello".EndsWith("lo") ? "e" : "-") + ("Hello".Contains("ll") ? "c" : "-"));
+            Probe("StringBuilder", () =>
+            {
+                var sb = new System.Text.StringBuilder();
+                for (int i = 0; i < 300; i++) sb.Append(i * 7919 % 1000).Append(i % 7 == 0 ? ';' : ',');
+                string s = sb.ToString();
+                return Hex((ulong)s.Length) + " " + Hex(Fnv(s));
+            });
+            Probe("compare", () => string.CompareOrdinal("abc", "abd") + " " + string.Compare("a", "B", StringComparison.OrdinalIgnoreCase) + " " +
+                ("abc".Equals("ABC", StringComparison.OrdinalIgnoreCase) ? "eq" : "ne") + " " + Comparer<string>.Default.Compare("b", "a"));
+            Probe("UTF8 bytes", () =>
+            {
+                var b = System.Text.Encoding.UTF8.GetBytes("héllo € \U0001F600");
+                return HexBytes(b, 0, b.Length) + " back " + Chars(System.Text.Encoding.UTF8.GetString(b));
+            });
+
+            Probe("List<int>.Sort", () =>
+            {
+                var l = new List<int>();
+                uint x = 12345;
+                for (int i = 0; i < 1000; i++) { x = x * 1103515245 + 12345; l.Add((int)(x >> 8)); }
+                l.Sort();
+                ulong h = 14695981039346656037;
+                foreach (int v in l) h = (h ^ (uint)v) * 1099511628211;
+                return Hex(h) + " first " + Hex((ulong)(uint)l[0]) + " last " + Hex((ulong)(uint)l[999]);
+            });
+            Probe("Array.Sort strings", () =>
+            {
+                var a = new string[60];
+                for (int i = 0; i < a.Length; i++) a[i] = "k" + ((i * 37) % 61) + (i % 3 == 0 ? "x" : "");
+                Array.Sort(a, StringComparer.Ordinal);
+                return Hex(Fnv(string.Join(",", a)));
+            });
+            Probe("Dictionary<int,int>", () =>
+            {
+                var d = new Dictionary<int, int>();
+                for (int i = 0; i < 5000; i++) d[i * 31 % 7919] = i;
+                for (int i = 0; i < 5000; i += 3) d.Remove(i * 31 % 7919);
+                long sum = 0;
+                for (int i = 0; i < 7919; i++) if (d.TryGetValue(i, out int v)) sum += v + i;
+                return Hex((ulong)d.Count) + " " + Hex((ulong)sum);
+            });
+            Probe("HashSet, SortedDictionary", () =>
+            {
+                var hs = new HashSet<string>();
+                for (int i = 0; i < 200; i++) hs.Add("s" + (i % 150));
+                var sd = new SortedDictionary<string, int> { ["pear"] = 1, ["apple"] = 2, ["fig"] = 3, ["banana"] = 4 };
+                return Hex((ulong)hs.Count) + (hs.Contains("s149") ? " y" : " n") + (hs.Contains("s150") ? "y " : "n ") + string.Join(",", sd.Keys);
+            });
+            Probe("LINQ", () =>
+            {
+                int s = System.Linq.Enumerable.Sum(System.Linq.Enumerable.Select(System.Linq.Enumerable.Where(System.Linq.Enumerable.Range(0, 100), v => v % 3 == 0), v => v * v));
+                var top = System.Linq.Enumerable.Take(System.Linq.Enumerable.OrderByDescending(new[] { 5, 3, 9, 1, 7, 9, 2 }, v => v), 3);
+                return Hex((ulong)s) + " " + string.Join(",", top);
+            });
+
+            Probe("BinaryWriter/Reader", () =>
+            {
+                var ms = new System.IO.MemoryStream();
+                var w = new System.IO.BinaryWriter(ms);
+                w.Write(-123456789); w.Write(-1234567890123456789L); w.Write(1.5f); w.Write(-2.25); w.Write("tagé"); w.Write((ushort)65000);
+                w.Flush();
+                byte[] all = ms.ToArray();
+                ms.Position = 0;
+                var r = new System.IO.BinaryReader(ms);
+                return HexBytes(all, 0, all.Length) + " | " + Hex((ulong)(uint)r.ReadInt32()) + " " + Hex((ulong)r.ReadInt64()) + " " +
+                    Hex((ulong)(uint)BitConverter.SingleToInt32Bits(r.ReadSingle())) + " " + Hex((ulong)BitConverter.DoubleToInt64Bits(r.ReadDouble())) + " " +
+                    Chars(r.ReadString()) + " " + Hex(r.ReadUInt16());
+            });
+            Probe("copies", () =>
+            {
+                var a = new byte[1000];
+                for (int i = 0; i < a.Length; i++) a[i] = (byte)(i * 13);
+                Array.Copy(a, 10, a, 15, 500);
+                Buffer.BlockCopy(a, 600, a, 590, 300);
+                a.AsSpan(900, 50).CopyTo(a.AsSpan(3, 50));
+                Array.Fill(a, (byte)7, 400, 33);
+                Array.Clear(a, 700, 21);
+                var l = new long[64];
+                for (int i = 0; i < l.Length; i++) l[i] = (long)i * -98765432101L;
+                Array.Copy(l, 0, l, 1, 63);
+                return Hex(Fnv(a, 0, a.Length)) + " " + Hex((ulong)l[1]) + " " + Hex((ulong)l[63]);
+            });
+            Probe("Math", () => FBits(Math.Sqrt(2)) + FBits(Math.Sin(1)) + FBits(Math.Cos(1)) + FBits(Math.Pow(2, 0.5)) + FBits(Math.Exp(1)) +
+                FBits(Math.Log(10)) + FBits(Math.Atan2(1, 2)) + FBits(Math.Floor(-2.5)) + FBits(Math.Round(2.5)) + FBits(Math.Round(3.5)) +
+                FBits(Math.Truncate(-2.7)) + Hex((ulong)(uint)BitConverter.SingleToInt32Bits(MathF.Sqrt(2f))) + " " +
+                Hex((ulong)Convert.ToInt64(-1e10)) + " " + Hex((ulong)(uint)Convert.ToInt32(2.5)) + " " + Hex((ulong)(uint)Convert.ToInt32(3.5)));
+            Probe("float and decimal text", () => Hex((ulong)(uint)BitConverter.SingleToInt32Bits(float.Parse("1e-5"))) + " " +
+                FBits(double.Parse("123.456e10")) + (1.1m * 3).ToString() + " " + decimal.Parse("123.456").ToString() + " " + (2.0 / 3).ToString("F4") + " " + 1234567.891f.ToString());
+
+            Probe("exceptions", () =>
+            {
+                int order = 0;
+                try
+                {
+                    try { order = order * 10 + 1; throw new InvalidOperationException("x"); }
+                    finally { order = order * 10 + 2; }
+                }
+                catch (InvalidOperationException e) when (e.Message == "x") { order = order * 10 + 3; }
+                try { int[] z = new int[2]; z[order % 7 + 2] = 1; } catch (IndexOutOfRangeException) { order = order * 10 + 4; }
+                try { object o = "s"; var u = (List<int>)o; } catch (InvalidCastException) { order = order * 10 + 5; }
+                return Hex((ulong)order);
+            });
+            Probe("GC", () =>
+            {
+                Node head = null;
+                for (int i = 0; i < 20000; i++) head = new Node { Next = head, Value = i, Text = (i % 50 == 0) ? "n" + i : null };
+                var junk = new List<byte[]>();
+                for (int i = 0; i < 200; i++) junk.Add(new byte[3000 + i]);
+                junk = null;
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+                ulong h = 14695981039346656037;
+                int count = 0;
+                for (var p = head; p != null; p = p.Next) { h = (h ^ (uint)p.Value) * 1099511628211; if (p.Text != null) h = (h ^ Fnv(p.Text)) * 1099511628211; count++; }
+                return Hex((ulong)count) + " " + Hex(h);
+            });
+            Probe("delegates, interfaces, generics", () =>
+            {
+                string trace = "";
+                Action a = () => trace += "a";
+                a += () => trace += "b";
+                a += () => trace += "c";
+                a();
+                Func<int, int, int> f = Math.Max;
+                IComparable<int> c = 5;
+                IEnumerable<int> e = Count(4);
+                int s = 0;
+                foreach (int v in e) s = s * 10 + v;
+                return trace + " " + f(3, 9) + " " + c.CompareTo(7) + " " + s + " " + EqualityComparer<string>.Default.Equals("q", "q");
+            });
+            Probe("enums, types", () => Probe64Kind.Beta.ToString() + " " + Enum.Parse<Probe64Kind>("Gamma").ToString() + " " + ((int)Probe64Kind.Gamma) + " " +
+                typeof(Dictionary<string, List<int>>).FullName + " " + new KeyValuePair<int, string>(3, "z").ToString());
+            Probe("DateTime, TimeSpan, Guid", () =>
+            {
+                var t = new DateTime(2026, 11, 9, 12, 34, 56, DateTimeKind.Utc);
+                return t.ToString("yyyy-MM-dd HH:mm:ss") + " " + Hex((ulong)t.Ticks) + " " + t.AddDays(40).DayOfWeek + " " + TimeSpan.FromSeconds(4000.5).ToString() + " " +
+                    Guid.Parse("0f8fad5b-d9cb-469f-a165-70867728950e").ToString("N");
+            });
+            Probe("Random(42), Base64, Path, char", () =>
+            {
+                var r = new Random(42);
+                string rs = r.Next() + "," + r.Next(100) + "," + Hex((ulong)BitConverter.DoubleToInt64Bits(r.NextDouble()));
+                string b64 = Convert.ToBase64String(new byte[] { 1, 2, 3, 250, 251, 252, 0, 99 });
+                int letters = 0;
+                for (int i = 0; i < 400; i++) if (char.IsLetterOrDigit((char)i)) letters++;
+                return rs + " " + b64 + " " + HexBytes(Convert.FromBase64String(b64), 0, 8) + " " + System.IO.Path.GetFileNameWithoutExtension("a/b/c.d.txt") + " " +
+                    System.IO.Path.Combine("x", "y", "z.q") + " " + Hex((ulong)letters) + " " + Chars(char.ToUpperInvariant('é').ToString());
+            });
+            Probe("Interlocked, lock", () =>
+            {
+                long v = 5;
+                Interlocked.Increment(ref v);
+                Interlocked.Add(ref v, 1L << 40);
+                long old = Interlocked.CompareExchange(ref v, -1, (1L << 40) + 6);
+                object gate = new object();
+                int inside = 0;
+                lock (gate) { lock (gate) inside = 2; }
+                return Hex((ulong)v) + " " + Hex((ulong)old) + " " + inside;
+            });
+            Probe("System.Numerics", () =>
+            {
+                var m = System.Numerics.Matrix4x4.CreateRotationZ(0.5f) * System.Numerics.Matrix4x4.CreateTranslation(1, 2, 3);
+                var v = System.Numerics.Vector3.Transform(new System.Numerics.Vector3(1, 0, 0), m);
+                return Hex((ulong)(uint)BitConverter.SingleToInt32Bits(v.X)) + " " + Hex((ulong)(uint)BitConverter.SingleToInt32Bits(v.Y)) + " " +
+                    Hex((ulong)(uint)BitConverter.SingleToInt32Bits(v.Z)) + " " + Hex((ulong)(uint)BitConverter.SingleToInt32Bits(System.Numerics.Vector3.Normalize(new System.Numerics.Vector3(3, 4, 12)).Z));
+            });
+            Line("T64 probes done");
+        }
+
+        sealed class Node { public Node Next; public int Value; public string Text; }
+        enum Probe64Kind { Alpha, Beta, Gamma }
+
+        static IEnumerable<int> Count(int n)
+        {
+            for (int i = 1; i <= n; i++) yield return i;
+        }
+
+        static string Lookups(string[] keys)
+        {
+            var d = new Dictionary<string, int>();
+            for (int i = 0; i < keys.Length; i++) d[keys[i]] = i;
+            string r = Hex((ulong)d.Count);
+            foreach (var k in new[] { "head", "hhea", "maxp", "cmap", "hmtx", "glyf", "nope" })
+                r += " " + k + (d.TryGetValue(k, out int v) ? "=" + Hex((ulong)v) : "-");
+            return r;
+        }
+
+        static void Probe(string what, Func<string> f)
+        {
+            string r;
+            try { r = "= " + f(); }
+            catch (Exception e) { r = "threw " + Program.Describe(e); }
+            Line("T64 probe " + what + " " + r);
+        }
+
+        static string FBits(double d) => Hex((ulong)BitConverter.DoubleToInt64Bits(d)) + " ";
+
+        /// <summary>A string's characters as hex (not trusting what may print it).</summary>
+        static string Chars(string s)
+        {
+            if ((object)s == null) return "null";
+            var c = new char[s.Length * 5];
+            for (int i = 0; i < s.Length; i++)
+            {
+                uint v = s[i];
+                c[i * 5] = Nibble(v >> 12); c[i * 5 + 1] = Nibble(v >> 8); c[i * 5 + 2] = Nibble(v >> 4); c[i * 5 + 3] = Nibble(v);
+                c[i * 5 + 4] = '.';
+            }
+            return new string(c);
+        }
+
+        static string HexBytes(byte[] b, int start, int count)
+        {
+            var c = new char[count * 2];
+            for (int i = 0; i < count; i++)
+            {
+                c[i * 2] = Nibble((uint)b[start + i] >> 4);
+                c[i * 2 + 1] = Nibble(b[start + i]);
+            }
+            return new string(c);
+        }
+
+        static ulong Fnv(byte[] b, int start, int count)
+        {
+            ulong h = 14695981039346656037;
+            for (int i = start; i < start + count; i++) h = (h ^ b[i]) * 1099511628211;
+            return h;
+        }
+
+        static ulong Fnv(string s)
+        {
+            ulong h = 14695981039346656037;
+            for (int i = 0; i < s.Length; i++) h = (h ^ s[i]) * 1099511628211;
+            return h;
         }
 
         /// <summary>A step of the test build's start, logged before it runs (the log's last line names a step

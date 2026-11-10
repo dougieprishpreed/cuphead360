@@ -196,13 +196,21 @@ namespace Cuphead360.Player
                 // before the saves (Test64).
                 Test64.HostLog = true;
                 Test64.Run(test64);
+                if (test64) Test64.Probes(data);
                 Test64.Step("fonts");
             }
             // Unity's dynamic fonts fall back to an OS font for characters no game font has.
             // (the console has no OS fonts: the staging step copies the PC's Arial into GameData/fonts)
-            foreach (var arial in new[] { System.IO.Path.Combine(data, "fonts", "arial.ttf"),
-                                          System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), "arial.ttf") })
-                if (System.IO.File.Exists(arial)) { FontState.OsFallback = new TrueType(System.IO.File.ReadAllBytes(arial)); break; }
+            try
+            {
+                foreach (var arial in new[] { System.IO.Path.Combine(data, "fonts", "arial.ttf"),
+                                              System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), "arial.ttf") })
+                    if (System.IO.File.Exists(arial)) { FontState.OsFallback = new TrueType(System.IO.File.ReadAllBytes(arial)); break; }
+            }
+            catch (Exception e) when (test64)
+            {
+                Test64.Line("T64 fonts threw " + Describe(e));   // the test build goes on to its next steps
+            }
             Test64.Step("ConsoleHost.SelfCheck");
             if (console) ConsoleHost.SelfCheck();
             Test64.Step("AssetDb.Init");

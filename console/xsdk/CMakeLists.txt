@@ -47,7 +47,8 @@ target_compile_options(ch360_player PRIVATE ${COMMON_FLAGS} -std=gnu99 -w -fno-a
 # over every level, the rest in <file>_cold.c) compiled for size: 12-16% smaller, the console keeping all code
 # resident. Off by default: the first build with it stopped at start-up on the console (hw31).
 file(GLOB PLAYER_COLD "${CH360_PLAYER_C}/*_cold.c")
-set_source_files_properties(${PLAYER_COLD} PROPERTIES COMPILE_OPTIONS "-Os")
+set(CH360_COLD_OPTIONS "-Os" CACHE STRING "the rarely-run files' options (build.sh: CH360_COLD_OPTIONS)")
+set_source_files_properties(${PLAYER_COLD} PROPERTIES COMPILE_OPTIONS "${CH360_COLD_OPTIONS}")
 
 add_executable(cuphead360 "${CONSOLE}/xsdk/main.cpp" "${CONSOLE}/xsdk/big_alloc.c" "${CONSOLE}/xsdk/probe64.c"
     "${CONSOLE}/xsdk/probe64_raw.S" "${CH360_SHADERS}/ch360_shaders.c")
@@ -66,8 +67,9 @@ endif()
 # The 64-bit test build (build.sh with CH360_TEST64=1: cuphead360_test.xex): its own log, the player started
 # with --test64 (Test64.cs logs every result and stops before the saves).
 option(CH360_TEST64 "the 64-bit test build" OFF)
+set(CH360_TEST_NAME "cuphead360_test" CACHE STRING "the test build's name: its .xex and .txt log")
 if(CH360_TEST64)
-    target_compile_definitions(cuphead360 PRIVATE CH360_TEST64)
+    target_compile_definitions(cuphead360 PRIVATE CH360_TEST64 CH360_TEST_NAME="${CH360_TEST_NAME}")
 endif()
 
 target_link_libraries(cuphead360 PRIVATE ch360_player "${VULKAN4XENON}/build/libvulkan4xenon.a")

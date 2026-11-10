@@ -117,10 +117,11 @@ with `tools\sample_native.py --raw --save-stacks` and
 `work\managed\hot_functions.txt`. Adding `--cold-os` to the C stage then
 splits each file into its often-run functions and a `_cold.c` twin for the
 rest. `python tools\build_console.py --stage xsdk --test64` on that C makes
-`cuphead360_test.xex`, which goes beside `default.xex` and shares its
-`GameData\PLAYER.DAT` (both XEXs from one wasm build). It checks .NET's
-64-bit number code, writes every result to `cuphead360_test.txt`, and quits
-before the game reads the saves.
+`cuphead360_test.xex` and `GameData\PLAYER_TEST.DAT`, which go beside the
+play build. The test build checks .NET's 64-bit number code and probes the
+library code start-up uses, writes every result to `cuphead360_test.txt`,
+and quits before the game reads the saves. `tools\t64_diff.py` compares
+that log with the same build's run on the PC.
 
 **Check:** both commands end with `BUILD_MANAGED OK`, and
 `work\managed\c\player.h` exists with about 78 `.c` files beside it, and
