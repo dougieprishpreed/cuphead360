@@ -335,6 +335,9 @@ namespace Cuphead360.Engine
                         // go by then (the tree budget) and came back from the drive (60 of Forest Follies' 64
                         // reads in play with the warm-up).
                         else if (managed is AudioClip ac) Audio.ClipOf(ac);
+                        // so is a material's state (read at its first draw: Forest Follies' first visit read four
+                        // materials' trees from the drive in play)
+                        else if (managed is Material mat) MaterialState.Of(mat);
                         return managed;
                     }
             }

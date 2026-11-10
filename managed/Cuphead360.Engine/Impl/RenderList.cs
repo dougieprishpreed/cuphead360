@@ -355,7 +355,7 @@ namespace Cuphead360.Engine
         static void Ahead(Sprite s)
         {
             var info = s != null ? Sprites.Of(s) : null;
-            if (info == null || Clock.FrameCount - info.AheadFrame < SpriteAheadFrames) return;
+            if (info == null || (!sceneAsk && Clock.FrameCount - info.AheadFrame < SpriteAheadFrames)) return;
             info.AheadFrame = Clock.FrameCount;
             var tex = Sprites.BoundTexture(s);
             if (tex == null) return;
@@ -369,7 +369,7 @@ namespace Cuphead360.Engine
         /// (Atlases.Touch, as a draw would: the DLC title's came only as it was revealed). The fonts its texts use are
         /// read too (the slot select's came from the drive as its menu text appeared).
         /// </summary>
-        public static int ReadAheadScene(out int unbound)
+        public static int ReadAheadScene(out int unbound, bool languageFonts = false)
         {
             unbound = 0;
             if (ReadAhead == null) return 0;
@@ -382,6 +382,7 @@ namespace Cuphead360.Engine
                 ReadAhead(tex, Sprites.UvBox(s));
                 n++;
             }
+            FontsAhead(handle, languageFonts);
             foreach (var go in Typed.GameObjects)
             {
                 // the persistent objects' too: the scene loader's iris wipe (16 textures) came from the drive as the
@@ -410,16 +411,17 @@ namespace Cuphead360.Engine
             unbound = 0;
             if (ReadAhead == null) return 0;
             int handle = Scenes.ActiveHandle, n = 0, missing = 0;
+            var reach = Reach(CurrentReach(), out bool limited);
             foreach (var go in Typed.GameObjects)
             {
                 if (go.IsAsset || go.Scene != handle || !go.ActiveInHierarchy) continue;
                 foreach (var c in go.Components)
                 {
                     Sprite s = null;
-                    if (c is NAnimator a) { a.ReadAheadCurrent(); continue; }
+                    if (c is NAnimator a) { if (!limited || InBoxes(reach, go.Transform.Position)) a.ReadAheadCurrent(); continue; }
                     if (c is NSpriteRenderer sr) s = sr.Sprite;
                     else if (c.Managed is UnityEngine.UI.Image img) s = img.sprite;
-                    if (s == null) continue;
+                    if (s == null || (limited && c is NSpriteRenderer && !SpriteInBoxes(reach, go, s))) continue;
                     var tex = Sprites.BoundTexture(s);
                     if (tex == null) { Atlases.Touch(s); missing++; continue; }
                     ReadAhead(tex, Sprites.UvBox(s));
@@ -452,9 +454,53 @@ namespace Cuphead360.Engine
         public static (int sprites, int clips) ReadAheadLoad(int sceneHandle)
         {
             if (ReadAhead == null) return (0, 0);
+            SceneReadAhead?.Invoke(true);
+            sceneAsk = true;
+            try { FontsAhead(sceneHandle); PersistentAhead(); return LoadAhead(sceneHandle); }
+            finally { sceneAsk = false; SceneReadAhead?.Invoke(false); }
+        }
+
+        // A new scene's read-ahead: every sprite and clip asked for again, however lately (what isn't asked for may
+        // be let go to make its room).
+        static bool sceneAsk;
+
+        // The persistent objects' sprites and every clip of their animators (the scene loader's iris wipe, which
+        // opens on the new scene): asked for with it, so the host's making room for it never lets them go.
+        static void PersistentAhead()
+        {
+            int handle = Scenes.DontDestroy.Handle;
+            foreach (var go in Typed.GameObjects)
+            {
+                if (go.IsAsset || go.Scene != handle) continue;
+                foreach (var c in go.Components)
+                {
+                    Sprite s = null;
+                    if (c is NSpriteRenderer sr) s = sr.Sprite;
+                    else if (c.Managed is UnityEngine.UI.Image img) s = img.sprite;
+                    else if (c is NAnimator a && a.Controller != null && ControllerData.Of(a.Controller) is ControllerData d)
+                        foreach (var clip in d.Clips) AheadClip(clip);
+                    if (s != null && Sprites.BoundTexture(s) != null) Ahead(s);
+                }
+            }
+        }
+
+        /// <summary>
+        /// The host's mark of a new scene's read-ahead (the console's: what the scene before drew lately is let go
+        /// first, its room made only once the new one has asked): true as it begins, false as it ends.
+        /// </summary>
+        public static Action<bool> SceneReadAhead;
+
+        static (int sprites, int clips) LoadAhead(int sceneHandle)
+        {
             Vector3 eye = default;
+            var cams = new List<NCamera>();
             foreach (var c in Typed.Cameras)
-                if (!c.Destroyed && c.GameObject != null && c.GameObject.Scene == sceneHandle) { eye = c.GameObject.Transform.Position; break; }
+                if (!c.Destroyed && c.GameObject != null && c.GameObject.Scene == sceneHandle)
+                {
+                    if (cams.Count == 0) eye = c.GameObject.Transform.Position;
+                    if (c.Enabled && ActiveOnceBuilt(c.GameObject)) cams.Add(c);
+                }
+            var reach = Reach(cams, out bool limited);
             var sprites = new List<(float d, Sprite s)>();
             var clips = new List<(float d, ClipData c)>();
             foreach (var go in Typed.GameObjects)
@@ -464,9 +510,9 @@ namespace Cuphead360.Engine
                 float d = (p.x - eye.x) * (p.x - eye.x) + (p.y - eye.y) * (p.y - eye.y);
                 foreach (var c in go.Components)
                 {
-                    if (c is NSpriteRenderer sr) { if (sr.Sprite != null) sprites.Add((d, sr.Sprite)); }
+                    if (c is NSpriteRenderer sr) { if (sr.Sprite != null && (!limited || SpriteInBoxes(reach, go, sr.Sprite))) sprites.Add((d, sr.Sprite)); }
                     else if (c.Managed is UnityEngine.UI.Image img) { if (img.sprite != null) sprites.Add((d, img.sprite)); }
-                    else if (c is NAnimator a && a.Controller != null && ControllerData.Of(a.Controller) is ControllerData cd)
+                    else if (c is NAnimator a && a.Controller != null && (!limited || InBoxes(reach, p)) && ControllerData.Of(a.Controller) is ControllerData cd)
                         foreach (var clip in cd.StartClips()) clips.Add((d, clip));
                 }
             }
@@ -492,11 +538,178 @@ namespace Cuphead360.Engine
 
         static void AheadClip(ClipData clip)
         {
-            if (clip == null || Clock.FrameCount - clip.AheadFrame < ClipAheadFrames) return;
+            if (clip == null || (!sceneAsk && Clock.FrameCount - clip.AheadFrame < ClipAheadFrames)) return;
             clip.AheadFrame = Clock.FrameCount;
             foreach (var o in clip.PPtrs)
                 if (o is Sprite s) Ahead(s);
                 else if (o is Texture2D t) ReadAhead(t, new Vector4(0, 0, 1, 1));   // a texture curve's (the scene loader's iris wipe)
+        }
+
+        /// <summary>
+        /// The read-ahead's reach: each orthographic camera's view of the world (one that draws the default layer:
+        /// not a UI camera's), with a screen and a half more to each side and a screen above and below. A load's
+        /// sprites and clips, a level's first frames' and an animator's next clips are read ahead only there:
+        /// every animator of a run-and-gun level read its next clips wherever it was, and the load read the whole
+        /// level's, which kept memory full of pages screens away (the thirty-sixth run's Forest Follies: 276
+        /// textures loaded on demand and 495 read again, its first seconds waiting on pages, against the Frogs' 32
+        /// and 91). No such camera: everywhere. CH360_AHEAD_FAR=1: everywhere (a PC check of the difference).
+        /// </summary>
+        static readonly bool aheadFar = Environment.GetEnvironmentVariable("CH360_AHEAD_FAR") == "1";
+        static readonly List<Vector4> reachNow = new List<Vector4>();
+        static readonly List<NCamera> reachCams = new List<NCamera>();
+        static int reachFrame = -1;
+        static bool reachLimited;
+
+        static List<NCamera> CurrentReach()
+        {
+            reachCams.Clear();
+            foreach (var c in Typed.Cameras)
+                if (!c.Destroyed && c.Enabled && c.GameObject != null && c.GameObject.ActiveInHierarchy) reachCams.Add(c);
+            return reachCams;
+        }
+
+        static List<Vector4> Reach(List<NCamera> cams, out bool limited)
+        {
+            var boxes = new List<Vector4>();
+            foreach (var c in cams)
+            {
+                if (!c.Ortho || c.Target != null || (c.CullingMask & 1) == 0) continue;
+                var e = c.GameObject.Transform.Position;
+                float hy = c.OrthoSize, hx = hy * c.Aspect;
+                boxes.Add(new Vector4(e.x - 4f * hx, e.y - 3f * hy, e.x + 4f * hx, e.y + 3f * hy));
+            }
+            limited = !aheadFar && boxes.Count > 0;
+            return boxes;
+        }
+
+        static bool InBoxes(List<Vector4> boxes, Vector3 p)
+        {
+            foreach (var b in boxes) if (p.x >= b.x && p.x <= b.z && p.y >= b.y && p.y <= b.w) return true;
+            return false;
+        }
+
+        // A sprite's box in the world (its bounds by its transform's position and scale; rotation ignored, the
+        // larger extent taken) meeting one of the boxes: a long background's pivot can lie well off its pixels.
+        static bool SpriteInBoxes(List<Vector4> boxes, NGameObject go, Sprite s)
+        {
+            var info = Sprites.Of(s);
+            var t = go.Transform;
+            var p = t.Position;
+            if (info == null) return InBoxes(boxes, p);
+            var sc = t.LossyScale;
+            var lb = info.LocalBounds;
+            float ex = Math.Max(Math.Abs(lb.x), Math.Abs(lb.z)) * Math.Abs(sc.x), ey = Math.Max(Math.Abs(lb.y), Math.Abs(lb.w)) * Math.Abs(sc.y);
+            float e = Math.Max(ex, ey);
+            foreach (var b in boxes) if (p.x + e >= b.x && p.x - e <= b.z && p.y + e >= b.y && p.y - e <= b.w) return true;
+            return false;
+        }
+
+        /// <summary>Whether an animator's next clips are read ahead from where it is (NAnimator.ReadAheadNext).</summary>
+        internal static bool InReach(Vector3 p)
+        {
+            if (reachFrame != Clock.FrameCount)
+            {
+                reachFrame = Clock.FrameCount;
+                var boxes = Reach(CurrentReach(), out reachLimited);
+                reachNow.Clear();
+                reachNow.AddRange(boxes);
+            }
+            return !reachLimited || InBoxes(reachNow, p);
+        }
+
+        /// <summary>
+        /// The font atlases of the scene's TextMeshPro texts, active or not, and of the persistent objects': read
+        /// with the scene's read-ahead, then kept (KeepFontsAhead). They came from the drive as their texts first
+        /// showed: the slot select's three (8 MB) as its menu appeared, the death card's as it did (the
+        /// thirty-sixth run's title hitch).
+        /// </summary>
+        static readonly List<Texture2D> sceneFonts = new List<Texture2D>();
+        static readonly Dictionary<Type, System.Reflection.FieldInfo> tmpFontFields = new Dictionary<Type, System.Reflection.FieldInfo>();
+        static Type fontAssetType;
+        static System.Reflection.FieldInfo fontAtlasField, fontFallbacksField;
+        const System.Reflection.BindingFlags AnyField = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+        static readonly bool traceFonts = Environment.GetEnvironmentVariable("CH360_TRACE_PREFETCH") != null;
+
+        static void FontsAhead(int sceneHandle, bool languageFonts = false)
+        {
+            sceneFonts.Clear();
+            foreach (var go in Typed.GameObjects)
+            {
+                if (go.IsAsset || (go.Scene != sceneHandle && go.Scene != Scenes.DontDestroy.Handle)) continue;
+                foreach (var c in go.Components)
+                    if (c.Managed != null && TmpFont(c.Managed) is object font) FontAtlases(font, 0);
+            }
+            if (languageFonts) LanguageFonts();
+            foreach (var t in sceneFonts) ReadAhead(t, new Vector4(0, 0, 1, 1));
+            if (traceFonts && sceneFonts.Count > 0)
+                Log.Line($"FONTS read ahead: {string.Join(", ", sceneFonts.ConvertAll(t => t.name))}");
+        }
+
+        /// <summary>The scene's font atlases asked for again (ConsoleHost, every second): kept as if drawn lately.</summary>
+        public static void KeepFontsAhead()
+        {
+            if (ReadAhead == null) return;
+            foreach (var t in sceneFonts) if (t != null) ReadAhead(t, new Vector4(0, 0, 1, 1));
+        }
+
+        /// <summary>
+        /// The fonts the game's localization gives texts in the current language (Localization.Instance.m_Fonts
+        /// [language].fonts[category].fontAsset; game code, found by name), for a menu (ConsoleHost's menu hold):
+        /// its texts take theirs as they first show, so their atlases weren't those the scene's texts named (the
+        /// slot select's two bundle fonts, 6 MB, came from the drive as its menu appeared).
+        /// </summary>
+        static void LanguageFonts()
+        {
+            try
+            {
+                var loc = Type.GetType("Localization, Assembly-CSharp");
+                if (loc == null) return;
+                const System.Reflection.BindingFlags Static = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+                var inst = loc.GetProperty("Instance", Static)?.GetValue(null);
+                var lang = loc.GetProperty("language", Static)?.GetValue(null);
+                if (inst == null || lang == null || !(loc.GetField("m_Fonts", AnyField)?.GetValue(inst) is Array table)) return;
+                int li = Convert.ToInt32(lang);
+                if (li < 0 || li >= table.Length) return;
+                var langFonts = table.GetValue(li);
+                if (!(langFonts?.GetType().GetField("fonts", AnyField)?.GetValue(langFonts) is Array cats)) return;
+                System.Reflection.PropertyInfo asset = null;
+                foreach (var cat in cats)
+                {
+                    if (cat == null) continue;
+                    asset ??= cat.GetType().GetProperty("fontAsset", AnyField);
+                    if (asset?.GetValue(cat) is object font) FontAtlases(font, 0);
+                }
+            }
+            catch (Exception e) { if (traceFonts) Log.Line("FONTS language table: " + e.GetType().Name + ": " + e.Message); }
+        }
+
+        // TMP_Text.m_fontAsset (game code: found by name, as its base classes are)
+        static object TmpFont(object component)
+        {
+            var type = component.GetType();
+            if (!tmpFontFields.TryGetValue(type, out var f))
+            {
+                for (var t = type; t != null && f == null; t = t.BaseType)
+                    if (t.FullName == "TMPro.TMP_Text") f = t.GetField("m_fontAsset", AnyField);
+                tmpFontFields[type] = f;
+            }
+            return f?.GetValue(component);
+        }
+
+        // TMP_FontAsset.atlas and those of its fallbackFontAssets
+        static void FontAtlases(object font, int depth)
+        {
+            if (font == null || depth > 3) return;
+            var type = font.GetType();
+            if (type != fontAssetType)
+            {
+                fontAssetType = type;
+                fontAtlasField = type.GetField("atlas", AnyField);
+                fontFallbacksField = type.GetField("fallbackFontAssets", AnyField);
+            }
+            if (fontAtlasField?.GetValue(font) is Texture2D atlas && atlas != null && !sceneFonts.Contains(atlas)) sceneFonts.Add(atlas);
+            if (fontFallbacksField?.GetValue(font) is System.Collections.IList fallbacks)
+                foreach (var fb in fallbacks) FontAtlases(fb, depth + 1);
         }
 
         public static List<View> Build()
@@ -831,7 +1044,11 @@ namespace Cuphead360.Engine
                     // well under a second, read at 50-80 ms each behind others), half above and below
                     float mx = px.width, my = 0.5f * px.height;
                     if (ReadAhead != null && !(sx + rx < px.x - mx || sx - rx > px.x + px.width + mx || sy + ry < px.y - my || sy - ry > px.y + px.height + my))
+                    {
                         Ahead(sr.Sprite);
+                        // and the clip it plays (an animator coming into reach: its next clips are read from there)
+                        AheadClip(sr.Clip);
+                    }
                     return null;
                 }
                 if (ReadAhead != null) AheadClip(sr.Clip);

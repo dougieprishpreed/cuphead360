@@ -136,6 +136,10 @@ static void ogg_unlock(U32 h) {
  * also reads its short clips in ahead (ogg_preload): a clip's first play read
  * it from the drive in the frame. */
 enum { CACHE_SLOTS = 512, CACHE_BYTES = 8 * 1024 * 1024 };   /* the Frogs' load read 333 short clips ahead (5.5 MB) */
+/* Played clips larger than this aren't kept: music and long loops, read off the game's thread anyway
+ * (ASYNC_MIN_BYTES), whose bytes kept after a restart pushed the load's short clips out (the player's hit
+ * sounds read from the drive at the next first hit). */
+enum { KEEP_PLAYED_MAX = 1024 * 1024 };
 typedef struct ogg_cached {
     unsigned char* data;
     int size, file;
@@ -165,7 +169,7 @@ static unsigned char* cache_take(int file, unsigned offset) {
  * from its own load's others (0 when it doesn't fit then, and the bytes are freed). */
 static int cache_put_batch(unsigned char* data, int size, int file, unsigned offset, unsigned batch) {
     int i, slot = -1, kept = 1;
-    if (file < 0 || size > CACHE_BYTES / 2) {
+    if (file < 0 || size > CACHE_BYTES / 2 || (batch == 0 && size > KEEP_PLAYED_MAX)) {
         free(data);
         return 0;
     }
@@ -215,6 +219,12 @@ static void cache_put(unsigned char* data, int size, int file, unsigned offset) 
     cache_put_batch(data, size, file, offset, 0);
 }
 
+/* Clips read from the drive in the frame since the last load (a first play that neither the load's read-ahead
+ * nor the bytes kept from a play covered), told with the next load's read-ahead tally; CH360_TRACE_CLIPS=1 names
+ * each as it is read (a PC check of what the read-ahead misses). */
+static unsigned frame_reads, frame_read_bytes;
+static int trace_clips = -1;
+
 /* The clip's bytes from the pack: its key is the file name without ".ogg". */
 static unsigned char* read_packed(const U8* path, U32 len, int* size, int* file, unsigned* offset) {
     ch360_pack_entry e;
@@ -233,6 +243,17 @@ static unsigned char* read_packed(const U8* path, U32 len, int* size, int* file,
     if (data != NULL && ch360_pack_read(&e, 0, data, e.size) != 0) {
         free(data);
         data = NULL;
+    }
+    if (data != NULL) {
+        frame_reads++;
+        frame_read_bytes += e.size;
+        if (trace_clips < 0) trace_clips = getenv("CH360_TRACE_CLIPS") != NULL;
+        if (trace_clips) {
+            char msg[300];
+            int n = sprintf(msg, "CLIP read in the frame: %.*s (%u KB)\n", (int)(end - slash), (const char*)path + slash,
+                            (unsigned)(e.size >> 10));
+            ch360_plat_log(msg, (size_t)n);
+        }
     }
     return data;
 }
@@ -342,7 +363,7 @@ static int info_find(const char* key, size_t len, unsigned* channels, unsigned* 
 enum { LOAD_PIECE = 64 * 1024 };
 
 /* Short clips a load asked to read ahead (ogg_preload): read when no large clip waits, into the cache. */
-enum { PRELOAD_QUEUE = 512 };
+enum { PRELOAD_QUEUE = 1024 };   /* a load's clips and every other still built (the Frogs': ~350 and the player's) */
 static ch360_pack_entry pre_key[PRELOAD_QUEUE], pre_from[PRELOAD_QUEUE];
 static unsigned pre_head, pre_count, pre_batch, pre_batch_of[PRELOAD_QUEUE];
 static unsigned pre_done, pre_kept, pre_bytes;
@@ -352,7 +373,13 @@ static void preload_one(const ch360_pack_entry* key, const ch360_pack_entry* fro
     unsigned at = 0;
     int i, have = 0;
     srt_mutex_lock(cache_lock);
-    for (i = 0; i < CACHE_SLOTS && !have; i++) have = cache[i].data != NULL && cache[i].file == key->file && cache[i].offset == key->offset;
+    for (i = 0; i < CACHE_SLOTS && !have; i++)
+        if (cache[i].data != NULL && cache[i].file == key->file && cache[i].offset == key->offset) {
+            /* kept already: this load's now (its others don't push it out) and kept as if just read */
+            have = 1;
+            cache[i].batch = batch;
+            cache[i].age = ++cache_clock;
+        }
     srt_mutex_unlock(cache_lock);
     if (have || (data = (unsigned char*)malloc(key->size)) == NULL) return;
     while (at < key->size) {
@@ -549,6 +576,13 @@ void i5_ch36011_oggX5Fpreload(wasmModuleInstance* inst, U32 path, U32 len, U32 b
             char msg[128];
             int n = sprintf(msg, "audio: %u short clips read ahead (%u KB), %u kept\n", pre_done, pre_bytes >> 10, pre_kept);
             ch360_plat_log(msg, (size_t)n);
+        }
+        if (frame_reads > 0) {
+            char msg[128];
+            int n = sprintf(msg, "audio: %u clips read from the drive in the frame since the last load (%u KB)\n", frame_reads,
+                            frame_read_bytes >> 10);
+            ch360_plat_log(msg, (size_t)n);
+            frame_reads = frame_read_bytes = 0;
         }
         pre_batch = batch;
         pre_count = 0;

@@ -48,6 +48,8 @@ namespace Cuphead360.Player
         static extern void TextureAhead(int id, float u0, float v0, float u1, float v1);
         [DllImport("ch360", EntryPoint = "textures_pending"), WasmImportLinkage]
         static extern int TexturesPending();
+        [DllImport("ch360", EntryPoint = "textures_scene"), WasmImportLinkage]
+        static extern void TexturesScene(int begin);
         [DllImport("ch360", EntryPoint = "textures_waited"), WasmImportLinkage]
         static extern int TexturesWaited();
         [DllImport("ch360", EntryPoint = "loading_screen"), WasmImportLinkage]
@@ -422,6 +424,7 @@ namespace Cuphead360.Player
             };
             // A load's last step waits under the hourglass for the pages it read ahead (SceneLoad, RenderList.ReadAheadLoad).
             RenderList.TexturesPending = () => TexturesPending();
+            RenderList.SceneReadAhead = begin => TexturesScene(begin ? 1 : 0);
             // An atlas the game loads: its pages read ahead (the boot's preload of the title's atlases readies the logo).
             Atlases.Prefetch = src => TexturePrefetch(FileTextureId(src));
             // Sprites near the view and the clips those on screen play: their pages read ahead (converted ones only).
@@ -458,6 +461,9 @@ namespace Cuphead360.Player
                 PollPads();
                 if (!frame(++n)) break;
                 if (n % 60 == 1) NoKeyboard();
+                // Once a second in play: the scene's fonts kept read (RenderList.KeepFontsAhead), and the short clips
+                // of what was made since the load read ahead (Audio.PreloadFresh: the player's, made as a level starts).
+                if (n % 60 == 30 && !Cuphead360.Engine.SceneLoader.Loading) { RenderList.KeepFontsAhead(); Audio.PreloadFresh(more: true); }
                 long built = System.Diagnostics.Stopwatch.GetTimestamp(), allocBuilt = PlayerLoop.Profile ? GC.GetAllocatedBytesForCurrentThread() : 0;
                 var views = RenderList.Build();
                 long listed = System.Diagnostics.Stopwatch.GetTimestamp(), allocListed = PlayerLoop.Profile ? GC.GetAllocatedBytesForCurrentThread() : 0;
@@ -796,7 +802,7 @@ namespace Cuphead360.Player
                 // whole scene, active or not, with its texts' fonts (the slot select's atlas came from the drive two
                 // seconds in, a 234 ms frame as it faded in). A level, map or cutscene: what it shows first.
                 bool menu = !name.StartsWith("scene_level_") && !name.StartsWith("scene_map_") && !name.StartsWith("scene_cutscene_");
-                int read = menu ? RenderList.ReadAheadScene(out int unbound) : RenderList.ReadAheadFirst(out unbound);
+                int read = menu ? RenderList.ReadAheadScene(out int unbound, languageFonts: true) : RenderList.ReadAheadFirst(out unbound);
                 levelSprites = Math.Max(levelSprites, read);
                 levelSettled = unbound == 0 || unbound == levelUnbound;
                 levelUnbound = unbound;

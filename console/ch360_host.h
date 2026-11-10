@@ -126,6 +126,9 @@ void ch360_plat_texture_file(int id, const char* key);
 void ch360_plat_texture_prefetch(int id, int wanted);
 /* Textures being read or waiting to be (the loader's jobs and the read-ahead asked for): the boot's hold. */
 int ch360_plat_textures_pending(void);
+/* A new scene's read-ahead begins (1: what the last frames didn't draw counts as old, room made from it) or ends
+ * (0: what it asked for is read). */
+void ch360_plat_textures_scene(int begin);
 /* Textures the last frame drew that weren't loaded yet (it waited for them): the level hold's end. */
 int ch360_plat_textures_waited(void);
 /* Texture id's pixels (run-time textures: font atlases), BGRA rows. */

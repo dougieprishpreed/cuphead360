@@ -169,6 +169,8 @@ namespace Cuphead360.Engine
         }
         static readonly List<Pending> pending = new List<Pending>();
         public static int Loads;
+        /// <summary>A scene load asked for and not yet activated.</summary>
+        public static bool Loading => pending.Count > 0;
 
         /// <summary>
         /// Whether a scene's first frames are prepared behind the loader's black: its pages read ahead (its

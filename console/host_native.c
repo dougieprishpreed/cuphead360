@@ -195,6 +195,10 @@ void ch360_plat_texture_prefetch(int id, int wanted) {
 
 /* Textures read at once here: none ever pending. */
 int ch360_plat_textures_pending(void) { return 0; }
+void ch360_plat_textures_scene(int begin) {
+    if (trace_prefetch < 0) trace_prefetch = getenv("CH360_TRACE_PREFETCH") != NULL;
+    if (trace_prefetch) printf("PREFETCH frame %ld: scene read-ahead %s\n", frame_no, begin ? "begins" : "ends");
+}
 int ch360_plat_textures_waited(void) { return 0; }
 /* No output playing in real time here (the WAV takes what is mixed): the player mixes each frame's time. */
 int ch360_plat_audio_queued(void) { return -1; }

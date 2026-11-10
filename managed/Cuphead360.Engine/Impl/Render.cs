@@ -741,8 +741,22 @@ namespace Cuphead360.Engine
             // first frames reached them, each frame waiting).
             if (pages != null)
                 foreach (var (f, p) in pages)
-                    if (AssetDb.Lookup(src.File, new PPtr(f, p)) is ChobObject page && page.Type == "Texture2D") Prefetch(page);
+                    if (AssetDb.Lookup(src.File, new PPtr(f, p)) is ChobObject page && page.Type == "Texture2D")
+                    {
+                        Prefetch(page);
+                        // its record and size now (as the atlas loads), not as the first sprite drawn from it binds:
+                        // that read it from the drive in the frame (Forest Follies' first visit, as its parts came
+                        // into view), and kept while the atlas is (nothing else held it: the load's own unload pass
+                        // let it go again)
+                        if (AssetDb.Resolve(src.File, new PPtr(f, p)) is Texture t)
+                        {
+                            Icalls.FileSize(t);
+                            atlasPages.GetOrCreateValue(atlas).Add(t);
+                        }
+                    }
         }
+
+        static readonly ConditionalWeakTable<SpriteAtlas, List<Texture>> atlasPages = new ConditionalWeakTable<SpriteAtlas, List<Texture>>();
 
         /// <summary>The host's read-ahead of a texture an atlas the game loaded holds (the console host's), by its converted object (no Texture2D built).</summary>
         public static Action<ChobObject> Prefetch;
@@ -1260,6 +1274,10 @@ namespace Cuphead360.Engine
         {
             var c = Lifecycle.NewManaged<Sprite>();
             Objects.Register(c, new NAsset { Source = (Objects.Of(s) as NAsset)?.Source }, (Objects.Of(s)?.Name ?? "") + "(Clone)");
+            // the original's info, as an instantiated sprite's (Lifecycle): worked out again from the tree at the clone's
+            // first draw, the tree was let go by then and read from the drive (the map's atlas sprites, five reads
+            // as each visit began)
+            Sprites.Set(c, Sprites.Of(s));
             return c;
         }
         public static Sprite UnityEngine_U2D_SpriteAtlas__GetSprite(SpriteAtlas self, string name)
@@ -1286,19 +1304,34 @@ namespace Cuphead360.Engine
 
         static readonly ConditionalWeakTable<Texture, int[]> runtimeTextures = new ConditionalWeakTable<Texture, int[]>();
 
+        // A converted texture's size, read from its tree once: the tree goes under the parsed-tree budget, and
+        // reading it again as a sprite first bound to the texture read its block from the drive in that frame
+        // (Forest Follies' first visit, eight times as its parts came into view). Filled at load (FileSize: the
+        // atlases' pages as they register, the warm-up's sprites' textures).
+        static readonly ConditionalWeakTable<Texture, int[]> fileSizes = new ConditionalWeakTable<Texture, int[]>();
+
+        internal static int[] FileSize(Texture t)
+        {
+            if (fileSizes.TryGetValue(t, out var s)) return s;
+            var tree = (Objects.Of(t) as NAsset)?.Source?.Tree;
+            s = new[] { (int)Tree.Int(tree, "m_Width"), (int)Tree.Int(tree, "m_Height") };
+            if (tree != null) fileSizes.AddOrUpdate(t, s);
+            return s;
+        }
+
         public static int TextureWidth(Texture t)
         {
             if (t == null) return 0;
             if (t is RenderTexture rt) return UnityEngine_RenderTexture__Internal_GetWidth(rt);
             if (runtimeTextures.TryGetValue(t, out var d)) return d[0];
-            return (int)Tree.Int((Objects.Of(t) as NAsset)?.Source?.Tree, "m_Width");
+            return FileSize(t)[0];
         }
         public static int TextureHeight(Texture t)
         {
             if (t == null) return 0;
             if (t is RenderTexture rt) return UnityEngine_RenderTexture__Internal_GetHeight(rt);
             if (runtimeTextures.TryGetValue(t, out var d)) return d[1];
-            return (int)Tree.Int((Objects.Of(t) as NAsset)?.Source?.Tree, "m_Height");
+            return FileSize(t)[1];
         }
         public static void RuntimeTexture(Texture t, int w, int h, int format) { runtimeTextures.Remove(t); runtimeTextures.Add(t, new[] { w, h, format }); }
 

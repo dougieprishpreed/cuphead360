@@ -195,10 +195,10 @@ def stage_c(a):
         print("the memory base is not hoisted (--no-hoist)")
     else:
         hoist_memory_base(cdir)
-    if a.cold_os:
+    if not a.no_cold_os:
         split_cold(cdir, LINKMAP, HOT_LIST)
     else:
-        print("the -Os split is off (--cold-os): every function -O2")
+        print("the -Os split is off (--no-cold-os): every function -O2")
     print(len([f for f in os.listdir(cdir) if f.endswith(".c")]), "C files in", cdir)
 
 
@@ -241,8 +241,9 @@ def split_cold(cdir, linkmap, hot_list):
     """Each player file's functions that ran rarely when sampled go to a twin, <file>_cold.c, which the console
     compiles for size (-Os, console/xsdk/CMakeLists.txt: 12-16% smaller than -O2, and slower). The list names
     each method of the sampled build hot or cold; a method it doesn't name (new since) stays -O2, as does
-    everything without a list. Only with --cold-os: the first console build with it (hw31) stopped at
-    start-up with an exception in the 64-bit number code, which the -O2 build runs right."""
+    everything without a list. --no-cold-os: none split. The first console build with it (hw31) stopped at
+    start-up, the GCC counted-loop bug's doing (-fno-branch-count-reg since): the split build passed every
+    console probe (hw36) and played, 10 MB less resident."""
     if not os.path.exists(hot_list) or not os.path.exists(linkmap):
         print("no hot list (%s): every function -O2" % hot_list)
         return
@@ -438,9 +439,9 @@ def main():
                     help="C stage: every access through i->m0 as w2c2 writes it (a console test of the hoist)")
     ap.add_argument("--segments-in-c", action="store_true",
                     help="C stage: the data segments as LZ4 arrays in the C, no PLAYER.DAT (a console test)")
-    ap.add_argument("--cold-os", action="store_true",
-                    help="C stage: put the functions hot_functions.txt marks rarely run in <file>_cold.c, which the "
-                         "console compiles -Os (10.5 MB less code; stopped the console at start-up in hw31)")
+    ap.add_argument("--no-cold-os", action="store_true",
+                    help="C stage: leave every function in its file (-O2), not the ones hot_functions.txt marks rarely "
+                         "run in <file>_cold.c, which the console compiles -Os (10 MB less resident)")
     a = ap.parse_args()
     JOBS = a.jobs
     stages = STAGES if a.stage == "all" else a.stage.split(",")

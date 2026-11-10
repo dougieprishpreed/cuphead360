@@ -63,6 +63,13 @@ namespace Cuphead360.Engine
             foreach (var k in drop) cache.Remove(k);
         }
 
+        /// <summary>A controller's clips cached again (ControllerData.Of: its data kept with its asset).</summary>
+        internal static void Restore(ClipData[] clips)
+        {
+            foreach (var d in clips)
+                if (d?.Clip != null && (Objects.Of(d.Clip) as NAsset)?.Source is ChobObject src && !cache.ContainsKey(src)) cache[src] = d;
+        }
+
         public static ClipData Of(UObject clip)
         {
             var src = (Objects.Of(clip) as NAsset)?.Source;
@@ -263,13 +270,25 @@ namespace Cuphead360.Engine
         /// <summary>CH360_NO_SYNCED=1 (a PC check): synced layers played as layers of their own with the base motions, as before.</summary>
         static readonly bool NoSynced = Environment.GetEnvironmentVariable("CH360_NO_SYNCED") == "1";
 
-        /// <summary>AssetUnload: only the controllers live animators use stay cached (their clips with them).</summary>
+        /// <summary>
+        /// AssetUnload: only the controllers live animators use stay cached (their clips with them). The others'
+        /// data stays with their controller asset while that lives (a prefab still referenced): a level's restart
+        /// destroyed the player before the pass, its data went, and its controller and clips were read again from
+        /// the drive as it came back and as it first ran (the thirty-sixth run's restart hitches).
+        /// </summary>
         public static void Retain(HashSet<ControllerData> keep)
         {
             var drop = new List<ChobObject>();
             foreach (var kv in cache) if (!keep.Contains(kv.Value)) drop.Add(kv.Key);
-            foreach (var k in drop) cache.Remove(k);
+            foreach (var k in drop)
+            {
+                if (AssetDb.TryBuilt(k.File, k.PathId, out var asset) && asset != null) withAsset.AddOrUpdate(asset, cache[k]);
+                cache.Remove(k);
+            }
         }
+
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<UObject, ControllerData> withAsset =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<UObject, ControllerData>();
 
         // Controllers built (prefabs' animators', as a scene's build resolves them) whose states and
         // clips aren't read yet: the loads read them (WarmNext) under the loading screen, not the frame
@@ -342,6 +361,8 @@ namespace Cuphead360.Engine
         public static void NewLoad() => warmedKeep.Clear();
         static List<ChobObject> warmClips;
         static List<(ChobFile from, PPtr p, ChobObject at)> warmSprites;
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<UObject, Texture> spriteTextures =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<UObject, Texture>();
         static int warmStage, warmAt;
 
         static int FileOrder(ChobObject a, ChobObject b)
@@ -394,8 +415,20 @@ namespace Cuphead360.Engine
                     warmStage = 2;
                     return true;
                 case 2:
-                    // a few sprites a step (each is short)
-                    for (int k = 0; k < 8 && warmAt < warmSprites.Count; k++, warmAt++) AssetDb.Resolve(warmSprites[warmAt].from, warmSprites[warmAt].p);
+                    // a few sprites a step (each is short), and the texture each is drawn from: built as a sprite first
+                    // showed, its record came from the drive in that frame (Forest Follies' first visit read eight)
+                    for (int k = 0; k < 8 && warmAt < warmSprites.Count; k++, warmAt++)
+                    {
+                        var (from, p, at) = warmSprites[warmAt];
+                        var sprite = AssetDb.Resolve(from, p);
+                        var tex = Tree.Ptr(Tree.Get(at.Tree, "m_RD"), "texture");
+                        // kept while the sprite is (the load's unload pass let a texture nothing held go again)
+                        if (!tex.IsNull && AssetDb.Resolve(at.File, tex) is Texture t)
+                        {
+                            Icalls.FileSize(t);
+                            if (sprite != null) spriteTextures.AddOrUpdate(sprite, t);
+                        }
+                    }
                     if (warmAt < warmSprites.Count) return true;
                     warmSprites = null;
                     warmAt = 0;
@@ -424,6 +457,13 @@ namespace Cuphead360.Engine
             var src = (Objects.Of(c) as NAsset)?.Source;
             if (src == null || src.Type != "AnimatorController") return null;
             if (cache.TryGetValue(src, out var d)) return d;
+            if (withAsset.TryGetValue(c, out d))
+            {
+                withAsset.Remove(c);
+                cache[src] = d;
+                ClipData.Restore(d.Clips);
+                return d;
+            }
             d = new ControllerData();
             d.Read(src);
             cache[src] = d;
@@ -873,11 +913,15 @@ namespace Cuphead360.Engine
         {
             if (RenderList.ReadAhead == null || Data == null || Layers.Length == 0) return;
             if (aheadStates == null || aheadStates.Length != Layers.Length) { aheadStates = new int[Layers.Length]; for (int i = 0; i < aheadStates.Length; i++) aheadStates[i] = -1; }
+            int near = -1;   // within the read-ahead's reach (RenderList.InReach): asked once, when a state changed
             for (int li = 0; li < Layers.Length && li < Data.Layers.Length; li++)
             {
                 int src = Data.Layers[li].Source >= 0 ? Data.Layers[li].Source : li;
                 var cur = Layers[src].Current;
                 if (cur == null || cur.State == aheadStates[li]) continue;
+                // out of reach: not yet (its state stays unread, so its next clips are read as it comes near)
+                if (near < 0) near = GameObject != null && RenderList.InReach(GameObject.Transform.Position) ? 1 : 0;
+                if (near == 0) return;
                 aheadStates[li] = cur.State;
                 var s = StateAt(src, cur.State);
                 if (s == null) continue;

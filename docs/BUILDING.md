@@ -106,17 +106,16 @@ NuGet feed). It writes the module's data segments to
 which the console reads from its drive and decodes into the player's memory
 at start, so the executable the console keeps in memory doesn't carry them.
 
-Experimental, off by default: functions that rarely run can be compiled
-for size (10 MB less code). The first console build made this way stopped
-at start-up, so leave it off. It needs a list of the functions that run
-often, sampled while a PC build of the console code (`python
-tools\build_console.py --stage native`, which writes
-`work\console\native\host_native.exe`) plays every level. The list is made
-with `tools\sample_native.py --raw --save-stacks` and
-`tools\hot_functions.py` (see their help) as
-`work\managed\hot_functions.txt`. Adding `--cold-os` to the C stage then
-splits each file into its often-run functions and a `_cold.c` twin for the
-rest. `python tools\build_console.py --stage xsdk --test64` on that C makes
+Functions that rarely run are compiled for size (10 MB less resident on
+the console). This needs a list of the functions that run often, sampled
+while a PC build of the console code (`python tools\build_console.py
+--stage native`, which writes `work\console\native\host_native.exe`)
+plays every level. The list is made with `tools\sample_native.py --raw
+--save-stacks` and `tools\hot_functions.py` (see their help) as
+`work\managed\hot_functions.txt`. With it the C stage splits each file
+into its often-run functions and a `_cold.c` twin for the rest; without
+it, or with `--no-cold-os`, every function stays -O2. A function the list
+doesn't name (new since it was sampled) stays -O2. `python tools\build_console.py --stage xsdk --test64` on that C makes
 `cuphead360_test.xex` and `GameData\PLAYER_TEST.DAT`, which go beside the
 play build. The test build checks .NET's 64-bit number code and probes the
 library code start-up uses, writes every result to `cuphead360_test.txt`,

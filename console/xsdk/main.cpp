@@ -246,6 +246,8 @@ const unsigned MEMORY_FLOOR_MB = 24;
 // Read-ahead makes room from textures not drawn for this many frames (behind the camera, a phase gone by),
 // never from what the screen showed lately; a sprite page is 4 MB at most (tools/cluster_console.py).
 const unsigned AHEAD_AGE = 180;
+// Frames younger a texture counts for each time it was read again, up to six (Renderer::release_unused).
+const unsigned RELOAD_CREDIT = 240;
 const size_t PAGE_MAX = 4u << 20;
 // Pages' stored bytes (LZ4, a fifth to a quarter of their size) kept in memory: a page evicted and drawn
 // again, or read ahead, decodes without the drive (USB reads ran at 9 MB/s: 50-80 ms a page, from memory
@@ -553,9 +555,11 @@ private:
     unsigned load_jobs_;            // jobs made and not yet taken back
     size_t load_bytes_, pre_bytes_; // their buffers', the prefetches' of them
     double wait_ms_;
+    bool hold_feed_;                // a scene's read-ahead being asked for: the backlog fed at its end
 public:
     void start_loader();
     void prefetch(int id, bool wanted);
+    void scene_read_ahead(bool begin);
     int pending() const { return (int)(load_jobs_ + pre_backlog_.size()); }
     // Textures the last frame drew and waited for (the level hold ends when a frame waits for none).
     int waited() const { return (int)last_waited_; }
@@ -1717,6 +1721,7 @@ void Renderer::start_loader() {
     load_bytes_ = pre_bytes_ = 0;
     stored_bytes_ = 0;
     wait_ms_ = 0;
+    hold_feed_ = false;
     if (ch360_ctex_pack < 0) return;
     g_arena = (unsigned char*)malloc(LOAD_ARENA);
     if (g_arena) g_arena_free.push_back(std::make_pair((size_t)0, LOAD_ARENA));
@@ -1855,7 +1860,7 @@ void Renderer::prefetch(int id, bool wanted) {
         if (soft_backlog_.size() >= 2048) return;
         t->soft_wanted = true;
         soft_backlog_.push_back(id);
-        feed_prefetch();
+        if (!hold_feed_) feed_prefetch();
         return;
     }
     if (t && t->image && frame_no_ - t->last_used > 3) {
@@ -1868,6 +1873,28 @@ void Renderer::prefetch(int id, bool wanted) {
     if (pre_backlog_.size() >= 1024) return;
     t->pre_wanted = true;
     pre_backlog_.push_back(id);
+    if (!hold_feed_) feed_prefetch();
+}
+
+// A new scene's read-ahead (the load's last stage under the hourglass: RenderList.ReadAheadLoad) begins or
+// ends. At its beginning the textures not drawn in the last frames (the scene going away: the loading screen
+// draws its kept frames) count as not drawn for long. A restart or a return to the map found the textures the
+// scene before had drawn lately, none old enough to make room from (the thirty-sixth run's Forest Follies
+// restart: 64 pages still coming as its read-ahead ended, 92 as its hold did), and its first frames read them.
+// The new scene's asks then mark what it wants as drawn lately (prefetch), and the backlog is fed only at the
+// end, so room never comes from a texture the new scene wants too.
+void Renderer::scene_read_ahead(bool begin) {
+    if (begin) {
+        const unsigned old = AHEAD_AGE + 6 * RELOAD_CREDIT + 4;
+        for (size_t i = 0; i < textures_.size(); ++i) {
+            Tex& t = textures_[i];
+            if (!t.image || t.key.empty() || t.pinned || frame_no_ - t.last_used <= 3) continue;
+            t.last_used = t.last_used > old ? t.last_used - old : 0;
+        }
+        hold_feed_ = true;
+        return;
+    }
+    hold_feed_ = false;
     feed_prefetch();
 }
 
@@ -2082,7 +2109,6 @@ void Renderer::load_packed(int id, Tex& t) {
 // read 638 MB of textures in 99 s, 120 MB of them pages loaded two to eleven
 // times (the player's, the explosions'), let go for pages behind the camera
 // that never came back.
-const unsigned RELOAD_CREDIT = 240;
 size_t Renderer::release_unused(size_t want) {
     std::vector<std::pair<unsigned, size_t> > order;
     // Prefetched textures nothing has drawn yet go first (read again if wanted), then the least recently drawn.
@@ -3007,6 +3033,10 @@ extern "C" int ch360_plat_textures_pending(void) {
 extern "C" void ch360_plat_texture_prefetch(int id, int wanted) {
     GpuLock lock;
     g_renderer->prefetch(id, wanted != 0);
+}
+extern "C" void ch360_plat_textures_scene(int begin) {
+    GpuLock lock;
+    if (g_renderer) g_renderer->scene_read_ahead(begin != 0);
 }
 
 extern "C" void ch360_plat_texture_pixels(int id, int width, int height, const unsigned char* bgra) {

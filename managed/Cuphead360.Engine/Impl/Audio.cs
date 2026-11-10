@@ -240,17 +240,43 @@ namespace Cuphead360.Engine
         static readonly List<WeakReference<Clip>> fresh = new List<WeakReference<Clip>>();
         static int preloadBatch;
 
-        /// <summary>A scene load's end (under the loading screen): its short clips to the host to read ahead.</summary>
-        public static void PreloadFresh()
+        /// <summary>
+        /// A scene load's end (under the loading screen): its short clips to the host to read ahead. more: those of
+        /// what was made since, in play (ConsoleHost, once a second), joining the last load's (whose read-ahead a new
+        /// batch would drop): the player is made as a level starts, and its first hit read its sound from the drive
+        /// in that frame (the thirty-sixth run: a hitch at every first hit), as its first dash and death did.
+        /// </summary>
+        /// <remarks>
+        /// A load sends every other clip still here too, the latest played first (the host skips those it keeps):
+        /// read ahead only as they were built, the player's sounds were pushed out of the host's cache by the next
+        /// level's read-ahead and a restart's music, and their first plays there read them in the frame (the
+        /// Frogs' first dash, the first hit after a restart).
+        /// </remarks>
+        public static void PreloadFresh(bool more = false)
         {
-            if (Preload == null || fresh.Count == 0) return;
-            preloadBatch++;
+            if (Preload == null || (more && (preloadBatch == 0 || fresh.Count == 0))) return;
+            if (!more) preloadBatch++;
+            var sent = new HashSet<Clip>();
             foreach (var w in fresh)
-                // streamed ones too: one under the host's size for reading off the game's thread opened in the
-                // frame (the title's 59 ms frame as the logo played); the host keeps those under 256 KB
-                if (w.TryGetTarget(out var c) && !c.Missing && c.HostPcm < 0 && PathOf(c) is string p) Preload(p, preloadBatch);
+                if (w.TryGetTarget(out var c) && sent.Add(c)) PreloadOne(c);
             fresh.Clear();
+            if (more) return;
+            known.RemoveAll(w => !w.TryGetTarget(out _));
+            var rest = new List<Clip>();
+            foreach (var w in known) if (w.TryGetTarget(out var c) && !sent.Contains(c)) rest.Add(c);
+            rest.Sort((a, b) => b.LastUse.CompareTo(a.LastUse));
+            foreach (var c in rest) PreloadOne(c);
         }
+
+        // streamed ones too: one under the host's size for reading off the game's thread opened in the frame (the
+        // title's 59 ms frame as the logo played); the host keeps those under 256 KB
+        static void PreloadOne(Clip c)
+        {
+            if (!c.Missing && c.HostPcm < 0 && PathOf(c) is string p) Preload(p, preloadBatch);
+        }
+
+        // Every clip built (weak: one whose asset went goes with it): a load's read-ahead of those still here.
+        static readonly List<WeakReference<Clip>> known = new List<WeakReference<Clip>>();
 
         public static Clip ClipOf(AudioClip c)
         {
@@ -273,7 +299,12 @@ namespace Cuphead360.Engine
                 ci.Key = k + "_" + IdText.Of(src.PathId);
             }
             clips.AddOrUpdate(c, ci);
-            if (Preload != null && fresh.Count < 4096) fresh.Add(new WeakReference<Clip>(ci));
+            if (Preload != null)
+            {
+                var w = new WeakReference<Clip>(ci);
+                if (fresh.Count < 4096) fresh.Add(w);
+                known.Add(w);
+            }
             return ci;
         }
 
