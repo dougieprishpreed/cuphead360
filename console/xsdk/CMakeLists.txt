@@ -24,8 +24,15 @@ set(CMAKE_C_COMPILER_LAUNCHER python3 "${CMAKE_CURRENT_LIST_DIR}/record_forms.py
 set(CMAKE_CXX_COMPILER_LAUNCHER python3 "${CMAKE_CURRENT_LIST_DIR}/record_forms.py")
 
 # char is signed and no strict aliasing (w2c2's C expects both); no fused
-# multiply-adds, so floats match the PC build's.
-set(COMMON_FLAGS -O2 -fsigned-char -fno-strict-aliasing -ffp-contract=off -ffunction-sections -fdata-sections)
+# multiply-adds, so floats match the PC build's. No counted loops (bdnz):
+# GCC 15.3 gets the check that sets the count register to 1 wrong for some
+# loops it turns into one, so RhBulkMoveWithWriteBarrier copied one 32-byte
+# block where the loop needed three (string-keyed dictionaries lost entries
+# when they grew) and gc_heap::compact_plug moved too little (the thirty-fifth
+# run; the memory base hoist exposed both, and the plain build has the same
+# kind of check in about 220 functions).
+set(COMMON_FLAGS -O2 -fsigned-char -fno-strict-aliasing -ffp-contract=off -ffunction-sections -fdata-sections
+    -fno-branch-count-reg)
 
 # The translated player and its runtime (w2c2's C, the wasm runtime on xsdk's
 # POSIX calls), started by ch360_imports.c.
