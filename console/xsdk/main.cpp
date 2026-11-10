@@ -141,8 +141,8 @@ void* log_writer(void*) {
 #ifdef CH360_TEST64
         // A test build ends itself: one stuck in a probe before its first frame (a heap walk that never ended,
         // hw33) left the console to be switched off, Back + Start being read only between frames.
-        if (s >= 60) {
-            logf("test build: still running after 60 s, quitting");
+        if (s >= 20) {
+            logf("test build: still running after 20 s, quitting");
             flush_log(true);
             _exit(0);
         }
