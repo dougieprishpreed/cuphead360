@@ -14,7 +14,8 @@
 # licences it ships under. CH360_TEST64=1: the 64-bit test build instead
 # (cuphead360_test.xex beside default.xex, reading GameData/PLAYER_TEST.DAT;
 # the C stage's --cold-os code; CH360_TEST_NAME names another, and
-# CH360_COLD_OPTIONS replaces -Os for the rarely-run files).
+# CH360_COLD_OPTIONS replaces -Os for the rarely-run files). CH360_PLAYER_C: the
+# translated player from another folder than work/managed/c.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DEPS=/opt/ctr360-xsdk
@@ -24,7 +25,7 @@ GLSLANG="${GLSLANG:-$DEPS/glslang/build-host/StandAlone/glslang}"
 XSDK_TOOLCHAIN="${XSDK_TOOLCHAIN:-$DEPS/toolchain}"
 CH360_RUNTIME="${CH360_RUNTIME:-$(cd "$ROOT/.." && pwd)/spire360}"
 OUT="${CH360_XSDK_BUILD:-/opt/cuphead360-xsdk/output}"
-PLAYER="$ROOT/work/managed/c"
+PLAYER="${CH360_PLAYER_C:-$ROOT/work/managed/c}"
 JOBS="${JOBS:-2}"
 TEST_NAME="${CH360_TEST_NAME:-cuphead360_test}"
 if [ "${CH360_TEST64:-0}" = 1 ]; then TEST64=ON; NAME="$TEST_NAME.xex"; DAT=PLAYER_TEST.DAT; else TEST64=OFF; NAME=default.xex; DAT=PLAYER.DAT; fi
@@ -68,7 +69,7 @@ DST="$ROOT/work/console/xsdk"
 mkdir -p "$DST/licenses"
 cp "$OUT/$NAME" "$DST/$NAME"
 # The module's data segments, which the XEX reads from GameData at start (the C stage's file: this build's).
-cp "$PLAYER/PLAYER.DAT" "$DST/$DAT"
+[ ! -f "$PLAYER/PLAYER.DAT" ] || cp "$PLAYER/PLAYER.DAT" "$DST/$DAT"
 cp "$XSDK/LICENSE" "$DST/licenses/xsdk.txt"
 cp "$XSDK/THIRD_PARTY_NOTICES.md" "$DST/licenses/xsdk-third-party.md" 2>/dev/null || true
 cp "$VULKAN4XENON/LICENSE" "$DST/licenses/vulkan4xenon.txt"

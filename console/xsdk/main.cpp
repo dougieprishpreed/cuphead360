@@ -138,6 +138,15 @@ void* log_writer(void*) {
                  s, g_frames_seen, (const char*)g_stage, free_mb, ch360_memory_kb() / 1024, (unsigned)(g_texture_bytes >> 20),
                  (unsigned)st.wasi_calls, g_io_opens, g_io_reads, (unsigned)(g_io_bytes >> 20), (unsigned)g_io_ms, g_io_seeks);
         }
+#ifdef CH360_TEST64
+        // A test build ends itself: one stuck in a probe before its first frame (a heap walk that never ended,
+        // hw33) left the console to be switched off, Back + Start being read only between frames.
+        if (s >= 60) {
+            logf("test build: still running after 60 s, quitting");
+            flush_log(true);
+            _exit(0);
+        }
+#endif
         double now = now_ms();
         if (g_frames_seen != frames_at) {
             frames_at = g_frames_seen;
