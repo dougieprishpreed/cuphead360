@@ -62,6 +62,11 @@ volatile bool g_log_thread = false;
 // What the guest thread is doing, for the heartbeat: "game" while the
 // player's own code runs, otherwise the host call or runtime wait it is in.
 volatile const char* g_stage = "start";
+// The other threads', for the heartbeat and a stall's report: the replay thread's (the loading screen kept moving),
+// the texture loader's (the texture it reads), the clip reader's (ch360_ogg.c).
+volatile const char* g_replay_stage = "start";
+char g_texload_what[80] = "start";
+extern pthread_mutex_t g_gpu_lock;   // the renderer's (below)
 volatile unsigned g_frames_seen = 0;
 volatile bool g_player_started = false;
 // The runtime's file calls (srt_plat_*, wrapped below): counts, bytes, time.
@@ -134,9 +139,10 @@ void* log_writer(void*) {
             unsigned free_mb, total_mb;
             memory_mb(&free_mb, &total_mb);
             logf("alive %u s: frame %u, %s; %u MB free, player %u MB, textures %u MB; wasi calls %u; files: %u opens, %u reads, "
-                 "%u MB in %u ms, %u seeks",
+                 "%u MB in %u ms, %u seeks; replay: %s; texture loader: %s; clip reader: %s",
                  s, g_frames_seen, (const char*)g_stage, free_mb, ch360_memory_kb() / 1024, (unsigned)(g_texture_bytes >> 20),
-                 (unsigned)st.wasi_calls, g_io_opens, g_io_reads, (unsigned)(g_io_bytes >> 20), (unsigned)g_io_ms, g_io_seeks);
+                 (unsigned)st.wasi_calls, g_io_opens, g_io_reads, (unsigned)(g_io_bytes >> 20), (unsigned)g_io_ms, g_io_seeks,
+                 (const char*)g_replay_stage, g_texload_what, (const char*)ch360_clip_reader_stage);
         }
 #ifdef CH360_TEST64
         // A test build ends itself: one stuck in a probe before its first frame (a heap walk that never ended,
@@ -153,8 +159,23 @@ void* log_writer(void*) {
             frame_at = now;
         }
         bool idle = g_log_loading || now - frame_at > 500;
+        // No frame for 2 s: where every thread is, every 2 s until frames come again (the thirty-seventh run
+        // locked up on the way to the map and its log ended with nothing after the load's start).
+        bool stalled = now - frame_at > 2000;
+        if (tick % 20 == 0 && stalled) {
+            unsigned free_mb, total_mb;
+            memory_mb(&free_mb, &total_mb);
+            bool gpu_free = pthread_mutex_trylock(&g_gpu_lock) == 0;
+            if (gpu_free) pthread_mutex_unlock(&g_gpu_lock);
+            logf("STALL: no frame for %u ms (frame %u); game thread: %s; replay thread: %s; texture loader: %s; clip reader: %s; "
+                 "renderer lock %s; %u MB free", (unsigned)(now - frame_at), g_frames_seen, (const char*)g_stage,
+                 (const char*)g_replay_stage, g_texload_what, (const char*)ch360_clip_reader_stage, gpu_free ? "free" : "held",
+                 free_mb);
+        }
         if (tick % 20 == 0 && idle) {
-            bool sync = now - synced_at > 30000;
+            // Synced every 2 s while loading or stalled: written but not synced, the lines before a lock-up were lost
+            // with the power (30 s between syncs before); in play nothing is written.
+            bool sync = now - synced_at > ((stalled || g_log_loading) ? 1900 : 30000);
             if (sync) synced_at = now;
             flush_log(sync);
         }
@@ -403,12 +424,14 @@ void* texture_loader(void*) {
     xsdk_thread_move(2);
     for (;;) {
         pthread_mutex_lock(&g_load_lock);
+        snprintf(g_texload_what, sizeof(g_texload_what), "waiting for a job");
         while (g_load_in_head == g_load_in_tail && g_pre_in_head == g_pre_in_tail) pthread_cond_wait(&g_load_cond, &g_load_lock);
         LoadJob* j;
         if (g_load_in_head != g_load_in_tail) j = g_load_in[g_load_in_head++ % LOAD_RING];
         else j = g_pre_in[g_pre_in_head++ % LOAD_RING];
         pthread_mutex_unlock(&g_load_lock);
         if (!j) continue;   // a prefetch moved to the drawn ring
+        snprintf(g_texload_what, sizeof(g_texload_what), "reading %.64s", j->key.c_str());
         double t0 = now_ms();
         unsigned char head[28];
         j->state = 1;
@@ -458,9 +481,11 @@ struct Tex {
     unsigned char reloads;   // loads after being let go (release_unused keeps the often reloaded longer)
     unsigned char* stored;   // the pack entry's stored bytes, kept (STORED_BUDGET)
     unsigned stored_n, stored_used;
+    unsigned waited_frame;   // the last frame that waited for it (each wait counted once: WaitCauses)
     Tex() : image(VK_NULL_HANDLE), mem(VK_NULL_HANDLE), view(VK_NULL_HANDLE), set(VK_NULL_HANDLE), w(0), h(0),
             format(VK_FORMAT_UNDEFINED), bytes(0), last_used(0), retry_at(0), failed(false), pinned(false), loading(false), prefetching(false),
-            pre_wanted(false), unused_pre(false), soft_wanted(false), evicted(false), reloads(0), stored(NULL), stored_n(0), stored_used(0) {}
+            pre_wanted(false), unused_pre(false), soft_wanted(false), evicted(false), reloads(0), stored(NULL), stored_n(0), stored_used(0),
+            waited_frame(0) {}
 };
 
 struct Garbage {
@@ -510,6 +535,11 @@ public:
     double gpu_wait_ms, present_ms;
     double host_ms_[8];
     HostStats stats_;
+    // Why frames waited for textures since the last scene summary (logged beside it: ch360_plat_host_stats): each
+    // texture a frame waited for, by what the read-ahead had done about it; and the frames the read-ahead couldn't
+    // make room (memory) with the least free memory then.
+    struct WaitCauses { unsigned never, queued, reading, let_go, held_frames, held_low_mb; } waits_;
+    unsigned held_frame_;
     double host_gpu_[GPU_KINDS + 1], host_fill_[2];   // the HOST line's window: GPU ms by kind and in all, fill
     unsigned host_gpu_frames_, host_passes_, host_slow_, host_slow_logged_;
     double ts_period_ms_;
@@ -560,6 +590,12 @@ public:
     void start_loader();
     void prefetch(int id, bool wanted);
     void scene_read_ahead(bool begin);
+    void held_ahead(unsigned free_mb) {
+        if (held_frame_ == frame_no_) return;
+        held_frame_ = frame_no_;
+        ++waits_.held_frames;
+        if (waits_.held_low_mb == 0 || free_mb < waits_.held_low_mb) waits_.held_low_mb = free_mb;
+    }
     int pending() const { return (int)(load_jobs_ + pre_backlog_.size()); }
     // Textures the last frame drew and waited for (the level hold ends when a frame waits for none).
     int waited() const { return (int)last_waited_; }
@@ -1496,6 +1532,13 @@ void Renderer::load_for(int id) {
     if (id < 0 || id >= CH360_RT_BASE) return;
     Tex* t = tex(id);
     if (t) {
+        if (g_loader && !t->image && !t->failed && !t->key.empty() && t->waited_frame != frame_no_ && frame_no_ >= t->retry_at) {
+            t->waited_frame = frame_no_;
+            if (t->loading) ++waits_.reading;          // asked ahead (or by an earlier frame), still being read
+            else if (t->pre_wanted) ++waits_.queued;   // asked ahead, held back (no room or the rings full)
+            else if (t->evicted) ++waits_.let_go;      // let go for room since it was last loaded
+            else ++waits_.never;
+        }
         load(id, *t);
         t->last_used = frame_no_;
         t->unused_pre = false;
@@ -1722,6 +1765,8 @@ void Renderer::start_loader() {
     stored_bytes_ = 0;
     wait_ms_ = 0;
     hold_feed_ = false;
+    memset(&waits_, 0, sizeof(waits_));
+    held_frame_ = 0;
     if (ch360_ctex_pack < 0) return;
     g_arena = (unsigned char*)malloc(LOAD_ARENA);
     if (g_arena) g_arena_free.push_back(std::make_pair((size_t)0, LOAD_ARENA));
@@ -1821,6 +1866,9 @@ void Renderer::take_loads(bool all) {
 
 // The frame's textures still with the loader: the frame waits for them (the loader reads them meanwhile,
 // several in a row); those the in-flight cap kept back are queued as room comes.
+// The frame waits for what it draws, but never past WAIT_GIVE_UP_MS: a load that never ends drew the frame without
+// its texture (logged), where it held the renderer's lock forever and froze the console.
+const double WAIT_GIVE_UP_MS = 3000;
 void Renderer::finish_waits() {
     last_waited_ = (unsigned)waiting_.size();
     if (waiting_.empty()) return;
@@ -1836,9 +1884,24 @@ void Renderer::finish_waits() {
             if (t->loading) pending = true;
         }
         if (!pending && !(held && load_jobs_ > 0)) break;
+        if (now_ms() - t0 > WAIT_GIVE_UP_MS) {
+            for (size_t k = 0; k < waiting_.size(); ++k) {
+                Tex* t = tex(waiting_[k]);
+                if (t && !t->image && !t->failed)
+                    logf("texture wait: %s still not loaded after %u ms (loading %d, prefetching %d, queued ahead %d; %u jobs; "
+                         "texture loader: %s), drawn without it", t->key.c_str(), (unsigned)(now_ms() - t0), (int)t->loading,
+                         (int)t->prefetching, (int)t->pre_wanted, load_jobs_, g_texload_what);
+            }
+            break;
+        }
+        // a job done, or 1 ms (the give-up's clock)
         pthread_mutex_lock(&g_load_lock);
-        while (g_load_out_head == g_load_out_tail) pthread_cond_wait(&g_done_cond, &g_load_lock);
+        bool done = g_load_out_head != g_load_out_tail;
         pthread_mutex_unlock(&g_load_lock);
+        if (!done) {
+            struct timespec ts = { 0, 1000000 };
+            nanosleep(&ts, NULL);
+        }
     }
     waiting_.clear();
     wait_ms_ += now_ms() - t0;
@@ -1915,11 +1978,21 @@ void Renderer::feed_prefetch() {
         // and every page coming into view was read while its frame waited: the twentieth run's hitches.)
         size_t want = texture_bytes_ + load_bytes_ + PAGE_MAX;
         if (want > TEXTURE_BUDGET && (release_aged(want - TEXTURE_BUDGET, AHEAD_AGE), texture_bytes_ + load_bytes_ + PAGE_MAX > TEXTURE_BUDGET)) return;
-        unsigned need_mb = MEMORY_FLOOR_MB + 8 + (unsigned)(load_bytes_ >> 20) + (unsigned)(PAGE_MAX >> 20);
+        // As much free memory as a drawn texture's load leaves (make_image: the floor and its page), what is being
+        // read counted in. 8 MB more before the thirty-eighth run: free sat at 29-38 MB in the levels, the read-ahead
+        // waited at 36 while the frames' own loads took the same memory, and those were the hitches (FF 64 textures
+        // on demand and 122 read again, Hilda 66 and 91).
+        unsigned need_mb = MEMORY_FLOOR_MB + (unsigned)(load_bytes_ >> 20) + (unsigned)(PAGE_MAX >> 20);
         if (free_mb < need_mb) {
-            if (!release_aged((size_t)(need_mb - free_mb) << 20, AHEAD_AGE)) return;
+            if (!release_aged((size_t)(need_mb - free_mb) << 20, AHEAD_AGE)) {
+                held_ahead(free_mb);
+                return;
+            }
             memory_mb(&free_mb, &total_mb);
-            if (free_mb < need_mb) return;
+            if (free_mb < need_mb) {
+                held_ahead(free_mb);
+                return;
+            }
         }
         if (!queue_load(pre_backlog_.front(), *t, true) && !t->failed) return;   // the rings or the in-flight cap: next frame
         t->pre_wanted = false;
@@ -2166,10 +2239,21 @@ void Renderer::evict() {
         }
 }
 
+// Read-ahead asks made while another thread had the renderer (the replay thread drawing the frame in between,
+// waiting in its acquire for the vblank): kept here and taken as the next frame starts, so the game's thread never
+// waits on them (each sprite near the view asks during the game's update).
+pthread_mutex_t g_ask_lock = PTHREAD_MUTEX_INITIALIZER;
+std::vector<std::pair<int, int> > g_asks, g_asks_taken;
+
 void Renderer::frame(const ch360_frame* f) {
     ++frame_no_;
     double t0 = now_ms();
     unsigned uploads_at = uploads;   // the loader's textures taken here count as this frame's loads
+    pthread_mutex_lock(&g_ask_lock);
+    g_asks_taken.swap(g_asks);
+    pthread_mutex_unlock(&g_ask_lock);
+    for (size_t i = 0; i < g_asks_taken.size(); ++i) prefetch(g_asks_taken[i].first, g_asks_taken[i].second != 0);
+    g_asks_taken.clear();
     take_loads();
     feed_prefetch();
 
@@ -2773,6 +2857,9 @@ unsigned replay_pick(unsigned phase) {
     return best;
 }
 
+extern bool g_tw_ready;            // the frame in between (below)
+static void draw_tween_locked();
+
 void* replay_thread(void*) {
     xsdk_thread_move(3);
     unsigned from_phase = 0, drawn = 0, last = ~0u;
@@ -2780,8 +2867,19 @@ void* replay_thread(void*) {
     bool replaying = false;
     for (;;) {
         struct timespec ts = { 0, 4000000 };
+        g_replay_stage = "sleeping";
         nanosleep(&ts, NULL);
+        g_replay_stage = "waiting for the renderer";
         pthread_mutex_lock(&g_gpu_lock);
+        g_replay_stage = "checking";
+        if (g_tw_ready) {
+            g_replay_stage = "drawing the frame in between";
+            const char* game_stage = (const char*)g_stage;   // the renderer's markers name the game thread's
+            draw_tween_locked();
+            g_stage = game_stage;
+            pthread_mutex_unlock(&g_gpu_lock);
+            continue;
+        }
         double t = now_ms();
         bool stalled = g_renderer && g_loading_screen && g_rec_count >= 8 && t - g_last_draw_ms >= REPLAY_AFTER_MS;
         if (stalled) {
@@ -2809,6 +2907,7 @@ void* replay_thread(void*) {
             f.vertices = r.verts.empty() ? NULL : &r.verts[0];
             f.vertex_count = (unsigned)r.verts.size();
             f.loading = 0x80000000u;
+            g_replay_stage = "drawing a kept frame";
             g_renderer->frame(&f);   // presents at the next vblank
             ++drawn;
         } else if (replaying) {
@@ -2931,6 +3030,11 @@ extern "C" void ch360_plat_host_stats(unsigned* out, int n) {
     underruns_seen = g_audio_underruns;
     for (int i = 0; i < n && i < CH360_HOST_STATS; ++i) out[i] = v[i] < 0 ? 0 : v[i] > 4294967295.0 ? 0xFFFFFFFFu : (unsigned)v[i];
     memset(&s, 0, sizeof(s));
+    Renderer::WaitCauses& w = g_renderer->waits_;
+    logf("HOST texture waits: %u never asked ahead, %u asked and held back, %u asked and still being read, %u let go before; "
+         "the read-ahead held back by memory in %u frames (%u MB free at the least)", w.never, w.queued, w.reading, w.let_go,
+         w.held_frames, w.held_low_mb);
+    memset(&w, 0, sizeof(w));
 }
 
 extern "C" int ch360_plat_frame_begin(void) {
@@ -3003,6 +3107,68 @@ extern "C" int ch360_plat_pad(int index, ch360_pad* out) {
     return 1;
 }
 
+// ------------------------------------------------------------ the frame drawn in between (the locked 30)
+
+// ConsoleHost.LockedThirty: the run-and-gun levels' game frames come a fixed 1/30 s apart, and after each the host
+// draws the same frame again with every matched sprite moved on by half its last move (ch360_imports.c), presented
+// at the vblank between the two (the replay thread draws it as soon as it is handed over; a game frame finds one
+// still waiting and draws it first, so the order holds). game:\full60.txt turns it off.
+namespace {
+bool g_tween_off = false;
+std::vector<ch360_view> g_tw_views;
+std::vector<ch360_item> g_tw_items;
+std::vector<ch360_vertex> g_tw_verts;
+bool g_tw_ready = false;   // under g_gpu_lock
+unsigned g_tweens_drawn = 0;
+
+}  // namespace
+
+extern "C" int ch360_plat_tween(int on) {
+    return on && !g_tween_off && g_renderer ? 1 : 0;
+}
+
+namespace {
+
+// The frame in between, if one waits (g_gpu_lock held).
+static void draw_tween_locked() {
+    if (!g_tw_ready) return;
+    g_tw_ready = false;
+    ch360_frame f;
+    memset(&f, 0, sizeof(f));
+    f.views = g_tw_views.empty() ? NULL : &g_tw_views[0];
+    f.view_count = (unsigned)g_tw_views.size();
+    f.items = g_tw_items.empty() ? NULL : &g_tw_items[0];
+    f.item_count = (unsigned)g_tw_items.size();
+    f.vertices = g_tw_verts.empty() ? NULL : &g_tw_verts[0];
+    f.vertex_count = (unsigned)g_tw_verts.size();
+    g_renderer->frame(&f);   // presents at the next vblank
+    ++g_tweens_drawn;
+}
+}  // namespace
+
+extern "C" void ch360_plat_draw_tween(const ch360_frame* n, const float* shifts) {
+    GpuLock lock;
+    g_tw_views.assign(n->views, n->views + n->view_count);
+    g_tw_items.assign(n->items, n->items + n->item_count);
+    g_tw_verts.assign(n->vertices, n->vertices + n->vertex_count);
+    for (unsigned i = 0; i < n->item_count; ++i) {
+        float dx = shifts[2 * i], dy = shifts[2 * i + 1];
+        if (dx == 0.0f && dy == 0.0f) continue;
+        ch360_item& it = g_tw_items[i];
+        for (unsigned k = it.first; k < it.first + it.count && k < g_tw_verts.size(); ++k) {
+            g_tw_verts[k].x += dx;
+            g_tw_verts[k].y += dy;
+        }
+        if (it.x0 <= it.x1) {   // its screen box, when worked out
+            it.x0 += dx;
+            it.x1 += dx;
+            it.y0 += dy;
+            it.y1 += dy;
+        }
+    }
+    g_tw_ready = true;
+}
+
 extern "C" void ch360_plat_draw(const ch360_frame* f) {
     if (f->loading & 0x40000000u) {   // the hourglass's frame recorded ahead: kept, not drawn
         GpuLock lock;
@@ -3011,6 +3177,7 @@ extern "C" void ch360_plat_draw(const ch360_frame* f) {
     }
     {
         GpuLock lock;
+        draw_tween_locked();   // the last frame's in-between one, if the replay thread hasn't drawn it yet
         g_renderer->frame(f);
         record_loading(f);
         g_last_draw_ms = now_ms();
@@ -3031,8 +3198,14 @@ extern "C" int ch360_plat_textures_pending(void) {
     return g_renderer ? g_renderer->pending() : 0;
 }
 extern "C" void ch360_plat_texture_prefetch(int id, int wanted) {
-    GpuLock lock;
-    g_renderer->prefetch(id, wanted != 0);
+    if (pthread_mutex_trylock(&g_gpu_lock) == 0) {
+        g_renderer->prefetch(id, wanted != 0);
+        pthread_mutex_unlock(&g_gpu_lock);
+        return;
+    }
+    pthread_mutex_lock(&g_ask_lock);   // the renderer is busy: the next frame takes it (Renderer::frame)
+    g_asks.push_back(std::make_pair(id, wanted));
+    pthread_mutex_unlock(&g_ask_lock);
 }
 extern "C" void ch360_plat_textures_scene(int begin) {
     GpuLock lock;
@@ -3138,6 +3311,17 @@ extern "C" int __wrap_srt_plat_seek(void* f, long long offset, int whence, unsig
 // the player reached 183 MB at the map (150 MB on PC) with textures at
 // their 96 MB budget and 39 MB free.
 extern "C" int __real_srt_plat_commit(void* base, unsigned long long from, unsigned long long to);
+// The renderer's lock within ms (false: not got): the commit hook's making room must never wait on a holder that
+// waits for the game's thread.
+static bool gpu_lock_within(unsigned ms) {
+    double until = now_ms() + ms;
+    while (pthread_mutex_trylock(&g_gpu_lock) != 0) {
+        if (now_ms() > until) return false;
+        struct timespec ts = { 0, 1000000 };
+        nanosleep(&ts, NULL);
+    }
+    return true;
+}
 extern "C" int __wrap_srt_plat_commit(void* base, unsigned long long from, unsigned long long to) {
     if (g_renderer && to > from) {
         unsigned free_mb, total_mb;
@@ -3147,10 +3331,13 @@ extern "C" int __wrap_srt_plat_commit(void* base, unsigned long long from, unsig
              (unsigned)(to >> 20), g_frames_seen, (const char*)g_stage, free_mb, (unsigned)(g_texture_bytes >> 20));
         unsigned need_mb = (unsigned)((to - from) >> 20) + 1 + MEMORY_FLOOR_MB;
         if (free_mb < need_mb) {
-            size_t freed;
-            {
-                GpuLock lock;
+            size_t freed = 0;
+            if (gpu_lock_within(1000)) {
                 freed = g_renderer->make_room((size_t)(need_mb - free_mb) << 20);
+                pthread_mutex_unlock(&g_gpu_lock);
+            } else {
+                logf("memory: the renderer's lock stayed held for a second (replay thread: %s), the player grows without "
+                     "making room", (const char*)g_replay_stage);
             }
             logf("memory: the player grows to %u MB with %u MB free; %u KB of textures let go", (unsigned)(to >> 20), free_mb,
                  (unsigned)(freed >> 10));
@@ -3158,10 +3345,10 @@ extern "C" int __wrap_srt_plat_commit(void* base, unsigned long long from, unsig
     }
     int r = __real_srt_plat_commit(base, from, to);
     if (r != 0 && g_renderer) {
-        size_t freed;
-        {
-            GpuLock lock;
+        size_t freed = 0;
+        if (gpu_lock_within(1000)) {
             freed = g_renderer->make_room((size_t)(to - from) * 2);
+            pthread_mutex_unlock(&g_gpu_lock);
         }
         if (freed > 0) r = __real_srt_plat_commit(base, from, to);
     }
@@ -3194,6 +3381,11 @@ int main() {
             fclose(q);
             ch360_verbose = 1;
             logf("profile run (profile.txt): scripts timed, texture and slow-part lines");
+        }
+        if ((q = fopen("game:/full60.txt", "rb")) != NULL) {
+            fclose(q);
+            g_tween_off = true;
+            logf("full60.txt: the run-and-gun levels run as fast as they can, without the locked 30 and its frames in between");
         }
     }
     unsigned f, t;

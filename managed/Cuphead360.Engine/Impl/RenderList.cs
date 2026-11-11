@@ -78,6 +78,12 @@ namespace Cuphead360.Engine
             /// </summary>
             public Vector2[] Local;
             public float A00, A01, B0, A10, A11, B1;
+            /// <summary>
+            /// A mapped sprite's renderer (its instance id; 0 none): the console host matches items to the last
+            /// frame's by it (and by their order among its items) for the frame it draws in between (ConsoleHost's
+            /// locked 30).
+            /// </summary>
+            public int Key;
             public Vector2[] Uv;       // Unity orientation (v up)
             public Color32[] Colors;   // per vertex, or null
             public int[] Triangles;
@@ -131,7 +137,7 @@ namespace Cuphead360.Engine
             var it = pool[pooled++];
             it.BaseName = ""; it.Suffix = null; it.SpriteName = null; it.Texture = null; it.Material = null; it.Screen = null; it.Local = null; it.Uv = null; it.Colors = null;
             it.Triangles = null; it.Tint = Color.white; it.Layer = it.Order = 0; it.Depth = 0; it.Sequence = 0; it.Kind = "sprite"; it.GoLayer = 0;
-            it.Stencil = null; it.SpriteStencil = 0; it.Effect = -1; it.Tex2 = null;
+            it.Stencil = null; it.SpriteStencil = 0; it.Effect = -1; it.Tex2 = null; it.Key = 0;
             return it;
         }
 
@@ -1063,6 +1069,7 @@ namespace Cuphead360.Engine
                 it.A00 = a00; it.A01 = a01; it.B0 = b0;
                 it.A10 = a10; it.A11 = a11; it.B1 = b1;
                 it.Local = info.Vertices;
+                it.Key = sr.InstanceId;
             }
             else
             {
@@ -1107,7 +1114,7 @@ namespace Cuphead360.Engine
                 if (first != null)
                 {
                     it.A00 = whole.A00; it.A01 = whole.A01; it.B0 = whole.B0;
-                    it.A10 = whole.A10; it.A11 = whole.A11; it.B1 = whole.B1;
+                    it.A10 = whole.A10; it.A11 = whole.A11; it.B1 = whole.B1; it.Key = whole.Key;
                     it.BaseName = whole.BaseName; it.SpriteName = whole.SpriteName; it.Texture = whole.Texture;
                     it.Material = whole.Material; it.Tint = whole.Tint; it.Layer = whole.Layer; it.Order = whole.Order;
                     it.Depth = whole.Depth; it.GoLayer = whole.GoLayer; it.SpriteStencil = whole.SpriteStencil;

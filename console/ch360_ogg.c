@@ -165,6 +165,26 @@ static unsigned char* cache_take(int file, unsigned offset) {
     return d;
 }
 
+/* A copy of a kept clip's bytes (NULL: not kept), the kept ones left in place and kept as if just used. Taken out
+ * while it played, a second play of the same clip meanwhile found nothing and read it from the drive in the frame:
+ * Treetop Trouble's ladybugs bounce on top of each other, 15 reads of the same few sounds in one visit. */
+static unsigned char* cache_copy(int file, unsigned offset, int size) {
+    int i;
+    unsigned char* d = NULL;
+    if (cache_lock) srt_mutex_lock(cache_lock);
+    for (i = 0; i < CACHE_SLOTS; i++)
+        if (cache[i].data != NULL && cache[i].file == file && cache[i].offset == offset && cache[i].size == size) {
+            d = (unsigned char*)malloc((size_t)size);
+            if (d != NULL) {
+                memcpy(d, cache[i].data, (size_t)size);
+                cache[i].age = ++cache_clock;
+            }
+            break;
+        }
+    if (cache_lock) srt_mutex_unlock(cache_lock);
+    return d;
+}
+
 /* Keeps a clip's bytes, making room from the least recently kept; a clip read ahead (batch) makes none
  * from its own load's others (0 when it doesn't fit then, and the bytes are freed). */
 static int cache_put_batch(unsigned char* data, int size, int file, unsigned offset, unsigned batch) {
@@ -237,7 +257,7 @@ static unsigned char* read_packed(const U8* path, U32 len, int* size, int* file,
     *file = e.file;
     *offset = e.offset;
     *size = (int)e.size;
-    data = cache_take(e.file, e.offset);
+    data = cache_copy(e.file, e.offset, (int)e.size);
     if (data != NULL) return data;
     data = (unsigned char*)malloc(e.size);
     if (data != NULL && ch360_pack_read(&e, 0, data, e.size) != 0) {
@@ -448,11 +468,15 @@ static void load_one(int h) {
     if (o->ring != NULL) ahead_wake();
 }
 
+volatile const char* ch360_clip_reader_stage = "not started";
+
 static void loader_main(void* arg) {
     (void)arg;
     for (;;) {
         int h;
+        ch360_clip_reader_stage = "waiting for its lock";
         srt_mutex_lock(load_lock);
+        ch360_clip_reader_stage = "waiting for a clip";
         while (load_count == 0 && pre_count == 0) srt_cond_wait(load_cond, load_lock);
         if (load_count == 0) {   /* nothing that plays waits: a clip read ahead */
             ch360_pack_entry key = pre_key[pre_head], from = pre_from[pre_head];
@@ -460,6 +484,7 @@ static void loader_main(void* arg) {
             pre_head = (pre_head + 1) % PRELOAD_QUEUE;
             pre_count--;
             srt_mutex_unlock(load_lock);
+            ch360_clip_reader_stage = "reading a clip ahead";
             preload_one(&key, &from, batch);
             continue;
         }
@@ -467,6 +492,7 @@ static void loader_main(void* arg) {
         load_head = (load_head + 1) % LOAD_QUEUE;
         load_count--;
         srt_mutex_unlock(load_lock);
+        ch360_clip_reader_stage = "reading a clip that plays";
         load_one(h);
         srt_mutex_lock(load_lock);
         srt_cond_broadcast(load_cond);   /* waiters for this clip */

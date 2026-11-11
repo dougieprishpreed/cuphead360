@@ -105,6 +105,19 @@ U32 i5_ch3603_pad(wasmModuleInstance* inst, U32 index, U32 state) {
 
 static ch360_view* draw_views;
 static ch360_item* draw_items;
+/* The frame drawn in between (the locked 30): each item's move since the last frame, matched by its key (its
+ * renderer's id, and which of that renderer's items it is) through its map's offset (B0, B1): per item, x and y. */
+static float* draw_shift;
+static unsigned draw_shift_cap;
+static int draw_tween;
+typedef struct { U32 key, gen; float b0, b1; } tween_slot;
+enum { TWEEN_SLOTS = 8192 };
+static tween_slot tween_tab[2][TWEEN_SLOTS];
+static U32 tween_gen[2] = { 1, 1 };
+static unsigned tween_cur;
+/* A move larger than this (pixels) is a jump, not a move: not carried on (a teleport, a respawn, a new camera). */
+#define TWEEN_MAX_MOVE 96.0f
+static void tween_item(unsigned idx, U32 key, int affine, float b0, float b1);
 static ch360_vertex* draw_verts;
 static unsigned draw_view_count, draw_view_cap, draw_item_count, draw_item_cap, draw_vert_count, draw_vert_cap;
 static double draw_build_ms;
@@ -694,10 +707,12 @@ void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
     U8 blend[4];
     int k, mode, affine, clipped;
     ch360_item* it;
+    U32 key, kept_from = draw_item_count;
     double t0 = draw_now_ms();
     (void)inst;
-    if (draw_view_count == 0 || !srt_mem_ok(args, 44 * 4)) return;
+    if (draw_view_count == 0 || !srt_mem_ok(args, 45 * 4)) return;
     a = srt_mem_ptr(args);
+    key = le32(a + 176);
     flags = le32(a + 24);
     ntri = le32(a + 36);
     npos = le32(a + 44);
@@ -738,6 +753,7 @@ void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
     it->stencil = le32(a + 124);
     if (!clipped) {
         draw_item_unclipped(it, tri, ntri, pos, npos, uv, nuv, col, ncol, affine ? m : NULL, blend);
+        if (draw_item_count > kept_from) tween_item(draw_item_count - 1, key, affine, m[2], m[5]);
         draw_build_ms += draw_now_ms() - t0;
         return;
     } else {
@@ -783,7 +799,54 @@ void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
         }
     }
     draw_item_done(it);
+    if (draw_item_count > kept_from) tween_item(draw_item_count - 1, key, affine, m[2], m[5]);
     draw_build_ms += draw_now_ms() - t0;
+}
+
+/* frame_tween(on): this frame of the game's has a frame drawn after it, in between (1 if the platform does). */
+U32 i5_ch36011_frameX5Ftween(wasmModuleInstance* inst, U32 on) {
+    (void)inst;
+    draw_tween = ch360_plat_tween((int)on);
+    return (U32)draw_tween;
+}
+
+static tween_slot* tween_find(unsigned t, U32 key, int insert) {
+    U32 i = (key * 2654435761u) >> 19, probe;   /* the top 13 bits: TWEEN_SLOTS */
+    for (probe = 0; probe < 64; probe++, i = (i + 1) & (TWEEN_SLOTS - 1)) {
+        tween_slot* s = &tween_tab[t][i];
+        if (s->gen != tween_gen[t]) {
+            if (!insert) return NULL;
+            s->gen = tween_gen[t];
+            s->key = key;
+            return s;
+        }
+        if (s->key == key) return s;
+    }
+    return NULL;
+}
+
+/* An item just kept (index idx) with key and map offset (b0, b1): its move since the last frame's same item. */
+static void tween_item(unsigned idx, U32 key, int affine, float b0, float b1) {
+    float dx = 0.0f, dy = 0.0f;
+    if (!draw_grow((void**)&draw_shift, &draw_shift_cap, idx + 1, 2 * sizeof(float))) return;
+    if (key != 0 && affine) {
+        U32 n = 0, k = key * 64u;
+        tween_slot *s, *was;
+        while (n < 63 && tween_find(tween_cur, k + n, 0) != NULL) n++;   /* the n-th of this renderer's items */
+        s = tween_find(tween_cur, k + n, 1);
+        if (s != NULL) {
+            s->b0 = b0;
+            s->b1 = b1;
+        }
+        was = tween_find(tween_cur ^ 1u, k + n, 0);
+        if (was != NULL) {
+            dx = b0 - was->b0;
+            dy = b1 - was->b1;
+            if (dx * dx + dy * dy > TWEEN_MAX_MOVE * TWEEN_MAX_MOVE) dx = dy = 0.0f;
+        }
+    }
+    draw_shift[2 * idx] = dx;
+    draw_shift[2 * idx + 1] = dy;
 }
 
 /* ConsoleHost: this frame is the loading screen with its hourglass faded in (0 if not; else
@@ -806,6 +869,18 @@ void i5_ch3608_drawX5Fend(wasmModuleInstance* inst) {
     f.vertex_count = draw_vert_count;
     f.build_ms = draw_build_ms;
     ch360_plat_draw(&f);
+    /* the shifts cover every item (the submit path's items have none: none moved) */
+    if (draw_tween && f.loading == 0 && draw_grow((void**)&draw_shift, &draw_shift_cap, draw_item_count + 1, 2 * sizeof(float))) {
+        unsigned i;
+        for (i = 0; i < draw_item_count; i++) {   /* half a frame's move: the vblank between this frame and the next */
+            draw_shift[2 * i] *= 0.5f;
+            draw_shift[2 * i + 1] *= 0.5f;
+        }
+        ch360_plat_draw_tween(&f, draw_shift);
+    }
+    if (draw_shift != NULL && draw_shift_cap > 0) memset(draw_shift, 0, (size_t)draw_shift_cap * 2 * sizeof(float));
+    tween_cur ^= 1u;
+    tween_gen[tween_cur]++;
     draw_view_count = draw_item_count = draw_vert_count = 0;
     draw_build_ms = 0;
 }

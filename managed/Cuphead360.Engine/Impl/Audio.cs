@@ -252,21 +252,30 @@ namespace Cuphead360.Engine
         /// level's read-ahead and a restart's music, and their first plays there read them in the frame (the
         /// Frogs' first dash, the first hit after a restart).
         /// </remarks>
-        public static void PreloadFresh(bool more = false)
+        /// <param name="restNow">the others too, at once: a load that built its scene with nothing of the last one left
+        /// (SceneLoader.Load), or the host's hook just set (the boot's sounds, built before it).</param>
+        public static void PreloadFresh(bool more = false, bool restNow = false)
         {
-            if (Preload == null || (more && (preloadBatch == 0 || fresh.Count == 0))) return;
+            if (Preload == null || (more && (preloadBatch == 0 || (fresh.Count == 0 && !restPending)))) return;
             if (!more) preloadBatch++;
+            if (restNow) restPending = true;
             var sent = new HashSet<Clip>();
             foreach (var w in fresh)
                 if (w.TryGetTarget(out var c) && sent.Add(c)) PreloadOne(c);
             fresh.Clear();
-            if (more) return;
+            // The others once the scene is in (the first top-up after the load): at the load itself the scene going
+            // away still had its clips, and they were read into the cache as the new one's, kept there after it went
+            // (Treetop Trouble after the map: its ladybugs' sounds read from the drive again and again).
+            if (!more && !restNow) { restPending = true; return; }
+            if (!restPending) return;
+            restPending = false;
             known.RemoveAll(w => !w.TryGetTarget(out _));
             var rest = new List<Clip>();
             foreach (var w in known) if (w.TryGetTarget(out var c) && !sent.Contains(c)) rest.Add(c);
             rest.Sort((a, b) => b.LastUse.CompareTo(a.LastUse));
             foreach (var c in rest) PreloadOne(c);
         }
+        static bool restPending;
 
         // streamed ones too: one under the host's size for reading off the game's thread opened in the frame (the
         // title's 59 ms frame as the logo played); the host keeps those under 256 KB
@@ -299,12 +308,13 @@ namespace Cuphead360.Engine
                 ci.Key = k + "_" + IdText.Of(src.PathId);
             }
             clips.AddOrUpdate(c, ci);
-            if (Preload != null)
-            {
-                var w = new WeakReference<Clip>(ci);
-                if (fresh.Count < 4096) fresh.Add(w);
-                known.Add(w);
-            }
+            // Known whether or not a host reads ahead yet: the console's hook comes after scene_start's load, which
+            // builds the game's persistent sounds (the title press's projector start, 125 KB, and its crackle:
+            // read from the drive in the frame of the press in every run).
+            var w = new WeakReference<Clip>(ci);
+            if (Preload != null && fresh.Count < 4096) fresh.Add(w);
+            if (known.Count >= 8192) known.RemoveAll(k => !k.TryGetTarget(out _));
+            known.Add(w);
             return ci;
         }
 

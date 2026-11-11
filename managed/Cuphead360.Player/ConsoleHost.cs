@@ -54,6 +54,8 @@ namespace Cuphead360.Player
         static extern int TexturesWaited();
         [DllImport("ch360", EntryPoint = "loading_screen"), WasmImportLinkage]
         static extern void LoadingScreenFlag(uint state);
+        [DllImport("ch360", EntryPoint = "frame_tween"), WasmImportLinkage]
+        static extern int FrameTween(int on);
         [DllImport("ch360", EntryPoint = "audio_queued"), WasmImportLinkage]
         static extern int AudioQueued();
         [DllImport("ch360", EntryPoint = "ogg_preload"), WasmImportLinkage]
@@ -422,6 +424,9 @@ namespace Cuphead360.Player
                 var b = Encoding.UTF8.GetBytes(path);
                 fixed (byte* p = b) OggPreload(p, b.Length, batch);
             };
+            // The sounds built before the hook (scene_start's: the title's projector start and crackle, read from the
+            // drive in the frame they played), read ahead now.
+            Audio.PreloadFresh(restNow: true);
             // A load's last step waits under the hourglass for the pages it read ahead (SceneLoad, RenderList.ReadAheadLoad).
             RenderList.TexturesPending = () => TexturesPending();
             RenderList.SceneReadAhead = begin => TexturesScene(begin ? 1 : 0);
@@ -455,7 +460,8 @@ namespace Cuphead360.Player
                 last = now;
                 perf.Between(real * 1000.0);
                 // A console frame slower than the vblank still moves the game at its real speed.
-                Delta = scripted != null ? scriptedStep : Math.Clamp(real, 1f / 60f, 1f / 30f);
+                tweening = scripted == null && tweenHost && LockedThirty(Cuphead360.Engine.Scenes.Active?.Name);
+                Delta = scripted != null ? scriptedStep : tweening ? 1f / 30f : Math.Clamp(real, 1f / 60f, 1f / 30f);
                 PlayerLoop.AudioDelta = scripted != null ? -1 : AudioLead(real);
                 if ((scripted == null || holdScripted) && (BootHold(n) || LevelHold())) { Delta = 1e-4f; PlayerLoop.AudioDelta = 0f; }
                 PollPads();
@@ -897,9 +903,21 @@ namespace Cuphead360.Player
             icon.sprite = shown;
         }
 
+        /// <summary>
+        /// The run-and-gun levels run a locked 30 drawn at 60: the game a fixed 1/30 s a frame, the host drawing a
+        /// frame in between each two at the vblank between them, each sprite moved on by half its last step (the
+        /// last frame's map to the screen against this one's: extrapolated, so no latency added). They ran between
+        /// 30 and 60 frame to frame (Forest Follies 35% of frames at 60, 62% at 30, the thirty-seventh run): the
+        /// user felt it as choppy. A file full60.txt beside the XEX turns it off (the host says no).
+        /// </summary>
+        static bool LockedThirty(string scene) => scene != null && scene.StartsWith("scene_level_platforming_");
+        static bool tweening, tweenHost = true;
+
         static void DrawFrame(List<RenderList.View> views, uint loading)
         {
             LoadingScreenFlag(loading);
+            // the game's own frames only (not the hourglass's recorded ones), while the level runs locked
+            if (tweenHost && FrameTween(tweening && loading == 0 ? 1 : 0) == 0 && tweening && loading == 0) tweenHost = false;
             if (managedDraw) { DrawManaged(views); return; }
             float* vh = stackalloc float[13];
             int* a = stackalloc int[ItemSlots];
@@ -939,7 +957,8 @@ namespace Cuphead360.Player
         //  26/27 mode 6's shadow and sky glow textures  28-30 its t, textureWidth, textureSpeed
         //  31 sprite masks' stencil (RenderList.Item.SpriteStencil: 1 add, 2 remove for a mask, mode 7; 3 inside, 4 outside)
         //  32-43 an effect's values (modes 8-17, Effects.cs); 26 mode 17's overlay texture
-        const int ItemSlots = 44;
+        //  44 the item's key (RenderList.Item.Key: the frame drawn in between matches items by it)
+        const int ItemSlots = 45;
         static readonly int shadowTex = ShaderProps.Id("_ShadowTex"), skyGlowTex = ShaderProps.Id("_SkyGlowTex");
         static readonly int rayT = ShaderProps.Id("t"), rayWidth = ShaderProps.Id("textureWidth"), raySpeed = ShaderProps.Id("textureSpeed");
 
@@ -992,6 +1011,7 @@ namespace Cuphead360.Player
             f[16] = it.A00; f[17] = it.A01; f[18] = it.B0; f[19] = it.A10; f[20] = it.A11; f[21] = it.B1;
             f[22] = clip.x; f[23] = clip.y; f[24] = clip.z; f[25] = clip.w;
             a[31] = it.SpriteStencil;
+            a[44] = it.Key;
             fixed (int* tri = it.Triangles)
             fixed (Vector2* p = pos)
             fixed (Vector2* uv = it.Uv)

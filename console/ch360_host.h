@@ -118,6 +118,12 @@ typedef struct ch360_frame {
 
 /* The frame's draw list (valid during the call). */
 void ch360_plat_draw(const ch360_frame* frame);
+/* The locked 30 (ConsoleHost.LockedThirty): whether the platform draws a frame in between this one and the next (on:
+ * the game asks; 0: it doesn't, or it was turned off), and that frame: the one just drawn with each item's vertices
+ * moved by shifts (x, y per item, in pixels: half the item's move since the last frame), drawn at the vblank between
+ * this frame and the next. */
+int ch360_plat_tween(int on);
+void ch360_plat_draw_tween(const ch360_frame* frame, const float* shifts);
 /* Texture id is the converted texture <key> (GameData/ctex/<key>.ctx). */
 void ch360_plat_texture_file(int id, const char* key);
 /* Texture id is likely drawn soon: read it ahead if memory allows (never waited for). wanted: a sprite near
@@ -231,6 +237,8 @@ unsigned ch360_memory_kb(void);
 /* Moves the player's buffered stdout into the log now. One thread drains:
  * each frame unless the host clears ch360_frame_drain and drains itself. */
 void ch360_drain_output(void);
+/* What the clip reader's thread is doing (the heartbeat's, a stall's report). */
+extern volatile const char* ch360_clip_reader_stage;
 extern int ch360_frame_drain;
 
 /* Little-endian readers for the draw list. */

@@ -266,7 +266,7 @@ namespace Cuphead360.Engine
             var build = SceneBuild.Scene(file, scene.Handle);
             if (!ControllerData.WarmScene(name)) ControllerData.ForgetBuilt();
             else while (ControllerData.WarmNext()) { }   // as the sliced loads do (SceneLoad's stage 4)
-            Audio.PreloadFresh();
+            Audio.PreloadFresh(restNow: true);   // the scene before is gone already (UnloadAll above)
             Loads++;
             Log.Line($"SCENE loaded {name} (build {index}): {build.GameObjects.Count} GameObjects, {build.Components.Count} components"
                 + (traceMem ? $"; heap {GC.GetTotalMemory(true) >> 20} MB, files read {ChobFile.LoadedFiles} ({ChobFile.LoadedBytes >> 20} MB), live objects {Objects.LiveCount}" : ""));

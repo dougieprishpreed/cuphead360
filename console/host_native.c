@@ -193,6 +193,36 @@ void ch360_plat_texture_prefetch(int id, int wanted) {
         printf("PREFETCH frame %ld%s: %s\n", frame_no, wanted ? " wanted" : "", tex_key[id] ? tex_key[id] : "(runtime)");
 }
 
+/* The locked 30's frame in between: not drawn here; CH360_TWEEN=1 says yes when asked, 2 for every frame (the bot's
+ * scripted runs never ask), and CH360_TRACE_TWEEN=1 tells, every 300 frames, how many items moved and the largest
+ * move (a PC check of the matching). */
+int ch360_plat_tween(int on) {
+    static int allowed = -1;
+    if (allowed < 0) allowed = getenv("CH360_TWEEN") != NULL ? atoi(getenv("CH360_TWEEN")) : 0;
+    return allowed == 2 || (on && allowed == 1);
+}
+void ch360_plat_draw_tween(const ch360_frame* f, const float* shifts) {
+    static int trace = -1;
+    static unsigned frames, items, moved;
+    static float most;
+    unsigned i;
+    if (trace < 0) trace = getenv("CH360_TRACE_TWEEN") != NULL;
+    if (!trace) return;
+    frames++;
+    for (i = 0; i < f->item_count; i++) {
+        float dx = shifts[2 * i], dy = shifts[2 * i + 1], d = dx * dx + dy * dy;
+        items++;
+        if (d > 0.0f) moved++;
+        if (d > most) most = d;
+    }
+    if (frames % 300 == 0) {
+        printf("TWEEN frame %ld: %u frames, %u items, %u moved, the largest half-move %.1f px\n", frame_no, frames, items, moved,
+               (double)sqrtf(most));
+        items = moved = 0;
+        most = 0.0f;
+    }
+}
+
 /* Textures read at once here: none ever pending. */
 int ch360_plat_textures_pending(void) { return 0; }
 void ch360_plat_textures_scene(int begin) {
