@@ -65,6 +65,11 @@ volatile const char* g_stage = "start";
 // The other threads', for the heartbeat and a stall's report: the replay thread's (the loading screen kept moving),
 // the texture loader's (the texture it reads), the clip reader's (ch360_ogg.c).
 volatile const char* g_replay_stage = "start";
+// The every-600-frames report (ch360_plat_frame_begin takes the game's figures, the log's thread writes it: host_report).
+volatile bool g_report_due = false;
+unsigned g_report_frames = 0, g_report_slow = 0;
+double g_report_logic_ms = 0, g_report_worst_ms = 0;
+void host_report();
 char g_texload_what[80] = "start";
 extern pthread_mutex_t g_gpu_lock;   // the renderer's (below)
 volatile unsigned g_frames_seen = 0;
@@ -133,6 +138,7 @@ void* log_writer(void*) {
         bool beat = tick % (s < 120 ? 20 : 100) == 0;
         // The player's output during a long frame (otherwise drained at the next frame).
         if (g_player_started) ch360_drain_output();
+        if (g_report_due) host_report();
         if (beat) {
             struct { unsigned long long memory, capacity, stdout_bytes, wasi_calls; } st;
             srt_get_stats(&st);
@@ -267,8 +273,13 @@ const unsigned MEMORY_FLOOR_MB = 24;
 // Read-ahead makes room from textures not drawn for this many frames (behind the camera, a phase gone by),
 // never from what the screen showed lately; a sprite page is 4 MB at most (tools/cluster_console.py).
 const unsigned AHEAD_AGE = 180;
-// Frames younger a texture counts for each time it was read again, up to six (Renderer::release_unused).
+// Frames younger a texture counts for each time it was read again, up to RELOAD_CAP times (Renderer::release_unused).
+// Six before the thirty-ninth run: a page read again twice counted 24 s younger than it was, and in Forest Follies
+// (305 read again) the pages behind the camera stayed too young to make room for the read-ahead, which waited in
+// 3,954 frames while the frames' own loads took the memory. Within reach a page is asked for again every 30 game
+// frames (RenderList.Ahead), which keeps it young without the credit.
 const unsigned RELOAD_CREDIT = 240;
+const unsigned RELOAD_CAP = 2;
 const size_t PAGE_MAX = 4u << 20;
 // Pages' stored bytes (LZ4, a fifth to a quarter of their size) kept in memory: a page evicted and drawn
 // again, or read ahead, decodes without the drive (USB reads ran at 9 MB/s: 50-80 ms a page, from memory
@@ -590,6 +601,7 @@ public:
     void start_loader();
     void prefetch(int id, bool wanted);
     void scene_read_ahead(bool begin);
+    void take_asks();
     void held_ahead(unsigned free_mb) {
         if (held_frame_ == frame_no_) return;
         held_frame_ = frame_no_;
@@ -1948,7 +1960,7 @@ void Renderer::prefetch(int id, bool wanted) {
 // end, so room never comes from a texture the new scene wants too.
 void Renderer::scene_read_ahead(bool begin) {
     if (begin) {
-        const unsigned old = AHEAD_AGE + 6 * RELOAD_CREDIT + 4;
+        const unsigned old = AHEAD_AGE + RELOAD_CAP * RELOAD_CREDIT + 4;
         for (size_t i = 0; i < textures_.size(); ++i) {
             Tex& t = textures_[i];
             if (!t.image || t.key.empty() || t.pinned || frame_no_ - t.last_used <= 3) continue;
@@ -2178,18 +2190,20 @@ void Renderer::load_packed(int id, Tex& t) {
 // Frees textures not drawn in the last three frames (the GPU is done with
 // them: two frames are in flight), oldest first, until want bytes are freed.
 // A texture read again after being let go counts RELOAD_CREDIT frames
-// younger for each time (up to six): the twenty-fourth run's Forest Follies
+// younger for each time (up to RELOAD_CAP): the twenty-fourth run's Forest Follies
 // read 638 MB of textures in 99 s, 120 MB of them pages loaded two to eleven
 // times (the player's, the explosions'), let go for pages behind the camera
 // that never came back.
 size_t Renderer::release_unused(size_t want) {
     std::vector<std::pair<unsigned, size_t> > order;
-    // Prefetched textures nothing has drawn yet go first (read again if wanted), then the least recently drawn.
+    // The least recently drawn or asked for first. Read-ahead pages not drawn yet went first before the thirty-ninth
+    // run: they were the ones about to be drawn (within reach of the view, asked again every 30 game frames), and
+    // each frame's own load let them go, to be read again moments later.
     for (size_t i = 0; i < textures_.size(); ++i)
         if (textures_[i].image && !textures_[i].key.empty() && !textures_[i].pinned && frame_no_ - textures_[i].last_used > 2) {
             const Tex& t = textures_[i];
-            unsigned credit = (t.reloads < 6 ? t.reloads : 6) * RELOAD_CREDIT;
-            order.push_back(std::make_pair(t.unused_pre ? 0u : t.last_used + credit, i));
+            unsigned credit = (t.reloads < RELOAD_CAP ? t.reloads : RELOAD_CAP) * RELOAD_CREDIT;
+            order.push_back(std::make_pair(t.last_used + credit, i));
         }
     std::sort(order.begin(), order.end());
     size_t freed = 0;
@@ -2209,7 +2223,7 @@ size_t Renderer::release_aged(size_t want, unsigned age) {
     std::vector<std::pair<unsigned, size_t> > order;
     for (size_t i = 0; i < textures_.size(); ++i) {
         const Tex& t = textures_[i];
-        unsigned credit = (t.reloads < 6 ? t.reloads : 6) * RELOAD_CREDIT;
+        unsigned credit = (t.reloads < RELOAD_CAP ? t.reloads : RELOAD_CAP) * RELOAD_CREDIT;
         if (t.image && !t.key.empty() && !t.pinned && frame_no_ - t.last_used > age + credit)
             order.push_back(std::make_pair(t.last_used + credit, i));
     }
@@ -2242,18 +2256,32 @@ void Renderer::evict() {
 // Read-ahead asks made while another thread had the renderer (the replay thread drawing the frame in between,
 // waiting in its acquire for the vblank): kept here and taken as the next frame starts, so the game's thread never
 // waits on them (each sprite near the view asks during the game's update).
+// A texture's file named (key non-empty) or a read-ahead ask (wanted 0/1), in the order the game made them.
+struct Ask {
+    int id, wanted;
+    std::string key;
+};
 pthread_mutex_t g_ask_lock = PTHREAD_MUTEX_INITIALIZER;
-std::vector<std::pair<int, int> > g_asks, g_asks_taken;
+std::vector<Ask> g_asks, g_asks_taken;
+
+// The asks queued meanwhile, in their order (g_gpu_lock held): before anything newer, and before a frame draws.
+void Renderer::take_asks() {
+    pthread_mutex_lock(&g_ask_lock);
+    g_asks_taken.swap(g_asks);
+    pthread_mutex_unlock(&g_ask_lock);
+    for (size_t i = 0; i < g_asks_taken.size(); ++i) {
+        const Ask& a = g_asks_taken[i];
+        if (!a.key.empty()) texture_file(a.id, a.key.c_str());
+        else prefetch(a.id, a.wanted != 0);
+    }
+    g_asks_taken.clear();
+}
 
 void Renderer::frame(const ch360_frame* f) {
     ++frame_no_;
     double t0 = now_ms();
     unsigned uploads_at = uploads;   // the loader's textures taken here count as this frame's loads
-    pthread_mutex_lock(&g_ask_lock);
-    g_asks_taken.swap(g_asks);
-    pthread_mutex_unlock(&g_ask_lock);
-    for (size_t i = 0; i < g_asks_taken.size(); ++i) prefetch(g_asks_taken[i].first, g_asks_taken[i].second != 0);
-    g_asks_taken.clear();
+    take_asks();
     take_loads();
     feed_prefetch();
 
@@ -3037,6 +3065,37 @@ extern "C" void ch360_plat_host_stats(unsigned* out, int n) {
     memset(&w, 0, sizeof(w));
 }
 
+namespace {
+extern unsigned g_tweens_drawn;   // the frames drawn in between (below)
+
+// The every-600-frames report, on the log's thread: newlib's heap walk (mallinfo) and the renderer's figures (read
+// without its lock: a report, not a measurement) cost the game's thread a vblank under the locked 30.
+void host_report() {
+    if (!g_renderer) {
+        g_report_due = false;
+        return;
+    }
+    unsigned f, tot;
+    memory_mb(&f, &tot);
+    struct mallinfo mi = mallinfo();   // newlib's heap: grown to (arena), in use
+    // Times in tenths of a millisecond (integers only in the log).
+    logf("frame %u: %u ms/frame x10 (worst %u, %u over 17.5); gpu wait %u, present %u; memory %u MB free of %u, player %u MB, "
+         "textures %u MB (%u uploads, %u evicted), stored %u MB; host heap %u MB (%u in use); items left out for the vertex ring %u; audio underruns %u, "
+         "%u ms carried on; %u frames drawn in between",
+         g_report_frames, (unsigned)(g_report_logic_ms / 60), (unsigned)(g_report_worst_ms * 10), g_report_slow,
+         (unsigned)(g_renderer->gpu_wait_ms / 60), (unsigned)(g_renderer->present_ms / 60), f, tot, ch360_memory_kb() / 1024,
+         (unsigned)(g_renderer->texture_bytes() >> 20), g_renderer->uploads, g_renderer->evictions,
+         (unsigned)(g_renderer->stored_bytes() >> 20), (unsigned)(mi.arena >> 20), (unsigned)(mi.uordblks >> 20), g_renderer->ring_drops,
+         g_audio_underruns, (unsigned)(ch360_mix_carried() / 48), g_tweens_drawn);
+    unsigned am[7];
+    ch360_audio_memory(am);
+    logf("audio memory: %u clips decoded %u KB (peak %u), compressed %u KB open + %u KB kept, stream buffers %u KB, %u decoders",
+         am[0], am[1], am[2], am[3], am[4], am[5], am[6]);
+    g_renderer->gpu_wait_ms = g_renderer->present_ms = 0;
+    g_report_due = false;
+}
+}  // namespace
+
 extern "C" int ch360_plat_frame_begin(void) {
     g_stage = "host: frame begin";
     double t = now_ms();
@@ -3047,26 +3106,15 @@ extern "C" int ch360_plat_frame_begin(void) {
         if (ms > 17.5) ++g_slow;
     }
     g_frame_start = t;
-    if (g_frames > 0 && g_frames % 600 == 0) {
-        GpuLock lock;
-        unsigned f, tot;
-        memory_mb(&f, &tot);
-        struct mallinfo mi = mallinfo();   // newlib's heap: grown to (arena), in use
-        // Times in tenths of a millisecond (integers only in the log).
-        logf("frame %u: %u ms/frame x10 (worst %u, %u over 17.5); gpu wait %u, present %u; memory %u MB free of %u, player %u MB, "
-             "textures %u MB (%u uploads, %u evicted), stored %u MB; host heap %u MB (%u in use); items left out for the vertex ring %u; audio underruns %u, "
-             "%u ms carried on",
-             g_frames, (unsigned)(g_logic_ms / 60), (unsigned)(g_worst_ms * 10), g_slow, (unsigned)(g_renderer->gpu_wait_ms / 60),
-             (unsigned)(g_renderer->present_ms / 60), f, tot, ch360_memory_kb() / 1024, (unsigned)(g_renderer->texture_bytes() >> 20),
-             g_renderer->uploads, g_renderer->evictions, (unsigned)(g_renderer->stored_bytes() >> 20), (unsigned)(mi.arena >> 20),
-             (unsigned)(mi.uordblks >> 20), g_renderer->ring_drops, g_audio_underruns, (unsigned)(ch360_mix_carried() / 48));
-        unsigned am[7];
-        ch360_audio_memory(am);
-        logf("audio memory: %u clips decoded %u KB (peak %u), compressed %u KB open + %u KB kept, stream buffers %u KB, %u decoders",
-             am[0], am[1], am[2], am[3], am[4], am[5], am[6]);
+    if (g_frames > 0 && g_frames % 600 == 0 && !g_report_due) {
+        // the game's figures now; the rest, and the writing, on the log's thread (host_report)
+        g_report_frames = g_frames;
+        g_report_logic_ms = g_logic_ms;
+        g_report_worst_ms = g_worst_ms;
+        g_report_slow = g_slow;
+        g_report_due = true;
         g_logic_ms = g_worst_ms = 0;
         g_slow = 0;
-        g_renderer->gpu_wait_ms = g_renderer->present_ms = 0;
     }
     ++g_frames;
     g_frames_seen = g_frames;
@@ -3185,9 +3233,11 @@ extern "C" void ch360_plat_draw(const ch360_frame* f) {
     g_stage = "game";
 }
 
+static void ask(int id, int wanted, const char* key);   // below
+
 extern "C" void ch360_plat_texture_file(int id, const char* key) {
-    GpuLock lock;
-    g_renderer->texture_file(id, key);
+    if (!key || !*key) return;
+    ask(id, 0, key);
 }
 extern "C" int ch360_plat_textures_waited(void) {
     GpuLock lock;
@@ -3197,15 +3247,28 @@ extern "C" int ch360_plat_textures_pending(void) {
     GpuLock lock;
     return g_renderer ? g_renderer->pending() : 0;
 }
-extern "C" void ch360_plat_texture_prefetch(int id, int wanted) {
+// Both made in the game's update: when the replay thread has the renderer (the frame in between, waiting in its
+// acquire for the vblank) they are queued (Renderer::take_asks), so the game's thread never waits on it. The every-600-
+// frames report took the lock in the thirty-eighth run and Treetop missed its locked 30 by a vblank each time.
+static void ask(int id, int wanted, const char* key) {
     if (pthread_mutex_trylock(&g_gpu_lock) == 0) {
-        g_renderer->prefetch(id, wanted != 0);
+        g_renderer->take_asks();   // what was queued before it first
+        if (key) g_renderer->texture_file(id, key);
+        else g_renderer->prefetch(id, wanted != 0);
         pthread_mutex_unlock(&g_gpu_lock);
         return;
     }
-    pthread_mutex_lock(&g_ask_lock);   // the renderer is busy: the next frame takes it (Renderer::frame)
-    g_asks.push_back(std::make_pair(id, wanted));
+    Ask a;
+    a.id = id;
+    a.wanted = wanted;
+    if (key) a.key = key;
+    pthread_mutex_lock(&g_ask_lock);
+    g_asks.push_back(a);
     pthread_mutex_unlock(&g_ask_lock);
+}
+
+extern "C" void ch360_plat_texture_prefetch(int id, int wanted) {
+    ask(id, wanted, NULL);
 }
 extern "C" void ch360_plat_textures_scene(int begin) {
     GpuLock lock;

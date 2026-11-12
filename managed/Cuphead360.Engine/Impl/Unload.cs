@@ -35,6 +35,11 @@ namespace Cuphead360.Engine
         /// </summary>
         public static void SceneActivated(string name)
         {
+            // Animation data kept with a live controller (ControllerData.Retain) is for a level's restart: a scene
+            // that isn't a level lets it go, so the maps and menus don't carry the player's (8 MB of heap over the
+            // loader's empty scene after a level, against the map's; the map's load after Treetop Trouble peaked on
+            // it and grew the console's player 135 -> 151 MB, the thirty-eighth run).
+            ControllerData.KeepWithAsset = ControllerData.WarmScene(name);
             if (name == "scene_load_helper") { Run("after " + name); passedThisLoad = true; return; }
             if (passedThisLoad) { passedThisLoad = false; Settle(name); return; }
             Run("after " + name);

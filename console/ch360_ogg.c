@@ -40,6 +40,7 @@ typedef struct ch360_ogg {
     int pcm_owner;       /* a decoded clip still being decoded from it (pcm_decode), else -1: closed after */
     int close_asked;     /* ogg_close came while that clip held it (or while it was being read) */
     int loading;         /* its bytes are being read on the clip reader's thread (v is NULL until then) */
+    int borrowed;        /* its bytes are a kept clip's (cache_borrow), given back at its close */
     int seek_asked;      /* ogg_seek while loading: where to start once it's open */
     U32 seek_frame;
 } ch360_ogg;
@@ -144,6 +145,7 @@ typedef struct ogg_cached {
     unsigned char* data;
     int size, file;
     unsigned offset, age, batch;   /* batch: the scene load that read it ahead (0: kept after a play) */
+    int users;                     /* plays reading these very bytes (cache_borrow): never let go meanwhile */
 } ogg_cached;
 static ogg_cached cache[CACHE_SLOTS];
 static unsigned cache_bytes, cache_clock;
@@ -156,6 +158,7 @@ static unsigned char* cache_take(int file, unsigned offset) {
     if (cache_lock) srt_mutex_lock(cache_lock);
     for (i = 0; i < CACHE_SLOTS; i++)
         if (cache[i].data != NULL && cache[i].file == file && cache[i].offset == offset) {
+            if (cache[i].users > 0) break;   /* played from where it is: not taken */
             d = cache[i].data;
             cache_bytes -= (unsigned)cache[i].size;
             cache[i].data = NULL;
@@ -165,24 +168,35 @@ static unsigned char* cache_take(int file, unsigned offset) {
     return d;
 }
 
-/* A copy of a kept clip's bytes (NULL: not kept), the kept ones left in place and kept as if just used. Taken out
- * while it played, a second play of the same clip meanwhile found nothing and read it from the drive in the frame:
- * Treetop Trouble's ladybugs bounce on top of each other, 15 reads of the same few sounds in one visit. */
-static unsigned char* cache_copy(int file, unsigned offset, int size) {
+/* A kept clip's bytes for a play (NULL: not kept), left in place, kept as if just used and never let go while any play
+ * reads them (cache_return at its close). Taken out while it played, a second play of the same clip meanwhile found
+ * nothing and read it from the drive in the frame (Treetop Trouble's ladybugs bounce on top of each other: 15 reads
+ * of the same few sounds in one visit); a copy for each play doubled what the sounds held. */
+static unsigned char* cache_borrow(int file, unsigned offset, int size) {
     int i;
     unsigned char* d = NULL;
     if (cache_lock) srt_mutex_lock(cache_lock);
     for (i = 0; i < CACHE_SLOTS; i++)
         if (cache[i].data != NULL && cache[i].file == file && cache[i].offset == offset && cache[i].size == size) {
-            d = (unsigned char*)malloc((size_t)size);
-            if (d != NULL) {
-                memcpy(d, cache[i].data, (size_t)size);
-                cache[i].age = ++cache_clock;
-            }
+            d = cache[i].data;
+            cache[i].users++;
+            cache[i].age = ++cache_clock;
             break;
         }
     if (cache_lock) srt_mutex_unlock(cache_lock);
     return d;
+}
+
+static void cache_return(int file, unsigned offset) {
+    int i;
+    if (cache_lock) srt_mutex_lock(cache_lock);
+    for (i = 0; i < CACHE_SLOTS; i++)
+        if (cache[i].data != NULL && cache[i].file == file && cache[i].offset == offset && cache[i].users > 0) {
+            cache[i].users--;
+            cache[i].age = ++cache_clock;
+            break;
+        }
+    if (cache_lock) srt_mutex_unlock(cache_lock);
 }
 
 /* Keeps a clip's bytes, making room from the least recently kept; a clip read ahead (batch) makes none
@@ -207,6 +221,7 @@ static int cache_put_batch(unsigned char* data, int size, int file, unsigned off
                 if (slot < 0) slot = i;
                 continue;
             }
+            if (cache[i].users > 0) continue;   /* being played from */
             if (oldest < 0 || cache[i].age < cache[oldest].age) oldest = i;
         }
         if (slot >= 0 && cache_bytes + (unsigned)size <= CACHE_BYTES) break;
@@ -229,6 +244,7 @@ static int cache_put_batch(unsigned char* data, int size, int file, unsigned off
         cache[slot].offset = offset;
         cache[slot].age = ++cache_clock;
         cache[slot].batch = batch;
+        cache[slot].users = 0;
         cache_bytes += (unsigned)size;
     }
     if (cache_lock) srt_mutex_unlock(cache_lock);
@@ -246,7 +262,7 @@ static unsigned frame_reads, frame_read_bytes;
 static int trace_clips = -1;
 
 /* The clip's bytes from the pack: its key is the file name without ".ogg". */
-static unsigned char* read_packed(const U8* path, U32 len, int* size, int* file, unsigned* offset) {
+static unsigned char* read_packed(const U8* path, U32 len, int* size, int* file, unsigned* offset, int* borrowed) {
     ch360_pack_entry e;
     U32 slash = len, end = len;
     unsigned char* data;
@@ -257,8 +273,11 @@ static unsigned char* read_packed(const U8* path, U32 len, int* size, int* file,
     *file = e.file;
     *offset = e.offset;
     *size = (int)e.size;
-    data = cache_copy(e.file, e.offset, (int)e.size);
-    if (data != NULL) return data;
+    data = cache_borrow(e.file, e.offset, (int)e.size);
+    if (data != NULL) {
+        *borrowed = 1;
+        return data;
+    }
     data = (unsigned char*)malloc(e.size);
     if (data != NULL && ch360_pack_read(&e, 0, data, e.size) != 0) {
         free(data);
@@ -629,7 +648,7 @@ U32 i5_ch3608_oggX5Fopen(wasmModuleInstance* inst, U32 path, U32 len, U32 info) 
     char full[1024];
     size_t root = strlen(ogg_root);
     unsigned char* data;
-    int size = 0, err = 0, h;
+    int size = 0, err = 0, h, borrowed = 0;
     unsigned length;
     stb_vorbis* v;
     stb_vorbis_info vi;
@@ -647,12 +666,13 @@ U32 i5_ch3608_oggX5Fopen(wasmModuleInstance* inst, U32 path, U32 len, U32 info) 
     if (h == OGG_MAX) return (U32)-1;
     oggs[h].pcm_owner = -1;
     oggs[h].close_asked = 0;
+    oggs[h].borrowed = 0;
     if (audio_pack == -2) audio_pack = ch360_pack_open(ogg_root, "AUDIO");
     oggs[h].file = -1;
     oggs[h].offset = 0;
     if (audio_pack >= 0) {
         if (open_async(h, srt_mem_ptr(path), len, info)) return (U32)h;
-        data = read_packed(srt_mem_ptr(path), len, &size, &oggs[h].file, &oggs[h].offset);
+        data = read_packed(srt_mem_ptr(path), len, &size, &oggs[h].file, &oggs[h].offset, &borrowed);
         if (data == NULL) return (U32)-1;
         goto opened;
     }
@@ -675,7 +695,8 @@ U32 i5_ch3608_oggX5Fopen(wasmModuleInstance* inst, U32 path, U32 len, U32 info) 
 opened:
     v = stb_vorbis_open_memory(data, size, &err, NULL);
     if (v == NULL) {
-        free(data);
+        if (borrowed) cache_return(oggs[h].file, oggs[h].offset);
+        else free(data);
         return (U32)-1;
     }
     vi = stb_vorbis_get_info(v);
@@ -684,6 +705,7 @@ opened:
     ogg_lock((U32)h);
     oggs[h].v = v;
     oggs[h].data = data;
+    oggs[h].borrowed = borrowed;
     oggs[h].size = size;
     oggs[h].channels = vi.channels;
     oggs[h].head = oggs[h].count = 0;
@@ -797,7 +819,9 @@ U32 i5_ch3608_oggX5Fseek(wasmModuleInstance* inst, U32 h, U32 frame) {
 static void ogg_close_now(U32 h) {
     ogg_lock(h);
     stb_vorbis_close(oggs[h].v);
-    cache_put(oggs[h].data, oggs[h].size, oggs[h].file, oggs[h].offset);
+    if (oggs[h].borrowed) cache_return(oggs[h].file, oggs[h].offset);
+    else cache_put(oggs[h].data, oggs[h].size, oggs[h].file, oggs[h].offset);
+    oggs[h].borrowed = 0;
     free(oggs[h].ring);
     free(oggs[h].sbuf);
     oggs[h].ring = NULL;

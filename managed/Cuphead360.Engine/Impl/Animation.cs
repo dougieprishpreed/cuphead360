@@ -280,15 +280,20 @@ namespace Cuphead360.Engine
         {
             var drop = new List<ChobObject>();
             foreach (var kv in cache) if (!keep.Contains(kv.Value)) drop.Add(kv.Key);
+            if (!KeepWithAsset) withAsset.Clear();
             foreach (var k in drop)
             {
-                if (AssetDb.TryBuilt(k.File, k.PathId, out var asset) && asset != null) withAsset.AddOrUpdate(asset, cache[k]);
+                if (KeepWithAsset && AssetDb.TryBuilt(k.File, k.PathId, out var asset) && asset != null) withAsset.AddOrUpdate(asset, cache[k]);
                 cache.Remove(k);
             }
         }
 
         static readonly System.Runtime.CompilerServices.ConditionalWeakTable<UObject, ControllerData> withAsset =
             new System.Runtime.CompilerServices.ConditionalWeakTable<UObject, ControllerData>();
+
+        /// <summary>AssetUnload: whether a pass keeps the data it drops with live controllers (a level came: a restart's
+        /// player) or lets all of it go (any other scene).</summary>
+        public static bool KeepWithAsset = true;
 
         // Controllers built (prefabs' animators', as a scene's build resolves them) whose states and
         // clips aren't read yet: the loads read them (WarmNext) under the loading screen, not the frame
@@ -926,14 +931,32 @@ namespace Cuphead360.Engine
                 var s = StateAt(src, cur.State);
                 if (s == null) continue;
                 var m = Data.Machines[Data.Layers[src].Machine];
-                foreach (var tr in s.Transitions)
-                {
-                    if (tr.Destination < 30000) { RenderList.AheadClipOf(ClipAt(li, StateAt(src, tr.Destination))); continue; }
-                    int si = tr.Destination - 30000;
-                    if (si < 0 || si >= m.Selectors.Length) continue;
-                    foreach (var st in m.Selectors[si].Transitions)
-                        if (st.Destination < 30000) RenderList.AheadClipOf(ClipAt(li, StateAt(src, st.Destination)));
-                }
+                // The states it can go to next, and the machine's from any state (form changes, hits, deaths), then
+                // the ones after those, nearest first: two steps of lead. With one, a boss's attack reached the state
+                // after its windup with the pages still being read (Hilda Berg: 70 frames waited on pages asked for
+                // and not yet read, the Frogs 42; the thirty-eighth run).
+                aheadNext.Clear();
+                Destinations(m, s.Transitions);
+                Destinations(m, m.AnyState);
+                for (int k = 0, first = aheadNext.Count; k < first && aheadNext.Count < MaxAheadStates; k++)
+                    if (StateAt(src, aheadNext[k]) is ControllerData.State ns) Destinations(m, ns.Transitions);
+                for (int k = 0; k < aheadNext.Count && k < MaxAheadStates; k++) RenderList.AheadClipOf(ClipAt(li, StateAt(src, aheadNext[k])));
+            }
+        }
+
+        const int MaxAheadStates = 16;
+        static readonly List<int> aheadNext = new List<int>();
+
+        // The states transitions lead to (through selectors), each once, onto aheadNext.
+        static void Destinations(ControllerData.Machine m, ControllerData.Transition[] transitions)
+        {
+            foreach (var tr in transitions)
+            {
+                if (tr.Destination < 30000) { if (!aheadNext.Contains(tr.Destination)) aheadNext.Add(tr.Destination); continue; }
+                int si = tr.Destination - 30000;
+                if (si < 0 || si >= m.Selectors.Length) continue;
+                foreach (var st in m.Selectors[si].Transitions)
+                    if (st.Destination < 30000 && !aheadNext.Contains(st.Destination)) aheadNext.Add(st.Destination);
             }
         }
 

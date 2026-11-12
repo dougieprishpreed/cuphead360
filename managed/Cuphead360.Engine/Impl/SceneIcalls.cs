@@ -15,6 +15,7 @@ namespace Cuphead360.Engine
         static readonly bool traceMem = Environment.GetEnvironmentVariable("CH360_TRACE_MEM") == "1";
         /// <summary>Log each load's time and the converted files it read (the console host sets it).</summary>
         public static bool Timing = Environment.GetEnvironmentVariable("CH360_SCENE_TIMING") == "1";
+        static readonly bool MidLoadCollect = Environment.GetEnvironmentVariable("CH360_LOAD_GC") != "0";
         sealed class Pending
         {
             public int BuildIndex;
@@ -49,7 +50,7 @@ namespace Cuphead360.Engine
             SceneBuild build;
             List<ChobObject> gameObjects;
             int stage, next, frames, warmed0, prepBest, prepSprites, prepClips, prepLeft;
-            long t0, tWarm, tPrep, tReady, files0, bytes0, prepAt;
+            long t0, tWarm, tPrep, tReady, files0, bytes0, prepAt, heap0, collectMs, heapBefore, heapAfter;
 
             public static SceneLoad Begin(int index, bool additive)
             {
@@ -59,6 +60,7 @@ namespace Cuphead360.Engine
                 l.t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 l.files0 = ChobFile.LoadedFiles;
                 l.bytes0 = ChobFile.LoadedBytes;
+                l.heap0 = GC.GetTotalMemory(false);
                 return l;
             }
 
@@ -119,6 +121,7 @@ namespace Cuphead360.Engine
                             tPrep = prepAt = System.Diagnostics.Stopwatch.GetTimestamp();
                             prepBest = int.MaxValue;
                             if (Prepared(name)) (prepSprites, prepClips) = RenderList.ReadAheadLoad(scene.Handle);
+                            CollectBuild();
                             if (Over()) return false;
                             break;
                         case 5:
@@ -140,6 +143,24 @@ namespace Cuphead360.Engine
                 }
             }
 
+            /// <summary>
+            /// The build's garbage collected while its pages are read (stage 5 waits for them anyway; the hourglass
+            /// is drawn again meanwhile): the heap peaked at the activation with the build's garbage still in it
+            /// (79-95 MB against 47-57 after its collection), and the console's player grew 135 -> 151 MB at a map's
+            /// load, 16 MB the textures never got back (Forest Follies after it: 169 textures loaded on demand
+            /// against 64 at 135, the thirty-eighth run). Only when the build grew the heap by 8 MB; CH360_LOAD_GC=0:
+            /// none (a PC check).
+            /// </summary>
+            void CollectBuild()
+            {
+                heapBefore = GC.GetTotalMemory(false);
+                if (!MidLoadCollect || heapBefore - heap0 < (8L << 20)) return;
+                long c0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                GC.Collect();
+                collectMs = Ms(c0, System.Diagnostics.Stopwatch.GetTimestamp());
+                heapAfter = GC.GetTotalMemory(false);
+            }
+
             /// <summary>The old scene unloaded (a single load), the new one loaded and activated.</summary>
             public void Activate()
             {
@@ -159,7 +180,8 @@ namespace Cuphead360.Engine
                 {
                     Log.Line($"SCENE {name}: built in {Ms(t0, tReady)} ms over {frames} frames ({ChobFile.LoadedFiles - files0} files read, "
                         + $"{(ChobFile.LoadedBytes - bytes0) >> 20} MB; {ControllerData.Warmed - warmed0} animator controllers read in {Ms(tWarm, tPrep)} ms; "
-                        + $"pages read ahead for {prepSprites} sprites and {prepClips} clips in {Ms(tPrep, tReady)} ms, {prepLeft} still coming), "
+                        + $"pages read ahead for {prepSprites} sprites and {prepClips} clips in {Ms(tPrep, tReady)} ms, {prepLeft} still coming; "
+                        + (collectMs > 0 ? $"the build's garbage collected while they were read: heap {heapBefore >> 20} -> {heapAfter >> 20} MB in {collectMs} ms), " : $"heap {heapBefore >> 20} MB before activation), ")
                         + $"activated in {Ms(t1, System.Diagnostics.Stopwatch.GetTimestamp())} ms "
                         + $"({Instantiated(calls0, copied0, tree0, fields0, bind0, objs0, thunks0)})");
                     MemoryLine();
