@@ -16,6 +16,37 @@ namespace Cuphead360.Engine
         /// <summary>Log each load's time and the converted files it read (the console host sets it).</summary>
         public static bool Timing = Environment.GetEnvironmentVariable("CH360_SCENE_TIMING") == "1";
         static readonly bool MidLoadCollect = Environment.GetEnvironmentVariable("CH360_LOAD_GC") != "0";
+        /// <summary>
+        /// The heap a build or an activation may reach before it is collected (bytes; CH360_LOAD_HEAP_MB, 0: never, the
+        /// default). The console's player memory steps up 16 MB when the heap outgrows it and never comes back: the
+        /// thirty-ninth run's Frogs build reached 77 MB reading its animator controllers and the player grew 135 -> 151 MB
+        /// (Forest Follies' end of build at 73: 118 -> 134). A cap of 62 MB took 38 collections in the Frogs' build on
+        /// the PC (some 26 s on the console) and still reached 78 MB: what a level's build keeps alive (the base ~46 MB,
+        /// the warmed controllers' data) is that much. The peaks are logged either way.
+        /// </summary>
+        static readonly long LoadHeapCap = (long.TryParse(Environment.GetEnvironmentVariable("CH360_LOAD_HEAP_MB"), out var capMb) ? capMb : 0) << 20;
+
+        /// <summary>
+        /// A scene's activation in progress (SceneLoad.Activate): each Instantiate (Clone) keeps the heap under LoadHeapCap
+        /// too. The map's activations peaked at 70-80 MB (hw39: 50 -> 80 MB over its 17 instantiations, its unload pass
+        /// back to 50), above any level build's, and the thirty-eighth run's player grew 135 -> 151 MB at one.
+        /// </summary>
+        static bool activating;
+        static long actCap, actMs, actPeak;
+        static int actCollects;
+        internal static void HeapCheck()
+        {
+            if (!activating) return;
+            long h = GC.GetTotalMemory(false);
+            if (h > actPeak) actPeak = h;
+            if (!MidLoadCollect || LoadHeapCap <= 0 || h < actCap) return;
+            long c0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            GC.Collect();
+            actMs += Ms(c0, System.Diagnostics.Stopwatch.GetTimestamp());
+            actCollects++;
+            long after = GC.GetTotalMemory(false);
+            if (after > actCap - (4L << 20)) actCap = after + (4L << 20);
+        }
         sealed class Pending
         {
             public int BuildIndex;
@@ -49,8 +80,8 @@ namespace Cuphead360.Engine
             Scenes.NScene scene;
             SceneBuild build;
             List<ChobObject> gameObjects;
-            int stage, next, frames, warmed0, prepBest, prepSprites, prepClips, prepLeft;
-            long t0, tWarm, tPrep, tReady, files0, bytes0, prepAt, heap0, collectMs, heapBefore, heapAfter;
+            int stage, next, frames, warmed0, prepBest, prepSprites, prepClips, prepLeft, capCollects;
+            long t0, tWarm, tPrep, tReady, files0, bytes0, prepAt, heap0, collectMs, heapBefore, heapAfter, capNow, capMs, heapPeak;
 
             public static SceneLoad Begin(int index, bool additive)
             {
@@ -89,6 +120,7 @@ namespace Cuphead360.Engine
                             while (next < gameObjects.Count)
                             {
                                 build.CreateOne(gameObjects[next++]);
+                                KeepHeapDown();
                                 if (Over()) { Progress = 0.6f * next / gameObjects.Count; return false; }
                             }
                             stage = 2;
@@ -102,6 +134,7 @@ namespace Cuphead360.Engine
                             while (next < build.Components.Count)
                             {
                                 build.ApplyFields(next++);
+                                KeepHeapDown();
                                 if (Over()) { Progress = 0.6f + 0.4f * next / build.Components.Count; return false; }
                             }
                             stage = 4;
@@ -115,12 +148,15 @@ namespace Cuphead360.Engine
                             // only (ControllerData.WarmScene): the map's raised its heap 68 -> 96 MB.
                             if (!ControllerData.WarmScene(name)) ControllerData.ForgetBuilt();
                             else while (ControllerData.WarmNext())
+                            {
+                                KeepHeapDown();
                                 if (Over()) return false;
+                            }
                             Audio.PreloadFresh();
                             stage = 5;
                             tPrep = prepAt = System.Diagnostics.Stopwatch.GetTimestamp();
                             prepBest = int.MaxValue;
-                            if (Prepared(name)) (prepSprites, prepClips) = RenderList.ReadAheadLoad(scene.Handle);
+                            if (Prepared(name)) (prepSprites, prepClips) = RenderList.ReadAheadLoad(scene.Handle, fill: name.StartsWith("scene_level_"));
                             CollectBuild();
                             if (Over()) return false;
                             break;
@@ -151,9 +187,30 @@ namespace Cuphead360.Engine
             /// against 64 at 135, the thirty-eighth run). Only when the build grew the heap by 8 MB; CH360_LOAD_GC=0:
             /// none (a PC check).
             /// </summary>
+            /// <summary>
+            /// The build's garbage collected whenever the heap reaches LoadHeapCap (the hourglass is drawn again
+            /// meanwhile), so the build never outgrows the player's memory; when what it keeps is that much already,
+            /// the next collection waits for 4 MB more.
+            /// </summary>
+            void KeepHeapDown()
+            {
+                long h = GC.GetTotalMemory(false);
+                if (h > heapPeak) heapPeak = h;
+                if (!MidLoadCollect || LoadHeapCap <= 0) return;
+                if (capNow == 0) capNow = LoadHeapCap;
+                if (h < capNow) return;
+                long c0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                GC.Collect();
+                capMs += Ms(c0, System.Diagnostics.Stopwatch.GetTimestamp());
+                capCollects++;
+                long after = GC.GetTotalMemory(false);
+                if (after > capNow - (4L << 20)) capNow = after + (4L << 20);
+            }
+
             void CollectBuild()
             {
                 heapBefore = GC.GetTotalMemory(false);
+                if (heapBefore > heapPeak) heapPeak = heapBefore;
                 if (!MidLoadCollect || heapBefore - heap0 < (8L << 20)) return;
                 long c0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 GC.Collect();
@@ -165,6 +222,10 @@ namespace Cuphead360.Engine
             public void Activate()
             {
                 if (stage == 9) return;
+                activating = true;
+                actCap = LoadHeapCap;
+                actMs = actPeak = 0;
+                actCollects = 0;
                 if (!Additive) UnloadAll();
                 scene.Building = false;
                 scene.Loaded = true;
@@ -175,14 +236,19 @@ namespace Cuphead360.Engine
                 long calls0 = Clone.Calls, copied0 = Clone.Copied, tree0 = Clone.TreeTicks, fields0 = Clone.FieldTicks;
                 long bind0 = Behaviours.BindTicks, objs0 = Behaviours.BoundObjects, thunks0 = Behaviours.BoundThunks;
                 build.Activate();
+                activating = false;
                 if (!Additive) AssetUnload.SceneActivated(name);
                 if (Timing)
                 {
                     Log.Line($"SCENE {name}: built in {Ms(t0, tReady)} ms over {frames} frames ({ChobFile.LoadedFiles - files0} files read, "
                         + $"{(ChobFile.LoadedBytes - bytes0) >> 20} MB; {ControllerData.Warmed - warmed0} animator controllers read in {Ms(tWarm, tPrep)} ms; "
-                        + $"pages read ahead for {prepSprites} sprites and {prepClips} clips in {Ms(tPrep, tReady)} ms, {prepLeft} still coming; "
+                        + $"pages read ahead for {prepSprites} sprites and {prepClips} clips"
+                        + (name.StartsWith("scene_level_") ? $" (and the stored bytes of {RenderList.Filled} sprites' pages)" : "")
+                        + $" in {Ms(tPrep, tReady)} ms, {prepLeft} still coming; "
+                        + (capCollects > 0 ? $"the heap kept near {LoadHeapCap >> 20} MB by {capCollects} collections in {capMs} ms, at most {heapPeak >> 20} MB; " : $"the heap at most {heapPeak >> 20} MB; ")
                         + (collectMs > 0 ? $"the build's garbage collected while they were read: heap {heapBefore >> 20} -> {heapAfter >> 20} MB in {collectMs} ms), " : $"heap {heapBefore >> 20} MB before activation), ")
                         + $"activated in {Ms(t1, System.Diagnostics.Stopwatch.GetTimestamp())} ms "
+                        + (actCollects > 0 ? $"(its heap kept near {LoadHeapCap >> 20} MB by {actCollects} collections in {actMs} ms, at most {actPeak >> 20} MB) " : $"(its heap at most {actPeak >> 20} MB) ")
                         + $"({Instantiated(calls0, copied0, tree0, fields0, bind0, objs0, thunks0)})");
                     MemoryLine();
                 }

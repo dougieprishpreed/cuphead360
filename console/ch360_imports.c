@@ -1016,6 +1016,31 @@ void i5_ch36013_textureX5Fahead(wasmModuleInstance* inst, U32 id, F32 u0, F32 v0
     }
 }
 
+/* A level's sprite (RenderList.FillAhead, under the hourglass): the stored bytes of the page holding its uv box kept
+ * by the host. The page is named without its siblings' guesses (remap_target_id's), which would fill the host's
+ * block with every page of every atlas the level touches. */
+void i5_ch36013_textureX5Fguess(wasmModuleInstance* inst, U32 id, F32 u0, F32 v0, F32 u1, F32 v1) {
+    int p, page, bi;
+    (void)inst;
+    p = plat_id((int)id);
+    if (p < 0) return;
+    page = page_of_plat[p] - 1;
+    if (page < 0 || rm_pages[page].count == 0) {
+        ch360_plat_texture_guess(p);
+        return;
+    }
+    bi = remap_find(&rm_pages[page], u0, v0, u1, v1);
+    if (bi >= 0) {
+        const remap_box* b = &rm_boxes[bi];
+        int t = b->target < rm_target_count ? rm_plat[b->target] : -1;
+        if (t < 0 && b->target < rm_target_count) {
+            t = rm_plat[b->target] = new_plat();
+            if (t >= 0) ch360_plat_texture_file(t, rm_strings + rm_names[b->target]);
+        }
+        if (t >= 0) ch360_plat_texture_guess(t);
+    }
+}
+
 void i5_ch36014_textureX5Fpixels(wasmModuleInstance* inst, U32 id, U32 w, U32 h, U32 bgra) {
     (void)inst;
     if (w == 0 || h == 0 || w > 8192 || h > 8192 || !srt_mem_ok(bgra, w * h * 4)) return;

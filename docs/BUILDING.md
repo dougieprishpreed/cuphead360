@@ -291,6 +291,21 @@ by feel what logging costs. Delete the file to go back. The log is written
 to the drive only while a loading screen is up, when the game stops for a
 moment, and when you quit, so play never waits behind it.
 
+The run-and-gun levels run at a locked 30 frames a second, drawn at 60 (the
+console draws a frame in between, each sprite moved on by half its last
+step); the boss fights run at a real 60. `full60.txt` next to `default.xex`
+turns the locked 30 off everywhere. `locked30.txt` names more levels to run
+that way, one a line, by their scene name with or without `scene_level_`
+(for example `flying_blimp` for Hilda Berg); `#` starts a note.
+
+To see where a level's frames wait for textures without a console run, run
+the PC host (`work/console/native/host_native.exe`) with
+`CH360_TRACE_DRAWN=<file>` and a bot, from a folder whose `GameData` holds the
+texture packs, and give the file to `tools/texture_cache_sim.py`: it replays
+the frames through a model of the console's texture memory and loader and
+prints the frames that would wait, for a room you choose (`--decoded`),
+the locked 30 (`--hz 30 --every 2`) and other settings.
+
 ## After an update
 
 After `git pull` in `cuphead360` (and in `spire360`):

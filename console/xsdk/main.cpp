@@ -289,7 +289,17 @@ const size_t PAGE_MAX = 4u << 20;
 // the copies kept longest (of pages let go) pinned nearly every slab: 15 MB of copies held 60 MB of slabs,
 // the textures fell to 54-69 MB (the map after Hilda Berg at 37 fps, pages refused and drawn without: the
 // smoke puffs flickered, the Frogs' bouncing balls went missing). Back only with copies that can move.
-const size_t STORED_BUDGET = 0;
+// Back since the fortieth run in one block made at start (STORED_ARENA: its own free list, nothing outside it
+// fragmented by them, and nothing given back to the console by letting them go). A level's every page is asked for
+// under the hourglass (RenderList.FillAhead: texture_guess), read into it and kept through the level (scene_kept),
+// and every page read from the drive leaves its copy there too while there is room (least recently used go).
+// The thirty-ninth run's fights waited on pages first drawn with no read-ahead (Hilda Berg 107 loaded on demand,
+// 250 read again; 63 of her 76 hitches); tools/texture_cache_sim.py over a PC trace of her fight: hitches 66 -> 35
+// with 32 MB of the room here (Forest Follies' at the locked 30 12 -> 1, Treetop's 10 -> 0).
+// Off (0) since tools/texture_cache_sim.py over the PC traces: the fill's pages were too far from what the fights draw,
+// and its room taken from the decoded pages cost more waits than it saved (Forest Follies 21 -> 45 frames late at
+// the console's room, Hilda Berg 71 -> 112); the code stays for a fill that knows what a level draws.
+const size_t STORED_ARENA = 0;
 // The loader's buffers (a job's decoded texture until it's copied to staging) come from one block made at
 // start, not malloc: a malloc of up to 4 MB a texture load left newlib's heap at its highest.
 const size_t LOAD_ARENA = 12u << 20;
@@ -400,6 +410,38 @@ unsigned char* arena_take(size_t n) {
 }
 
 // A buffer back to the arena, or free() when it came from malloc (none fitted).
+// The stored bytes' block (STORED_ARENA), made once at start: first fit by offset, neighbours joined when given back.
+unsigned char* g_stored_base = NULL;
+std::vector<std::pair<size_t, size_t> > g_stored_free;   // (offset, size), by offset
+unsigned char* stored_take(size_t n) {
+    if (!g_stored_base) return NULL;
+    n = (n + 127) & ~(size_t)127;
+    for (size_t i = 0; i < g_stored_free.size(); ++i)
+        if (g_stored_free[i].second >= n) {
+            unsigned char* p = g_stored_base + g_stored_free[i].first;
+            g_stored_free[i].first += n;
+            g_stored_free[i].second -= n;
+            if (g_stored_free[i].second == 0) g_stored_free.erase(g_stored_free.begin() + (long)i);
+            return p;
+        }
+    return NULL;
+}
+void stored_give(unsigned char* p, size_t n) {
+    if (!p || !g_stored_base || p < g_stored_base || p >= g_stored_base + STORED_ARENA) return;
+    n = (n + 127) & ~(size_t)127;
+    size_t off = (size_t)(p - g_stored_base), i = 0;
+    while (i < g_stored_free.size() && g_stored_free[i].first < off) ++i;
+    g_stored_free.insert(g_stored_free.begin() + (long)i, std::make_pair(off, n));
+    if (i + 1 < g_stored_free.size() && g_stored_free[i].first + g_stored_free[i].second == g_stored_free[i + 1].first) {
+        g_stored_free[i].second += g_stored_free[i + 1].second;
+        g_stored_free.erase(g_stored_free.begin() + (long)i + 1);
+    }
+    if (i > 0 && g_stored_free[i - 1].first + g_stored_free[i - 1].second == g_stored_free[i].first) {
+        g_stored_free[i - 1].second += g_stored_free[i].second;
+        g_stored_free.erase(g_stored_free.begin() + (long)i);
+    }
+}
+
 void arena_give(unsigned char* p, size_t n) {
     if (!p) return;
     if (!g_arena || p < g_arena || p >= g_arena + LOAD_ARENA) {
@@ -490,13 +532,14 @@ struct Tex {
     bool soft_wanted;    // waiting in the guessed read-ahead's backlog
     bool evicted;        // let go for room since its last load
     unsigned char reloads;   // loads after being let go (release_unused keeps the often reloaded longer)
-    unsigned char* stored;   // the pack entry's stored bytes, kept (STORED_BUDGET)
+    unsigned char* stored;   // the pack entry's stored bytes, kept (STORED_ARENA)
     unsigned stored_n, stored_used;
+    bool scene_kept;         // the scene's own (asked for by its load): its stored bytes never let go for another page's
     unsigned waited_frame;   // the last frame that waited for it (each wait counted once: WaitCauses)
     Tex() : image(VK_NULL_HANDLE), mem(VK_NULL_HANDLE), view(VK_NULL_HANDLE), set(VK_NULL_HANDLE), w(0), h(0),
             format(VK_FORMAT_UNDEFINED), bytes(0), last_used(0), retry_at(0), failed(false), pinned(false), loading(false), prefetching(false),
             pre_wanted(false), unused_pre(false), soft_wanted(false), evicted(false), reloads(0), stored(NULL), stored_n(0), stored_used(0),
-            waited_frame(0) {}
+            scene_kept(false), waited_frame(0) {}
 };
 
 struct Garbage {
@@ -538,18 +581,15 @@ public:
     size_t texture_bytes() const { return texture_bytes_; }
     // Frees textures not drawn lately for the player's memory (the commit wrap).
     size_t stored_bytes() const { return stored_bytes_; }
-    // The player's memory grows: textures not drawn lately go, then kept stored bytes.
-    size_t make_room(size_t bytes) {
-        size_t freed = release_unused(bytes);
-        return freed < bytes ? freed + release_stored(bytes - freed) : freed;
-    }
+    // The player's memory grows: textures not drawn lately go (the stored bytes' block gives the console nothing back).
+    size_t make_room(size_t bytes) { return release_unused(bytes); }
     double gpu_wait_ms, present_ms;
     double host_ms_[8];
     HostStats stats_;
     // Why frames waited for textures since the last scene summary (logged beside it: ch360_plat_host_stats): each
     // texture a frame waited for, by what the read-ahead had done about it; and the frames the read-ahead couldn't
     // make room (memory) with the least free memory then.
-    struct WaitCauses { unsigned never, queued, reading, let_go, held_frames, held_low_mb; } waits_;
+    struct WaitCauses { unsigned never, queued, reading, let_go, held_frames, held_low_mb, from_memory, from_drive; } waits_;
     unsigned held_frame_;
     double host_gpu_[GPU_KINDS + 1], host_fill_[2];   // the HOST line's window: GPU ms by kind and in all, fill
     unsigned host_gpu_frames_, host_passes_, host_slow_, host_slow_logged_;
@@ -586,7 +626,10 @@ private:
     bool queue_load(int id, Tex& t, bool pre, bool stored_only = false);
     void feed_prefetch();
     size_t release_stored(size_t want);
+    unsigned char* stored_room(size_t n);
     void forget_stored(Tex& t);
+    unsigned fill_asked_, fill_kept_, fill_dropped_;   // a level's fill (Renderer::fill): pages asked, kept, left without room
+    bool fill_open_;
     std::deque<int> pre_backlog_;   // prefetches asked for, queued as the loader and memory have room
     std::deque<int> soft_backlog_;  // guessed read-ahead: stored bytes only, while there is room
     size_t stored_bytes_;           // the textures' kept stored bytes
@@ -600,6 +643,7 @@ private:
 public:
     void start_loader();
     void prefetch(int id, bool wanted);
+    void fill(int id);
     void scene_read_ahead(bool begin);
     void take_asks();
     void held_ahead(unsigned free_mb) {
@@ -608,7 +652,8 @@ public:
         ++waits_.held_frames;
         if (waits_.held_low_mb == 0 || free_mb < waits_.held_low_mb) waits_.held_low_mb = free_mb;
     }
-    int pending() const { return (int)(load_jobs_ + pre_backlog_.size()); }
+    // A level's fill counts: its load waits for it too (up to its eight seconds).
+    int pending() const { return (int)(load_jobs_ + pre_backlog_.size() + soft_backlog_.size()); }
     // Textures the last frame drew and waited for (the level hold ends when a frame waits for none).
     int waited() const { return (int)last_waited_; }
 private:
@@ -1334,8 +1379,8 @@ bool Renderer::make_image(Tex& t, VkFormat format, int w, int h, VkImageUsageFla
     memory_mb(&free_mb, &total_mb);
     unsigned need_mb = MEMORY_FLOOR_MB + (unsigned)(size >> 20) + 1;
     if (free_mb < need_mb) {
-        size_t want = (size_t)(need_mb - free_mb) << 20, freed = release_unused(want);
-        if (freed < want) release_stored(want - freed);
+        size_t want = (size_t)(need_mb - free_mb) << 20;
+        release_unused(want);
         memory_mb(&free_mb, &total_mb);
     }
     VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -1782,6 +1827,13 @@ void Renderer::start_loader() {
     if (ch360_ctex_pack < 0) return;
     g_arena = (unsigned char*)malloc(LOAD_ARENA);
     if (g_arena) g_arena_free.push_back(std::make_pair((size_t)0, LOAD_ARENA));
+    fill_asked_ = fill_kept_ = fill_dropped_ = 0;
+    fill_open_ = false;
+    g_stored_base = STORED_ARENA ? (unsigned char*)malloc(STORED_ARENA) : NULL;
+    if (g_stored_base) {
+        g_stored_free.push_back(std::make_pair((size_t)0, STORED_ARENA));
+        logf("textures: %u MB kept for pages' stored bytes", (unsigned)(STORED_ARENA >> 20));
+    }
     g_load_reader = ch360_pack_reader_new();
     if (!g_load_reader) return;
     pthread_t th;
@@ -1808,12 +1860,13 @@ void Renderer::take_loads(bool all) {
         bool ours = t && t->key == j->key && t->loading && !t->image;
         if (j->fresh) {
             // The stored bytes read: the texture's to keep (if still its key and the read was good).
-            if (ours && j->state == 0 && !t->stored) {
+            if (t && t->key == j->key && j->state == 0 && !t->stored) {
                 t->stored = j->stored;
                 t->stored_n = j->e.stored;
                 t->stored_used = frame_no_;
+                if (t->scene_kept && !j->data) ++fill_kept_;
             } else {
-                free(j->stored);
+                stored_give(j->stored, j->e.stored);
                 stored_bytes_ -= j->e.stored;
             }
         }
@@ -1846,6 +1899,8 @@ void Renderer::take_loads(bool all) {
                     if (staging_cached_) memcpy(dst, j->data, j->n);
                     else g_memcpy(dst, j->data, j->n);
                     record_copy(*t, buf, off);
+                    if (j->stored && !j->fresh) ++waits_.from_memory;
+                    else ++waits_.from_drive;
                     t->unused_pre = j->pre;
                     g_texture_bytes = texture_bytes_;
                     if (!j->pre) stats_.demand += 1;
@@ -1926,18 +1981,10 @@ void Renderer::finish_waits() {
 void Renderer::prefetch(int id, bool wanted) {
     if (!g_loader || ch360_ctex_pack < 0) return;
     Tex* t = tex(id);
-    if (!wanted) {
-        if (STORED_BUDGET == 0) return;   // stored bytes off: a guess isn't read
-        // A guess (an atlas the game loaded, a drawn page's siblings): its stored bytes, while there is room,
-        // never making room from what was drawn (the twenty-first run's Forest Follies began with 60 MB of the
-        // maps' atlases read ahead in full, the level's own pages evicted for them).
-        if (!t || t->image || t->stored || t->loading || t->failed || t->key.empty() || t->soft_wanted || t->pre_wanted) return;
-        if (soft_backlog_.size() >= 2048) return;
-        t->soft_wanted = true;
-        soft_backlog_.push_back(id);
-        if (!hold_feed_) feed_prefetch();
-        return;
-    }
+    // A guess (an atlas the game loaded, a drawn page's siblings) isn't read: in play its reads held up the loader
+    // the frames' pages need (a level's own come through fill, under the hourglass).
+    if (!wanted) return;
+    if (t && hold_feed_) t->scene_kept = true;   // asked for by the scene's load: its stored bytes kept through it
     if (t && t->image && frame_no_ - t->last_used > 3) {
         // Loaded and wanted soon (a sprite near the camera, the clip it plays): kept as if drawn lately,
         // so making room takes older textures first (but not as drawn: the GPU isn't using it).
@@ -1958,8 +2005,30 @@ void Renderer::prefetch(int id, bool wanted) {
 // restart: 64 pages still coming as its read-ahead ended, 92 as its hold did), and its first frames read them.
 // The new scene's asks then mark what it wants as drawn lately (prefetch), and the backlog is fed only at the
 // end, so room never comes from a texture the new scene wants too.
+// A level's page (RenderList.FillAhead, under the hourglass): its stored bytes read into the block and kept through
+// the level. Behind the read-ahead's pages (feed_prefetch), and not making room from the level's own.
+void Renderer::fill(int id) {
+    Tex* t = tex(id);
+    if (!g_loader || !g_stored_base || ch360_ctex_pack < 0 || !t || t->key.empty() || t->failed) return;
+    ++fill_asked_;
+    fill_open_ = true;
+    t->scene_kept = true;
+    if (t->stored) {
+        t->stored_used = frame_no_;
+        ++fill_kept_;
+        return;
+    }
+    if (t->loading || t->soft_wanted || soft_backlog_.size() >= 4096) return;
+    t->soft_wanted = true;
+    soft_backlog_.push_back(id);
+    if (!hold_feed_) feed_prefetch();
+}
+
 void Renderer::scene_read_ahead(bool begin) {
     if (begin) {
+        // the scene before's pages are no longer kept for it (least recently used go first as the new one fills)
+        for (size_t i = 0; i < textures_.size(); ++i) textures_[i].scene_kept = false;
+        fill_asked_ = fill_kept_ = fill_dropped_ = 0;
         const unsigned old = AHEAD_AGE + RELOAD_CAP * RELOAD_CREDIT + 4;
         for (size_t i = 0; i < textures_.size(); ++i) {
             Tex& t = textures_[i];
@@ -1974,7 +2043,7 @@ void Renderer::scene_read_ahead(bool begin) {
 }
 
 void Renderer::feed_prefetch() {
-    if (pre_backlog_.empty()) return;
+    if (pre_backlog_.empty() && soft_backlog_.empty() && !fill_open_) return;
     unsigned free_mb, total_mb;
     memory_mb(&free_mb, &total_mb);   // once: the jobs queued below count through load_bytes_
     while (!pre_backlog_.empty()) {
@@ -1984,12 +2053,12 @@ void Renderer::feed_prefetch() {
             pre_backlog_.pop_front();
             continue;
         }
-        if (pre_bytes_ > (8u << 20)) return;
+        if (pre_bytes_ > (8u << 20)) goto fill;
         // Room from textures not drawn for a while; none, and the read-ahead waits. (It needed 48 MB free
         // above the floor and the set under 3/4 of the budget: in the levels, 37-43 MB free, it never ran,
         // and every page coming into view was read while its frame waited: the twentieth run's hitches.)
         size_t want = texture_bytes_ + load_bytes_ + PAGE_MAX;
-        if (want > TEXTURE_BUDGET && (release_aged(want - TEXTURE_BUDGET, AHEAD_AGE), texture_bytes_ + load_bytes_ + PAGE_MAX > TEXTURE_BUDGET)) return;
+        if (want > TEXTURE_BUDGET && (release_aged(want - TEXTURE_BUDGET, AHEAD_AGE), texture_bytes_ + load_bytes_ + PAGE_MAX > TEXTURE_BUDGET)) goto fill;
         // As much free memory as a drawn texture's load leaves (make_image: the floor and its page), what is being
         // read counted in. 8 MB more before the thirty-eighth run: free sat at 29-38 MB in the levels, the read-ahead
         // waited at 36 while the frames' own loads took the same memory, and those were the hitches (FF 64 textures
@@ -1998,31 +2067,61 @@ void Renderer::feed_prefetch() {
         if (free_mb < need_mb) {
             if (!release_aged((size_t)(need_mb - free_mb) << 20, AHEAD_AGE)) {
                 held_ahead(free_mb);
-                return;
+                goto fill;
             }
             memory_mb(&free_mb, &total_mb);
             if (free_mb < need_mb) {
                 held_ahead(free_mb);
-                return;
+                goto fill;
             }
         }
-        if (!queue_load(pre_backlog_.front(), *t, true) && !t->failed) return;   // the rings or the in-flight cap: next frame
+        if (!queue_load(pre_backlog_.front(), *t, true) && !t->failed) goto fill;   // the rings or the in-flight cap: next frame
         t->pre_wanted = false;
         pre_backlog_.pop_front();
     }
+fill:   // a level's fill reads into its own block: not held back with the read-ahead
     while (!soft_backlog_.empty()) {
         Tex* t = tex(soft_backlog_.front());
-        if (!t || t->image || t->stored || t->loading || t->failed || t->key.empty() || frame_no_ < t->retry_at) {
+        if (!t || t->stored || t->loading || t->failed || t->key.empty() || frame_no_ < t->retry_at) {
             if (t) t->soft_wanted = false;
             soft_backlog_.pop_front();
             continue;
         }
-        if (pre_bytes_ > (4u << 20) || stored_bytes_ + load_bytes_ > STORED_BUDGET) return;
-        if (free_mb < MEMORY_FLOOR_MB + 32 + (unsigned)(load_bytes_ >> 20)) return;
-        if (!queue_load(soft_backlog_.front(), *t, true, true) && !t->failed) return;
+        // Under the hourglass 4 MB at a time behind the read-ahead; in play (what the load's eight seconds left)
+        // one at a time, only when no read-ahead is waiting.
+        bool under = g_log_loading || hold_feed_;   // the last frame drawn the loading screen, or the scene asking
+        if (under ? pre_bytes_ > (4u << 20) : (pre_bytes_ > 0 || !pre_backlog_.empty())) return;
+        if (load_jobs_ >= LOAD_RING - 1 || load_bytes_ > (8u << 20) || g_pre_in_tail - g_pre_in_head >= LOAD_RING - 1) return;
+        int id = soft_backlog_.front();
         t->soft_wanted = false;
         soft_backlog_.pop_front();
+        if (!queue_load(id, *t, true, true) && !t->failed) ++fill_dropped_;   // no room left in the block
     }
+    if (fill_open_ && load_jobs_ == 0) {
+        fill_open_ = false;
+        logf("HOST stored bytes: the level's fill asked for %u pages, %u kept, %u without room; %u MB of %u kept in all",
+             fill_asked_, fill_kept_, fill_dropped_, (unsigned)(stored_bytes_ >> 20), (unsigned)(STORED_ARENA >> 20));
+    }
+}
+
+// Room in the block for n stored bytes: the least recently used copies go (not the scene's own, none a job reads).
+unsigned char* Renderer::stored_room(size_t n) {
+    unsigned char* p = stored_take(n);
+    if (p) return p;
+    static unsigned failed_frame = ~0u;
+    static size_t failed_n = 0;
+    if (failed_frame == frame_no_ && n >= failed_n) return NULL;   // nothing to let go this frame: not searched again
+    std::vector<std::pair<unsigned, size_t> > order;
+    for (size_t i = 0; i < textures_.size(); ++i)
+        if (textures_[i].stored && !textures_[i].loading && !textures_[i].scene_kept) order.push_back(std::make_pair(textures_[i].stored_used, i));
+    std::sort(order.begin(), order.end());
+    for (size_t k = 0; k < order.size(); ++k) {
+        forget_stored(textures_[order[k].second]);
+        if ((p = stored_take(n)) != NULL) return p;
+    }
+    failed_frame = frame_no_;
+    failed_n = n;
+    return NULL;
 }
 
 // Kept stored bytes go, least recently used first (none a job is reading), until want bytes are freed.
@@ -2041,7 +2140,7 @@ size_t Renderer::release_stored(size_t want) {
 
 void Renderer::forget_stored(Tex& t) {
     if (!t.stored) return;
-    free(t.stored);
+    stored_give(t.stored, t.stored_n);
     stored_bytes_ -= t.stored_n;
     t.stored = NULL;
     t.stored_n = 0;
@@ -2058,7 +2157,7 @@ bool Renderer::queue_load(int id, Tex& t, bool pre, bool stored_only) {
             if (q && q->id == id && q->key == t.key) {
                 g_pre_in[k % LOAD_RING] = NULL;
                 q->pre = false;
-                pre_bytes_ -= q->n;
+                pre_bytes_ -= q->bytes;
                 g_load_in[g_load_in_tail++ % LOAD_RING] = q;
                 pthread_cond_signal(&g_load_cond);
                 break;
@@ -2085,16 +2184,13 @@ bool Renderer::queue_load(int id, Tex& t, bool pre, bool stored_only) {
     // least recently used); without it, read from the pack as before.
     unsigned char* stored = t.stored;
     bool fresh = false;
-    if (!stored && pe.stored <= PAGE_MAX + (1u << 20)) {
-        if (stored_bytes_ + pe.stored > STORED_BUDGET) release_stored(stored_bytes_ + pe.stored - STORED_BUDGET);
-        if (stored_bytes_ + pe.stored <= STORED_BUDGET && (stored = (unsigned char*)malloc(pe.stored)) != NULL) fresh = true;
-    }
+    if (!stored && g_stored_base && pe.stored <= PAGE_MAX + (1u << 20) && (stored = stored_room(pe.stored)) != NULL) fresh = true;
     if (stored_only && !stored) return false;
     if (t.stored) t.stored_used = frame_no_;
     unsigned char* data = NULL;
     if (!stored_only && (data = arena_take(n ? n : 1)) == NULL) data = (unsigned char*)malloc(n ? n : 1);
     if (!stored_only && !data) {
-        if (fresh) free(stored);
+        if (fresh) stored_give(stored, pe.stored);
         t.retry_at = frame_no_ + 120;
         return false;
     }
@@ -2272,6 +2368,7 @@ void Renderer::take_asks() {
     for (size_t i = 0; i < g_asks_taken.size(); ++i) {
         const Ask& a = g_asks_taken[i];
         if (!a.key.empty()) texture_file(a.id, a.key.c_str());
+        else if (a.wanted == 2) fill(a.id);
         else prefetch(a.id, a.wanted != 0);
     }
     g_asks_taken.clear();
@@ -3060,8 +3157,8 @@ extern "C" void ch360_plat_host_stats(unsigned* out, int n) {
     memset(&s, 0, sizeof(s));
     Renderer::WaitCauses& w = g_renderer->waits_;
     logf("HOST texture waits: %u never asked ahead, %u asked and held back, %u asked and still being read, %u let go before; "
-         "the read-ahead held back by memory in %u frames (%u MB free at the least)", w.never, w.queued, w.reading, w.let_go,
-         w.held_frames, w.held_low_mb);
+         "the read-ahead held back by memory in %u frames (%u MB free at the least); pages decoded from their kept stored bytes %u, "
+         "from the drive %u", w.never, w.queued, w.reading, w.let_go, w.held_frames, w.held_low_mb, w.from_memory, w.from_drive);
     memset(&w, 0, sizeof(w));
 }
 
@@ -3254,6 +3351,7 @@ static void ask(int id, int wanted, const char* key) {
     if (pthread_mutex_trylock(&g_gpu_lock) == 0) {
         g_renderer->take_asks();   // what was queued before it first
         if (key) g_renderer->texture_file(id, key);
+        else if (wanted == 2) g_renderer->fill(id);
         else g_renderer->prefetch(id, wanted != 0);
         pthread_mutex_unlock(&g_gpu_lock);
         return;
@@ -3269,6 +3367,10 @@ static void ask(int id, int wanted, const char* key) {
 
 extern "C" void ch360_plat_texture_prefetch(int id, int wanted) {
     ask(id, wanted, NULL);
+}
+
+extern "C" void ch360_plat_texture_guess(int id) {
+    ask(id, 2, NULL);
 }
 extern "C" void ch360_plat_textures_scene(int begin) {
     GpuLock lock;

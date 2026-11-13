@@ -229,6 +229,7 @@ namespace Cuphead360.Engine
             if (srcGo == null) return CloneAsset(src);
 
             Calls++;
+            SceneLoader.HeapCheck();   // a scene's activation: its heap kept under the load's cap
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             var map = new Dictionary<NObject, NObject>();
             var srcLayout = NRectTransform.Snapshot(srcGo.Transform);

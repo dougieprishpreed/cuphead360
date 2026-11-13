@@ -126,6 +126,9 @@ int ch360_plat_tween(int on);
 void ch360_plat_draw_tween(const ch360_frame* frame, const float* shifts);
 /* Texture id is the converted texture <key> (GameData/ctex/<key>.ctx). */
 void ch360_plat_texture_file(int id, const char* key);
+/* A level's page whose stored bytes the host keeps in its memory, not decoded (RenderList.FillAhead, under the
+ * hourglass): drawn later, it decodes from there instead of the drive. */
+void ch360_plat_texture_guess(int id);
 /* Texture id is likely drawn soon: read it ahead if memory allows (never waited for). wanted: a sprite near
  * the view or a frame of a clip on screen (room is made from textures not drawn lately); else a guess (an
  * atlas the game loaded, the other pages of one drawn): only its stored bytes are kept, and only with room. */

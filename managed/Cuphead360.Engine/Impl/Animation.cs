@@ -455,6 +455,14 @@ namespace Cuphead360.Engine
             }
         }
 
+        /// <summary>A controller's data if it is built already (null otherwise): nothing read, nothing cached.</summary>
+        public static ControllerData Peek(RuntimeAnimatorController c)
+        {
+            if (c == null || c is AnimatorOverrideController) return null;
+            var src = (Objects.Of(c) as NAsset)?.Source;
+            return src != null && cache.TryGetValue(src, out var d) ? d : null;
+        }
+
         public static ControllerData Of(RuntimeAnimatorController c)
         {
             if (c == null) return null;

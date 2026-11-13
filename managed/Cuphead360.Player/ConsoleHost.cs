@@ -46,6 +46,8 @@ namespace Cuphead360.Player
         static extern void TexturePrefetch(int id);
         [DllImport("ch360", EntryPoint = "texture_ahead"), WasmImportLinkage]
         static extern void TextureAhead(int id, float u0, float v0, float u1, float v1);
+        [DllImport("ch360", EntryPoint = "texture_guess"), WasmImportLinkage]
+        static extern void TextureGuess(int id, float u0, float v0, float u1, float v1);
         [DllImport("ch360", EntryPoint = "textures_pending"), WasmImportLinkage]
         static extern int TexturesPending();
         [DllImport("ch360", EntryPoint = "textures_scene"), WasmImportLinkage]
@@ -438,6 +440,13 @@ namespace Cuphead360.Player
                 if (RuntimePixels.Get(t) != null) return;
                 int id = TextureId(t);
                 if (id >= 0) TextureAhead(id, box.x, box.y, box.z, box.w);
+            };
+            // A level's every page, its stored bytes kept in the host's memory under the hourglass (RenderList.FillAhead).
+            RenderList.ReadAheadStored = (t, box) =>
+            {
+                if (RuntimePixels.Get(t) != null) return;
+                int id = TextureId(t);
+                if (id >= 0) TextureGuess(id, box.x, box.y, box.z, box.w);
             };
             // Rewired's control mapper reads this field by name (ReflectionTools.GetPrivateField, widened by the
             // patcher to public members too: publicize made the field public).
@@ -908,9 +917,36 @@ namespace Cuphead360.Player
         /// frame in between each two at the vblank between them, each sprite moved on by half its last step (the
         /// last frame's map to the screen against this one's: extrapolated, so no latency added). They ran between
         /// 30 and 60 frame to frame (Forest Follies 35% of frames at 60, 62% at 30, the thirty-seventh run): the
-        /// user felt it as choppy. A file full60.txt beside the XEX turns it off (the host says no).
+        /// user felt it as choppy. A file full60.txt beside the XEX turns it off (the host says no). A file locked30.txt
+        /// beside it names more levels to run so, one a line ("flying_blimp" or "scene_level_flying_blimp"; # a note):
+        /// the bosses run a real 60 unless named there.
         /// </summary>
-        static bool LockedThirty(string scene) => scene != null && scene.StartsWith("scene_level_platforming_");
+        static bool LockedThirty(string scene)
+        {
+            if (scene == null) return false;
+            if (scene.StartsWith("scene_level_platforming_")) return true;
+            foreach (var n in moreLocked)
+                if (scene == n || scene == "scene_level_" + n) return true;
+            return false;
+        }
+        static readonly string[] moreLocked = ReadLockedList();
+        static string[] ReadLockedList()
+        {
+            var list = new List<string>();
+            try
+            {
+                const string path = "/locked30.txt";
+                if (System.IO.File.Exists(path))
+                    foreach (var raw in System.IO.File.ReadAllLines(path))
+                    {
+                        var l = raw.Trim();
+                        if (l.Length > 0 && !l.StartsWith("#")) list.Add(l);
+                    }
+            }
+            catch (Exception) { }
+            if (list.Count > 0) Console.WriteLine("locked30.txt: the locked 30 also in " + string.Join(", ", list));
+            return list.ToArray();
+        }
         static bool tweening, tweenHost = true;
 
         static void DrawFrame(List<RenderList.View> views, uint loading)

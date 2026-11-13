@@ -457,13 +457,87 @@ namespace Cuphead360.Engine
             return true;
         }
 
-        public static (int sprites, int clips) ReadAheadLoad(int sceneHandle)
+        public static (int sprites, int clips) ReadAheadLoad(int sceneHandle, bool fill = false)
         {
             if (ReadAhead == null) return (0, 0);
             SceneReadAhead?.Invoke(true);
             sceneAsk = true;
-            try { FontsAhead(sceneHandle); PersistentAhead(); return LoadAhead(sceneHandle); }
+            try
+            {
+                FontsAhead(sceneHandle); PersistentAhead();
+                var r = LoadAhead(sceneHandle);
+                Filled = fill && fillOn ? FillAhead(sceneHandle) : 0;
+                return r;
+            }
             finally { sceneAsk = false; SceneReadAhead?.Invoke(false); }
+        }
+
+        /// <summary>
+        /// The host's keeping of a page's stored bytes (the console's: LZ4, a quarter to a fifth of the page) in its memory,
+        /// without decoding it: a page drawn later decodes from there in 6-25 ms instead of 50-300 ms from the drive.
+        /// </summary>
+        public static Action<Texture2D, Vector4> ReadAheadStored;
+        /// <summary>The sprites the last load's fill asked for.</summary>
+        public static int Filled;
+        /// <summary>
+        /// The fill is off unless CH360_FILL=1 (with the console host's STORED_ARENA): tools/texture_cache_sim.py over the
+        /// PC traces of Hilda Berg, Forest Follies and Treetop found its pages too far from what the fights draw (its
+        /// first 32 MB held 27 MB of Hilda's 43), and its block's room taken from the decoded pages cost more waits
+        /// than it saved (Forest Follies 21 -> 45 frames late at the console's room).
+        /// </summary>
+        static readonly bool fillOn = Environment.GetEnvironmentVariable("CH360_FILL") == "1";
+
+        /// <summary>
+        /// A level's load (under the hourglass, after its first pages are asked for): every sprite its objects show and
+        /// every clip of their animators, active or not, and of the prefabs' animators the load read (bullets, a boss's
+        /// later forms), their pages' stored bytes kept by the host. The thirty-ninth run's fights waited on pages first
+        /// drawn with no read-ahead (Hilda Berg 107 loaded on demand, 63 of her 76 hitches): a boss's phases start their
+        /// animations by script and its spawns appear at once, and a page from the drive took 50-300 ms. The host keeps
+        /// what fits its block (the scene's own first, in this order: the scene's objects nearest the camera first, then
+        /// the prefabs'), and decodes a page from it when drawn.
+        /// </summary>
+        static int FillAhead(int sceneHandle)
+        {
+            if (ReadAheadStored == null) return 0;
+            int n = 0;
+            var clipsSeen = new HashSet<ClipData>();
+            var spritesSeen = new HashSet<Sprite>();
+            void Guess(Sprite s)
+            {
+                if (s == null || !spritesSeen.Add(s)) return;
+                var tex = Sprites.BoundTexture(s);
+                if (tex == null) return;
+                ReadAheadStored(tex, Sprites.UvBox(s));
+                n++;
+            }
+            void Clip(ClipData clip)
+            {
+                if (clip == null || !clipsSeen.Add(clip)) return;
+                foreach (var o in clip.PPtrs) if (o is Sprite s) Guess(s);
+            }
+            Vector3 eye = default;
+            foreach (var c in Typed.Cameras)
+                if (!c.Destroyed && c.GameObject != null && c.GameObject.Scene == sceneHandle) { eye = c.GameObject.Transform.Position; break; }
+            var near = new List<(float d, NGameObject go)>();
+            foreach (var go in Typed.GameObjects)
+            {
+                if (go.IsAsset || go.Scene != sceneHandle) continue;
+                var p = go.Transform.Position;
+                near.Add(((p.x - eye.x) * (p.x - eye.x) + (p.y - eye.y) * (p.y - eye.y), go));
+            }
+            near.Sort((x, y) => x.d.CompareTo(y.d));
+            foreach (var (_, go) in near)
+                foreach (var c in go.Components)
+                {
+                    if (c is NSpriteRenderer sr) Guess(sr.Sprite);
+                    else if (c.Managed is UnityEngine.UI.Image img) Guess(img.sprite);
+                    // built ones only (Peek): building an inactive animator's here changed what the unload pass kept
+                    else if (c is NAnimator a && a.Controller != null && ControllerData.Peek(a.Controller) is ControllerData d)
+                        foreach (var clip in d.Clips) Clip(clip);
+                }
+            foreach (var d in ControllerData.WarmedKeep)
+                if (d != null) foreach (var clip in d.Clips) Clip(clip);
+            return n;
         }
 
         // A new scene's read-ahead: every sprite and clip asked for again, however lately (what isn't asked for may

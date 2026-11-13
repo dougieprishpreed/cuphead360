@@ -35,6 +35,12 @@ static unsigned char tex_seen[TRACE_IDS];  /* drawn before */
 static long tex_on_frame[TRACE_IDS], tex_any_frame[TRACE_IDS];
 static long trace_last_total = -1;
 
+/* CH360_TRACE_DRAWN=<file>: for tools/texture_cache_sim.py, a line a drawn frame ("F frame loading id id ...":
+ * the textures its items sample, once each), each read-ahead ask ("A frame id wanted"), each texture named or
+ * given pixels ("K id key", "P id") and the scene read-ahead's marks ("S frame begin"). */
+static FILE* drawn_trace;
+static long drawn_mark[TRACE_IDS];
+
 /* CH360_FRAME_MS=n: each frame takes at least n ms, as on the console (its
  * frame step and audio step follow the clock, so the game runs differently). */
 static long frame_ms;
@@ -156,6 +162,16 @@ void ch360_plat_draw(const ch360_frame* f) {
         return;
     }
     if (f->loading) ++loading_frames;
+    if (drawn_trace) {
+        fprintf(drawn_trace, "F %ld %d", frame_no, f->loading ? 1 : 0);
+        for (i = 0; i < f->item_count; i++) {
+            int id = f->items[i].texture;
+            if (id < 0 || id >= TRACE_IDS || drawn_mark[id] == frame_no + 1) continue;
+            drawn_mark[id] = frame_no + 1;
+            fprintf(drawn_trace, " %d", id);
+        }
+        fputc('\n', drawn_trace);
+    }
     views_seen = f->view_count;
     draw_items = draw_vertices = 0;
     if (dump_file && dump_every > 0 && frame_no % dump_every == 0) {
@@ -191,6 +207,12 @@ void ch360_plat_texture_prefetch(int id, int wanted) {
     if (trace_prefetch < 0) trace_prefetch = getenv("CH360_TRACE_PREFETCH") != NULL;
     if (trace_prefetch && id >= 0 && id < TRACE_IDS)
         printf("PREFETCH frame %ld%s: %s\n", frame_no, wanted ? " wanted" : "", tex_key[id] ? tex_key[id] : "(runtime)");
+    if (drawn_trace) fprintf(drawn_trace, "A %ld %d %d\n", frame_no, id, wanted);
+}
+
+/* A level's page kept as stored bytes on the console (its fill under the hourglass): traced ("G frame id"). */
+void ch360_plat_texture_guess(int id) {
+    if (drawn_trace) fprintf(drawn_trace, "G %ld %d\n", frame_no, id);
 }
 
 /* The locked 30's frame in between: not drawn here; CH360_TWEEN=1 says yes when asked, 2 for every frame (the bot's
@@ -228,6 +250,7 @@ int ch360_plat_textures_pending(void) { return 0; }
 void ch360_plat_textures_scene(int begin) {
     if (trace_prefetch < 0) trace_prefetch = getenv("CH360_TRACE_PREFETCH") != NULL;
     if (trace_prefetch) printf("PREFETCH frame %ld: scene read-ahead %s\n", frame_no, begin ? "begins" : "ends");
+    if (drawn_trace) fprintf(drawn_trace, "S %ld %d\n", frame_no, begin);
 }
 int ch360_plat_textures_waited(void) { return 0; }
 /* No output playing in real time here (the WAV takes what is mixed): the player mixes each frame's time. */
@@ -235,6 +258,7 @@ int ch360_plat_audio_queued(void) { return -1; }
 
 void ch360_plat_texture_file(int id, const char* key) {
     textures_files++;
+    if (drawn_trace) fprintf(drawn_trace, "K %d %s\n", id, key);
     if (dump_keys) {
         fprintf(dump_keys, "%d %s\n", id, key);
         fflush(dump_keys);
@@ -251,6 +275,7 @@ void ch360_plat_texture_file(int id, const char* key) {
 void ch360_plat_texture_pixels(int id, int width, int height, const unsigned char* bgra) {
     (void)bgra;
     textures_pixels++;
+    if (drawn_trace) fprintf(drawn_trace, "P %d\n", id);
     if (id >= 0 && id < TRACE_IDS) {
         free(tex_key[id]);
         tex_key[id] = NULL;
@@ -332,6 +357,7 @@ int main(int argc, char** argv) {
         if (wav) fwrite("\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 1, 44, wav);
     }
     trace_dir = getenv("CH360_TRACE_TEX");
+    if (getenv("CH360_TRACE_DRAWN")) drawn_trace = fopen(getenv("CH360_TRACE_DRAWN"), "w");
     {
         extern int ch360_pcm_whole;
         ch360_pcm_whole = getenv("CH360_PCM_WHOLE") != NULL;
@@ -361,6 +387,7 @@ int main(int argc, char** argv) {
     code = ch360_run(root, guestc, guest, memory_mb, 64, -1);
     if (wav) { wav_header(wav, audio_frames); fclose(wav); }
     if (dump_file) fclose(dump_file);
+    if (drawn_trace) fclose(drawn_trace);
     printf("[host] exit %d after %ld frames; linear memory %u MB; bad lists %lu\n", code, frame_no, ch360_memory_kb() / 1024,
            bad_lists);
     return code;
