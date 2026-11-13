@@ -438,7 +438,10 @@ namespace Cuphead360.Engine
         public static void Play(NAudioSource s, double delaySeconds)
         {
             if (s == null) return;
-            if (s.Main != null) voices.Remove(s.Main);
+            // The voice it was playing ends: its stream closed too. Removed without its Dispose, a streamed clip kept its
+            // decoder open for good (the host's 32): each music or loop played again on the same source leaked one,
+            // and the fortieth run ran out at Treetop's second visit (its music silent, Hilda Berg's sounds missing).
+            if (s.Main != null) { Close(s.Main); voices.Remove(s.Main); }
             s.Main = null;
             var c = ClipOf(s.Clip);
             if (c == null) return;

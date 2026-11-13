@@ -300,6 +300,36 @@ namespace Cuphead360.Player
         static void DumpState(int frame)
         {
             Console.WriteLine($"DUMP frame {frame} scene={Cuphead360.Engine.Scenes.Active?.Name} timeScale={UnityEngine.Time.timeScale} dt={UnityEngine.Time.deltaTime}");
+            if (inspect == "HitFlash")
+            {
+                // Every HitFlash on a log stack (Treetop's): the renderers its flash tints, and their colors now.
+                const System.Reflection.BindingFlags any = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+                foreach (var g in Typed.GameObjects)
+                {
+                    if (g.IsAsset || !g.Name.Contains("Log")) continue;
+                    foreach (var c in g.Components)
+                    {
+                        if (c.Managed == null || c.Managed.GetType().Name != "HitFlash") continue;
+                        var t = c.Managed.GetType();
+                        var list = t.GetField("renderers", any)?.GetValue(c.Managed) as System.Collections.IList;
+                        var other = t.GetField("otherRenderers", any)?.GetValue(c.Managed) as Array;
+                        var self = t.GetField("self", any)?.GetValue(c.Managed);
+                        object flashing = t.GetProperty("flashing", any)?.GetValue(c.Managed);
+                        var sb = new System.Text.StringBuilder();
+                        if (list != null)
+                            foreach (var rp in list)
+                            {
+                                var r = rp?.GetType().GetField("renderer", any)?.GetValue(rp) as UnityEngine.SpriteRenderer;
+                                sb.Append(' ').Append(r == null ? "null" : r.gameObject.name + "=" + r.color);
+                            }
+                        string recv = "";
+                        foreach (var c2 in g.Components)
+                            if (c2 is NBehaviour nb && nb.Managed != null && nb.Managed.GetType().Name == "DamageReceiver") recv = " recv=" + (nb.Enabled ? "on" : "off");
+                        Console.WriteLine($"  HITFLASH {g.Name}#{g.GetHashCode() % 1000} y={g.Transform.Position.y:0} active={g.ActiveInHierarchy}{recv} self={(self != null)} renderers={list?.Count} other={other?.Length} flashing={flashing}:{sb}");
+                    }
+                }
+                return;
+            }
             if (inspect != null)
             {
                 foreach (var g in Typed.GameObjects)

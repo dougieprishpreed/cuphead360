@@ -663,7 +663,15 @@ U32 i5_ch3608_oggX5Fopen(wasmModuleInstance* inst, U32 path, U32 len, U32 info) 
         for (h = 0; h < OGG_MAX && (oggs[h].v != NULL || oggs[h].loading); h++) {
         }
     }
-    if (h == OGG_MAX) return (U32)-1;
+    if (h == OGG_MAX) {
+        static unsigned full_logged;
+        if (full_logged++ < 8) {
+            char msg[96];
+            int n = sprintf(msg, "audio: no decoder free (all %d open): a clip not played\n", OGG_MAX);
+            ch360_plat_log(msg, (size_t)n);
+        }
+        return (U32)-1;
+    }
     oggs[h].pcm_owner = -1;
     oggs[h].close_asked = 0;
     oggs[h].borrowed = 0;
