@@ -124,6 +124,8 @@ namespace Cuphead360.Engine
             ControllerData.ForgetBuilt();
             RenderList.ForgetScene();
             Physics.ForgetScene();
+            Typed.CleanAll();   // destroyed records hold nothing through the collection
+            DropDestroyedPauseHandlers();
             var cands = new List<NObject>();
             foreach (var r in Objects.Live())
                 if (Candidate(r)) cands.Add(r);
@@ -139,14 +141,38 @@ namespace Cuphead360.Engine
             var weakFiles = AssetDb.WeakenFiles();
             for (int i = 0; i < cands.Count; i++) cands[i].Managed = null;
 
-            // One full collection: weak references clear as soon as their objects are unreachable.
-            GC.Collect();
-            GC.KeepAlive(units);
+            // Full collections: weak references clear as soon as their objects are unreachable. A released record still
+            // held what it pointed at through the round (a prefab's animator its controller, a sprite renderer its sprite
+            // and materials), so those went only at the next load's pass, a layer a load: the map after Forest Follies
+            // kept 7 of its converted files (~10 MB). Up to three rounds, the released records dropped between them.
+            int released = 0, rounds = 0;
+            var alive = new bool[cands.Count];
+            for (int i = 0; i < cands.Count; i++) alive[i] = true;
+            while (rounds < 3)
+            {
+                rounds++;
+                GC.Collect();
+                GC.KeepAlive(units);
+                int now = 0;
+                for (int i = 0; i < cands.Count; i++)
+                {
+                    if (!alive[i] || weak[i].Target != null) continue;
+                    var r = cands[i];
+                    r.UnloadCandidate = false;
+                    Objects.Unloaded(r);
+                    alive[i] = false;
+                    cands[i] = null;   // nothing here holds what it pointed at for the next round
+                    now++;
+                }
+                released += now;
+                // the records it released leave every list (the registries, the colliders' query index) before the next
+                if (now > 0) { Typed.CleanAll(); Physics.ForgetScene(); }
+                if (now == 0) break;
+            }
             int files = AssetDb.RestoreFiles(weakFiles);   // first: nothing may load a file while the table is empty
-
-            int released = 0;
             for (int i = 0; i < cands.Count; i++)
             {
+                if (!alive[i]) continue;
                 var r = cands[i];
                 r.UnloadCandidate = false;
                 if (weak[i].Target is UObject o) r.Managed = o;
@@ -158,12 +184,44 @@ namespace Cuphead360.Engine
             Released += released;
             Passes++;
             long heap1 = GC.GetTotalMemory(false);
-            Log.Line($"UNLOAD {why}: {released} of {cands.Count} assets let go in {(System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000 / System.Diagnostics.Stopwatch.Frequency} ms; "
+            Log.Line($"UNLOAD {why}: {released} of {cands.Count} assets let go ({rounds} collections) in {(System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000 / System.Diagnostics.Stopwatch.Frequency} ms; "
                 + $"heap {heap0 >> 20} -> {heap1 >> 20} MB, live objects {Objects.LiveCount}; {files} converted files no longer read let go");
         }
 
         /// <summary>Prefabs: each member keeps the whole hierarchy alive (in a method of its own, so no local holds one).</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
+        /// <summary>
+        /// The game's own leak: LevelPlayerAnimationController subscribes to the static LevelPauseGUI.OnPauseEvent and
+        /// never leaves it, so every level's player animation controller stayed alive with what its fields held (the
+        /// player's effect prefabs and their sprites, and the converted files they came from: ~10 MB on the map after
+        /// Forest Follies, the heap census). Its two handlers (OnGuiPause, OnGuiUnpause) are empty methods, so a destroyed
+        /// controller's are taken out at the pass: nothing the game does changes.
+        /// </summary>
+        static void DropDestroyedPauseHandlers()
+        {
+            if (!pauseLooked)
+            {
+                pauseLooked = true;
+                var t = Type.GetType("LevelPauseGUI, Assembly-CSharp");
+                pauseEvent = t?.GetField("OnPauseEvent", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+            }
+            if (pauseEvent == null || !(pauseEvent.GetValue(null) is Delegate d)) return;
+            Delegate keep = null;
+            int dropped = 0;
+            foreach (var h in d.GetInvocationList())
+            {
+                if (h.Target is UnityEngine.MonoBehaviour mb && mb.GetType().Name == "LevelPlayerAnimationController" && Objects.Of(mb) == null)
+                {
+                    dropped++;
+                    continue;
+                }
+                keep = Delegate.Combine(keep, h);
+            }
+            if (dropped > 0) pauseEvent.SetValue(null, keep);
+        }
+        static bool pauseLooked;
+        static System.Reflection.FieldInfo pauseEvent;
+
         static ConditionalWeakTable<UObject, object[]> Units(List<NObject> cands)
         {
             var units = new ConditionalWeakTable<UObject, object[]>();

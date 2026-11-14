@@ -473,6 +473,25 @@ namespace Cuphead360.Engine
             SweepList(meshRenderers, 128);
         }
 
+        /// <summary>
+        /// Every list's destroyed records dropped now (AssetUnload's pass, before its collection): a destroyed prefab's
+        /// records kept what they held (an animator its controller, a sprite renderer its sprite and materials), so the
+        /// pass kept those assets and the converted files they came from: after Forest Follies the map held 7 of its
+        /// files (~10 MB: the SmallButterfly prefab's animator, the parry spark's sprite renderer).
+        /// </summary>
+        public static void CleanAll()
+        {
+            dirty = 0xFF;
+            Clean(colliders, 1);
+            Clean(spriteRenderers, 2);
+            Clean(canvases, 4);
+            Clean(cameras, 8);
+            Clean(behaviours, 16);
+            Clean(gameObjects, 32);
+            Clean(spriteMasks, 64);
+            Clean(meshRenderers, 128);
+        }
+
         // 256 destroyed records, or half of a short list (the sprite masks': 50 held 2,000 records)
         static void SweepList<T>(List<T> list, int bit) where T : NObject
         {

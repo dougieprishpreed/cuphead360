@@ -1836,6 +1836,7 @@ void Renderer::start_loader() {
     }
     g_load_reader = ch360_pack_reader_new();
     if (!g_load_reader) return;
+    ch360_pack_clock = now_ms;   // the loader's drive and decode times, per scene (HOST texture waits)
     pthread_t th;
     g_loader = pthread_create(&th, NULL, texture_loader, NULL) == 0;
     logf("textures: %s", g_loader ? "read and decoded on hardware thread 2" : "loader thread failed: loaded on the game thread");
@@ -3156,9 +3157,19 @@ extern "C" void ch360_plat_host_stats(unsigned* out, int n) {
     for (int i = 0; i < n && i < CH360_HOST_STATS; ++i) out[i] = v[i] < 0 ? 0 : v[i] > 4294967295.0 ? 0xFFFFFFFFu : (unsigned)v[i];
     memset(&s, 0, sizeof(s));
     Renderer::WaitCauses& w = g_renderer->waits_;
+    // the loader since the last line: what it read from the drive and how fast, and its decoding time
+    static double read0 = 0, dec0 = 0;
+    static unsigned long long bytes0 = 0;
+    double rd = ch360_pack_read_ms - read0, dc = ch360_pack_decode_ms - dec0;
+    unsigned long long by = ch360_pack_read_bytes - bytes0;
+    read0 = ch360_pack_read_ms;
+    dec0 = ch360_pack_decode_ms;
+    bytes0 = ch360_pack_read_bytes;
     logf("HOST texture waits: %u never asked ahead, %u asked and held back, %u asked and still being read, %u let go before; "
          "the read-ahead held back by memory in %u frames (%u MB free at the least); pages decoded from their kept stored bytes %u, "
-         "from the drive %u", w.never, w.queued, w.reading, w.let_go, w.held_frames, w.held_low_mb, w.from_memory, w.from_drive);
+         "from the drive %u; the loader read %u MB in %u ms (%u MB/s), decoded in %u ms",
+         w.never, w.queued, w.reading, w.let_go, w.held_frames, w.held_low_mb, w.from_memory, w.from_drive,
+         (unsigned)(by >> 20), (unsigned)rd, rd > 0 ? (unsigned)((double)by / rd / 1048.576) : 0u, (unsigned)dc);
     memset(&w, 0, sizeof(w));
 }
 

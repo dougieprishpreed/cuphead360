@@ -80,10 +80,22 @@ namespace Cuphead360.Player
             }
         }
 
+        string botScene;
+
         public InputFrame Step(int fr)
         {
             frame = fr;
             frameLive.Clear();   // the last step's objects: kept, they held destroyed scenes in heap dumps
+            // A new scene: the level the bot tracked and the positions it kept go (they held the level left, and with it
+            // its prefabs and their converted files, in the PC's heap dumps: a test's leak, not the game's).
+            var sceneNow = Cuphead360.Engine.Scenes.Active?.Name;
+            if (sceneNow != botScene)
+            {
+                botScene = sceneNow;
+                trackedLevel = props = timeline = null;
+                forceLevel = null;
+                lastPos.Clear();
+            }
             var p = f.Pads[0];
             p.Connected = true; p.Buttons = 0; p.LX = p.LY = p.RX = p.RY = p.LT = p.RT = 0;
             if (index < 0) Next("start");

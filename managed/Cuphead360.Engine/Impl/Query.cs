@@ -122,23 +122,34 @@ namespace Cuphead360.Engine
             return arr;
         }
 
+        // The lists walked in place and the matches gathered in one list reused: FindObjectOfType (Unity's: the first of
+        // FindObjectsOfType) copied every behaviour into a new array each call, and the run-and-gun levels' parallax layers
+        // call it every frame (PlatformingLevelParallax.UpdatePosition: ~7 MB of a short Forest Follies play on the PC,
+        // the young collections' garbage). Nothing in the walk runs game code or changes the lists.
+        static readonly List<UObject> found = new List<UObject>();
+
         public static UObject[] ObjectsOfType(Type type, bool includeAssets)
         {
-            var result = new List<UObject>();
-            IEnumerable<NObject> pool = typeof(MonoBehaviour).IsAssignableFrom(type) ? Typed.Behaviours.ToArray()
-                : type == typeof(GameObject) ? Typed.GameObjects.ToArray() : Objects.Live();
-            foreach (var o in pool)
-            {
-                if (!type.IsInstanceOfType(o.Managed)) continue;
-                var go = o as NGameObject ?? (o as NComponent)?.GameObject;
-                if (go == null) { if (includeAssets || !o.Persistent) result.Add(o.Managed); continue; }
-                if (!includeAssets && !go.ActiveInHierarchy) continue;   // FindObjectsOfType skips inactive objects
-                if (o is NComponent c && !(o is NTransform) && o is NBehaviour b && !includeAssets && !b.Enabled) { result.Add(o.Managed); continue; }
-                result.Add(o.Managed);
-            }
+            var result = found;
+            result.Clear();
+            if (typeof(MonoBehaviour).IsAssignableFrom(type)) { var l = Typed.Behaviours; for (int i = 0; i < l.Count; i++) Match(l[i], type, includeAssets, result); }
+            else if (type == typeof(GameObject)) { var l = Typed.GameObjects; for (int i = 0; i < l.Count; i++) Match(l[i], type, includeAssets, result); }
+            else foreach (var o in Objects.Live()) Match(o, type, includeAssets, result);
             var arr = (UObject[])Array.CreateInstance(type, result.Count);
             for (int i = 0; i < result.Count; i++) arr[i] = result[i];
+            result.Clear();
             return arr;
+        }
+
+        static void Match(NObject o, Type type, bool includeAssets, List<UObject> result)
+        {
+            {
+                if (o == null || o.Destroyed || !type.IsInstanceOfType(o.Managed)) return;
+                var go = o as NGameObject ?? (o as NComponent)?.GameObject;
+                if (go == null) { if (includeAssets || !o.Persistent) result.Add(o.Managed); return; }
+                if (!includeAssets && !go.ActiveInHierarchy) return;   // FindObjectsOfType skips inactive objects
+                result.Add(o.Managed);
+            }
         }
 
         public static GameObject[] WithTag(string tag, bool first)

@@ -213,6 +213,10 @@ int ch360_pack_find(int pack, const char* key, size_t len, ch360_pack_entry* out
 typedef struct ch360_pack_reader ch360_pack_reader;
 ch360_pack_reader* ch360_pack_reader_new(void);
 int ch360_pack_read_with(ch360_pack_reader* r, const ch360_pack_entry* e, unsigned from, void* dst, unsigned n);
+/* The texture loader's reads through ch360_pack_read_with: drive time, bytes, decode time (a clock the host sets). */
+extern double (*ch360_pack_clock)(void);
+extern double ch360_pack_read_ms, ch360_pack_decode_ms;
+extern unsigned long long ch360_pack_read_bytes;
 /* The entry's bytes as stored (e->stored of them: its LZ4 chunks and their table) into dst; 0 on success. */
 int ch360_pack_read_stored(const ch360_pack_entry* e, void* dst);
 /* Bytes from..from+n of the entry out of a copy of its stored bytes (ch360_pack_read_stored) in memory,

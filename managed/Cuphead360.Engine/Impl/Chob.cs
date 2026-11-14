@@ -634,6 +634,12 @@ namespace Cuphead360.Engine
             public int I32() => (int)U32();
             public long I64() { ulong lo = U32(), hi = U32(); return (long)(lo | (hi << 32)); }
             public string Str() { int n = (int)U32(); var s = Encoding.UTF8.GetString(d, p, n); p += n; return s; }
+            // Shared boxes for the values parsed most (boxes can't change): the trees' boxed numbers were ~6 MB of the
+            // 72 MB an activation's instantiations allocated on the PC (dotnet-trace's allocation ticks).
+            static readonly object[] SmallLongs = MakeSmallLongs();
+            static object[] MakeSmallLongs() { var a = new object[1152]; for (int i = 0; i < a.Length; i++) a[i] = (long)(i - 128); return a; }
+            static readonly object FloatZero = 0f, FloatOne = 1f, FloatMinusOne = -1f, FloatHalf = 0.5f;
+
             public object Value()
             {
                 byte tag = d[p++];
@@ -646,9 +652,21 @@ namespace Cuphead360.Engine
                         {
                             ulong z = 0; int shift = 0; byte b;
                             do { b = d[p++]; z |= (ulong)(b & 0x7F) << shift; shift += 7; } while ((b & 0x80) != 0);
-                            return (long)(z >> 1) ^ -(long)(z & 1);
+                            long v = (long)(z >> 1) ^ -(long)(z & 1);
+                            return v >= -128 && v < 1024 ? SmallLongs[v + 128] : v;
                         }
-                    case 4: { float f = BitConverter.Int32BitsToSingle(I32()); return f; }
+                    case 4:
+                        {
+                            int bits = I32();
+                            switch (bits)
+                            {
+                                case 0: return FloatZero;
+                                case 0x3F800000: return FloatOne;
+                                case unchecked((int)0xBF800000): return FloatMinusOne;
+                                case 0x3F000000: return FloatHalf;
+                            }
+                            return BitConverter.Int32BitsToSingle(bits);
+                        }
                     case 5: { double v = BitConverter.Int64BitsToDouble(I64()); return v; }
                     case 6: return Str();
                     case 7:

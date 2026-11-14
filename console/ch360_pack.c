@@ -298,6 +298,12 @@ int ch360_pack_read(const ch360_pack_entry* e, unsigned from, void* dst_v, unsig
     return ch360_pack_read_with(&default_reader, e, from, dst_v, n);
 }
 
+/* The texture loader's reads (ch360_pack_read_with): time in the drive's reads, bytes read, time decoding (the host
+ * sets the clock; its log shows them per scene, to see whether reading and decoding should overlap). */
+double (*ch360_pack_clock)(void) = NULL;
+double ch360_pack_read_ms = 0, ch360_pack_decode_ms = 0;
+unsigned long long ch360_pack_read_bytes = 0;
+
 int ch360_pack_read_with(ch360_pack_reader* r, const ch360_pack_entry* e, unsigned from, void* dst_v, unsigned n) {
     unsigned char* dst = (unsigned char*)dst_v;
     unsigned k, last;
@@ -320,12 +326,19 @@ int ch360_pack_read_with(ch360_pack_reader* r, const ch360_pack_entry* e, unsign
         if (bytes > PACK_IN) return -1;
         if (!(r->chunk_file == e->file && r->chunk_entry == e->offset && r->chunk_index == k && run == 1 &&
               !(k * PACK_CHUNK >= from && (k + 1) * PACK_CHUNK <= from + n)))
+        {
+            double t0 = ch360_pack_clock ? ch360_pack_clock() : 0;
             if (read_at(files[e->file].f, e->offset + table[r->table_chunks + k], in_buf, bytes) != 0) return -1;
+            if (ch360_pack_clock) ch360_pack_read_ms += ch360_pack_clock() - t0;
+            ch360_pack_read_bytes += bytes;
+        }
         for (j = 0; j < run; j++, k++) {
             unsigned c0 = k * PACK_CHUNK, len = e->size - c0 < PACK_CHUNK ? e->size - c0 : PACK_CHUNK;
             unsigned lo = from > c0 ? from - c0 : 0, hi = from + n - c0 < len ? from + n - c0 : len;
+            double d0 = ch360_pack_clock ? ch360_pack_clock() : 0;
             if (lo == 0 && hi == len) {
                 if (ch360_lz4_decode(in_buf + pos, table[k], dst + (c0 - from), len) != (int)len) return -1;
+                if (ch360_pack_clock) ch360_pack_decode_ms += ch360_pack_clock() - d0;
             } else {
                 if (!(r->chunk_file == e->file && r->chunk_entry == e->offset && r->chunk_index == k)) {
                     r->chunk_file = -1;
