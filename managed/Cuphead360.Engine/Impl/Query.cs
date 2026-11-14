@@ -220,6 +220,7 @@ namespace Cuphead360.Engine
     {
         /// <summary>Instantiate calls, objects copied, and the time making the copies and copying their state (the scene timing lines).</summary>
         public static long Calls, Copied, TreeTicks, FieldTicks;
+        static readonly bool traceAct = Environment.GetEnvironmentVariable("CH360_TRACE_ACT") == "1";
 
         public static UObject Instantiate(UObject original, NTransform parent, bool worldPositionStays, Vector3? pos, Quaternion? rot)
         {
@@ -229,7 +230,12 @@ namespace Cuphead360.Engine
             if (srcGo == null) return CloneAsset(src);
 
             Calls++;
-            SceneLoader.HeapCheck();   // a scene's activation: its heap kept under the load's cap
+            SceneLoader.HeapCheck(srcGo.Name);   // a scene's activation: its heap measured (and kept under the load's cap)
+            // CH360_TRACE_ACT=1 (a PC check): each instantiation in an activation, what each of its steps allocated and what
+            // stayed alive after it (a full collection before each measure; slow).
+            bool trace = traceAct && SceneLoader.Activating;
+            long a0 = 0, l0 = 0, a1 = 0, l1 = 0, a2 = 0, l2 = 0;
+            if (trace) { a0 = GC.GetAllocatedBytesForCurrentThread(); l0 = GC.GetTotalMemory(true); }
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             var map = new Dictionary<NObject, NObject>();
             var srcLayout = NRectTransform.Snapshot(srcGo.Transform);
@@ -237,6 +243,7 @@ namespace Cuphead360.Engine
             root.GameObject.Name = srcGo.Name + "(Clone)";
             foreach (var c in root.GameObject.Components) c.Name = root.GameObject.Name;
             long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (trace) { a1 = GC.GetAllocatedBytesForCurrentThread(); l1 = GC.GetTotalMemory(true); }
             // Remap references to objects inside the copied hierarchy.
             foreach (var kv in map)
                 if (kv.Key is NComponent sc && kv.Value is NComponent dc)
@@ -245,6 +252,7 @@ namespace Cuphead360.Engine
                     else Builtins.CopyState(sc, dc, map);
                 }
             long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (trace) { a2 = GC.GetAllocatedBytesForCurrentThread(); l2 = GC.GetTotalMemory(true); }
             Copied += map.Count;
             TreeTicks += t1 - t0;
             FieldTicks += t2 - t1;
@@ -280,6 +288,13 @@ namespace Cuphead360.Engine
             rt.Invalidate();
             // Lifecycle of the copy: Awake/OnEnable for active objects, now.
             if (rt.GameObject.ActiveInHierarchy) Lifecycle.ActivateTreeNew(rt);
+            if (trace)
+            {
+                long a3 = GC.GetAllocatedBytesForCurrentThread(), l3 = GC.GetTotalMemory(true);
+                double M(long x) => x / 1048576.0;
+                Log.Line($"ACT {srcGo.Name}: {map.Count} objects; copies allocated {M(a1 - a0):0.0} MB, alive {M(l1 - l0):+0.0;-0.0} MB; "
+                    + $"fields {M(a2 - a1):0.0}, alive {M(l2 - l1):+0.0;-0.0}; Awake and OnEnable {M(a3 - a2):0.0}, alive {M(l3 - l2):+0.0;-0.0}");
+            }
             var result = map[src];
             return result.Managed;
         }

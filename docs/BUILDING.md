@@ -306,6 +306,16 @@ the frames through a model of the console's texture memory and loader and
 prints the frames that would wait, for a room you choose (`--decoded`),
 the locked 30 (`--hz 30 --every 2`) and other settings.
 
+The console reads textures ahead by what each level drew before: it keeps,
+per scene, the textures in the order its plays first drew them
+(`learned/<scene>.txt` next to `default.xex`, updated as you play) and asks
+for the next few while you play. Its starting lists come from
+`python tools/learned_lists.py --jobs 5`, which plays every level and scene
+with the bot on the PC host (every boss state, then the results screen) and
+writes them to `work/console/learned`; `tools/stage_console.py` copies them
+into `GameData/learned`. Delete the `learned` folder next to the XEX to start
+over from the shipped lists.
+
 ## After an update
 
 After `git pull` in `cuphead360` (and in `spire360`):

@@ -59,6 +59,19 @@ namespace Cuphead360.Engine
         /// <summary>Estimated bytes of parsed trees kept before the oldest are dropped (the console host sets it).</summary>
         public static long TreeBudget = long.TryParse(Environment.GetEnvironmentVariable("CH360_TREE_BUDGET_MB"), out var mb) ? mb << 20 : long.MaxValue;
         public static int TreesDropped, TreesReparsed;
+        /// <summary>
+        /// While a scene is built or activated (SceneLoad sets it): every DropCollectBytes of parsed trees let go by the
+        /// budget, a full collection. A tree kept in the cache lives through the young collections into the oldest
+        /// generation, and let go it stays until a full one: a load let 20-30 MB of them pile up (the map's activation
+        /// 53 -> 81 MB on the PC, its unload pass back to 48; Map_UI's Awake allocated 11.7 MB and kept 1.8, most of it
+        /// clip and sprite trees), and the console's player memory steps up 16 MB for good at such a peak.
+        /// CH360_DROP_COLLECT_MB (0: never).
+        /// </summary>
+        public static bool LoadPhase;
+        public static long DropCollectBytes = (long.TryParse(Environment.GetEnvironmentVariable("CH360_DROP_COLLECT_MB"), out var dc) ? dc : 16) << 20;
+        public static int DropCollects;
+        public static long DropCollectTicks;
+        static long droppedSince;
 
         public object Tree
         {
@@ -111,6 +124,14 @@ namespace Cuphead360.Engine
                     }
                     Data = null; Strings = null; DiskPath = null;
                     if (budgeted && treeBytes > TreeBudget) Trim(this);
+                    if (LoadPhase && DropCollectBytes > 0 && droppedSince >= DropCollectBytes)
+                    {
+                        droppedSince = 0;
+                        long c0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                        GC.Collect();
+                        DropCollectTicks += System.Diagnostics.Stopwatch.GetTimestamp() - c0;
+                        DropCollects++;
+                    }
                 }
                 return tree;
             }
@@ -161,6 +182,7 @@ namespace Cuphead360.Engine
                 o.DiskPath = o.File.SourcePath;
                 o.Data = null;
                 treeBytes -= o.cost;
+                droppedSince += o.cost;
                 TreesDropped++;
             }
             cached.RemoveRange(0, i);

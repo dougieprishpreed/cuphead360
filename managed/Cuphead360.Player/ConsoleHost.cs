@@ -46,6 +46,8 @@ namespace Cuphead360.Player
         static extern void TexturePrefetch(int id);
         [DllImport("ch360", EntryPoint = "texture_ahead"), WasmImportLinkage]
         static extern void TextureAhead(int id, float u0, float v0, float u1, float v1);
+        [DllImport("ch360", EntryPoint = "textures_level"), WasmImportLinkage]
+        static extern void TexturesLevel(byte* name, int length);
         [DllImport("ch360", EntryPoint = "texture_guess"), WasmImportLinkage]
         static extern void TextureGuess(int id, float u0, float v0, float u1, float v1);
         [DllImport("ch360", EntryPoint = "textures_pending"), WasmImportLinkage]
@@ -432,6 +434,12 @@ namespace Cuphead360.Player
             // A load's last step waits under the hourglass for the pages it read ahead (SceneLoad, RenderList.ReadAheadLoad).
             RenderList.TexturesPending = () => TexturesPending();
             RenderList.SceneReadAhead = begin => TexturesScene(begin ? 1 : 0);
+            // A scene activated: the host's learned read-ahead (each scene's pages in the order its plays drew them).
+            Cuphead360.Engine.SceneLoader.Activated = name =>
+            {
+                var b = Encoding.UTF8.GetBytes(name ?? "");
+                fixed (byte* p = b) TexturesLevel(p, b.Length);
+            };
             // An atlas the game loads: its pages read ahead (the boot's preload of the title's atlases readies the logo).
             Atlases.Prefetch = src => TexturePrefetch(FileTextureId(src));
             // Sprites near the view and the clips those on screen play: their pages read ahead (converted ones only).

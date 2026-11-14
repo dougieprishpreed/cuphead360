@@ -251,6 +251,37 @@ static int new_plat(void) {
     return next_plat++;
 }
 
+/* Each platform id's name as the host was given it (the learned read-ahead records drawn pages by name). */
+static const char** plat_names;
+static unsigned plat_names_cap;
+
+static void name_plat(int id, const char* name, int copy) {
+    if (id >= 0) {
+        if ((unsigned)id >= plat_names_cap) {
+            unsigned c = plat_names_cap ? plat_names_cap : 256;
+            const char** b;
+            while (c <= (unsigned)id) c *= 2;
+            b = (const char**)realloc((void*)plat_names, c * sizeof(const char*));
+            if (b != NULL) {
+                memset((void*)(b + plat_names_cap), 0, (c - plat_names_cap) * sizeof(const char*));
+                plat_names = b;
+                plat_names_cap = c;
+            }
+        }
+        if ((unsigned)id < plat_names_cap) {
+            if (copy) {
+                size_t n = strlen(name);
+                char* d = (char*)malloc(n + 1);
+                if (d != NULL) memcpy(d, name, n + 1);
+                plat_names[id] = d;
+            } else {
+                plat_names[id] = name;
+            }
+        }
+    }
+    ch360_plat_texture_file(id, name);
+}
+
 static int plat_id(int player_id) {
     if (player_id < 0 || !grow_ints(&plat_of_player, &player_cap, (unsigned)player_id + 1, -1)) return -1;
     if (plat_of_player[player_id] < 0) plat_of_player[player_id] = new_plat();
@@ -377,7 +408,7 @@ static void remap_prefetch(remap_page* p, int always) {
         if (rm_plat[t] < 0) {
             int id = rm_plat[t] = new_plat();
             if (id < 0) return;
-            ch360_plat_texture_file(id, rm_strings + rm_names[t]);
+            name_plat(id, rm_strings + rm_names[t], 0);
         }
         ch360_plat_texture_prefetch(rm_plat[t], 0);
     }
@@ -431,7 +462,7 @@ static int remap_target_id(remap_page* p, const remap_box* b) {
     if (id < 0 && b->target < rm_target_count) {
         id = rm_plat[b->target] = new_plat();
         if (id >= 0) {
-            ch360_plat_texture_file(id, rm_strings + rm_names[b->target]);
+            name_plat(id, rm_strings + rm_names[b->target], 0);
             remap_prefetch(p, 0);
         }
     }
@@ -857,6 +888,211 @@ void i5_ch36014_loadingX5Fscreen(wasmModuleInstance* inst, U32 on) {
     draw_loading = on;
 }
 
+/* ---- learned read-ahead ----
+ * Each scene's textures in the order its plays first drew them (play frames from its start): <root>/learned/<scene>.txt,
+ * written as the scene ends, merged with what was there (a page's earliest frame kept); at first GameData/learned/
+ * (the PC's bot plays, tools/learned_lists.py). While the scene plays, the LEARN_AHEAD pages after the furthest one it
+ * has drawn are asked for: a boss's next form, a spawn's first frames, the run-and-gun level's next stretch came with no
+ * read-ahead, each first draw a 50-300 ms wait on the console. tools/texture_cache_sim.py, learned from one PC play and
+ * tried on another: Forest Follies 12 -> 4 frames late, Treetop 10 -> 4, Hilda Berg 58 -> 41 (more pages ahead
+ * cost more than they saved). */
+#ifdef _WIN32
+#include <direct.h>
+#define learn_mkdir(p) _mkdir(p)
+#else
+#include <sys/stat.h>
+#define learn_mkdir(p) mkdir(p, 0777)
+#endif
+#define LEARN_AHEAD 4
+#define LEARN_MAX 4096
+typedef struct learned_page {
+    unsigned frame;
+    char* key;
+    int id;
+} learned_page;
+static learned_page learned[LEARN_MAX];
+static unsigned learned_n, learned_loaded;   /* entries, those read at the scene's start (in frame order) */
+static int* plat_learned;                    /* platform id -> learned index + 1 */
+static unsigned plat_learned_cap;
+static unsigned char* plat_seen;             /* drawn in this visit */
+static unsigned plat_seen_cap;
+static unsigned learn_frame, learn_dirty, learn_asks;
+static int learn_far = -1;
+static char learn_scene[128];
+static char learn_root[512];
+static unsigned* rm_by_name;
+static unsigned rm_by_name_size;
+
+static unsigned learn_hash(const char* k) {
+    unsigned h = 2166136261u;
+    while (*k) h = (h ^ (unsigned char)*k++) * 16777619u;
+    return h;
+}
+
+/* The platform id of a texture by its name: a sprite page (named to the host now if it wasn't) or one already named;
+ * -1 if neither. */
+static int learn_id_of(const char* key) {
+    unsigned h, t, i;
+    if (rm_target_count > 0 && rm_by_name == NULL) {
+        unsigned size = 1;
+        while (size < rm_target_count * 2 + 2) size <<= 1;
+        rm_by_name = (unsigned*)calloc(size, sizeof(unsigned));
+        if (rm_by_name != NULL) {
+            rm_by_name_size = size;
+            for (i = 0; i < rm_target_count; i++) {
+                h = learn_hash(rm_strings + rm_names[i]) & (size - 1);
+                while (rm_by_name[h]) h = (h + 1) & (size - 1);
+                rm_by_name[h] = i + 1;
+            }
+        }
+    }
+    if (rm_by_name != NULL)
+        for (h = learn_hash(key) & (rm_by_name_size - 1); (t = rm_by_name[h]) != 0; h = (h + 1) & (rm_by_name_size - 1))
+            if (strcmp(rm_strings + rm_names[t - 1], key) == 0) {
+                int id = rm_plat[t - 1];
+                if (id < 0) {
+                    id = rm_plat[t - 1] = new_plat();
+                    if (id >= 0) name_plat(id, rm_strings + rm_names[t - 1], 0);
+                }
+                return id;
+            }
+    for (i = 0; i < plat_names_cap; i++)
+        if (plat_names[i] != NULL && strcmp(plat_names[i], key) == 0) return (int)i;
+    return -1;
+}
+
+static int learn_grow(void** p, unsigned* cap, unsigned need, size_t size) {
+    unsigned c = *cap ? *cap : 256;
+    void* b;
+    if (need <= *cap) return 1;
+    while (c < need) c *= 2;
+    b = realloc(*p, (size_t)c * size);
+    if (b == NULL) return 0;
+    memset((char*)b + (size_t)*cap * size, 0, (size_t)(c - *cap) * size);
+    *p = b;
+    *cap = c;
+    return 1;
+}
+
+static int learn_by_frame(const void* a, const void* b) {
+    unsigned fa = ((const learned_page*)a)->frame, fb = ((const learned_page*)b)->frame;
+    return fa < fb ? -1 : fa > fb;
+}
+
+/* The scene's list written (if this visit taught it anything), then forgotten. */
+static void learn_save(void) {
+    char path[768];
+    FILE* f;
+    unsigned i;
+    if (learn_scene[0] && learn_dirty && learned_n > 0) {
+        qsort(learned, learned_n, sizeof(learned[0]), learn_by_frame);
+        snprintf(path, sizeof(path), "%s/learned", learn_root);
+        learn_mkdir(path);
+        snprintf(path, sizeof(path), "%s/learned/%s.txt", learn_root, learn_scene);
+        f = fopen(path, "wb");
+        if (f != NULL) {
+            for (i = 0; i < learned_n; i++) fprintf(f, "%u %s\n", learned[i].frame, learned[i].key);
+            fclose(f);
+        }
+    }
+    for (i = 0; i < learned_n; i++) {
+        free(learned[i].key);
+        if (learned[i].id >= 0 && (unsigned)learned[i].id < plat_learned_cap) plat_learned[learned[i].id] = 0;
+    }
+    learned_n = learned_loaded = 0;
+    if (plat_seen != NULL) memset(plat_seen, 0, plat_seen_cap);
+    learn_scene[0] = 0;
+    learn_dirty = 0;
+}
+
+static void learn_add(unsigned frame, const char* key, int id) {
+    size_t n;
+    if (learned_n >= LEARN_MAX) return;
+    n = strlen(key);
+    learned[learned_n].key = (char*)malloc(n + 1);
+    if (learned[learned_n].key == NULL) return;
+    memcpy(learned[learned_n].key, key, n + 1);
+    learned[learned_n].frame = frame;
+    learned[learned_n].id = id;
+    if (id >= 0 && learn_grow((void**)&plat_learned, &plat_learned_cap, (unsigned)id + 1, sizeof(int))) plat_learned[id] = (int)learned_n + 1;
+    learned_n++;
+}
+
+/* A scene begins (SceneLoad's activation): the last one's list saved, this one's read. */
+static void learn_begin(const char* scene) {
+    char path[768], line[512];
+    FILE* f;
+    unsigned frame;
+    learn_save();
+    learn_frame = 0;
+    learn_far = -1;
+    learn_asks = 0;
+    if (scene == NULL || !scene[0] || strcmp(scene, "scene_load_helper") == 0 || strlen(scene) >= sizeof(learn_scene)) return;
+    strcpy(learn_scene, scene);
+    snprintf(path, sizeof(path), "%s/learned/%s.txt", learn_root, scene);
+    f = fopen(path, "rb");
+    if (f == NULL) {
+        snprintf(path, sizeof(path), "%s/GameData/learned/%s.txt", learn_root, scene);
+        f = fopen(path, "rb");
+    }
+    if (f != NULL) {
+        while (fgets(line, sizeof(line), f) != NULL) {
+            char* sp = strchr(line, ' ');
+            size_t n;
+            if (sp == NULL) continue;
+            *sp = 0;
+            frame = (unsigned)strtoul(line, NULL, 10);
+            n = strlen(sp + 1);
+            while (n > 0 && (sp[n] == '\n' || sp[n] == '\r')) sp[n--] = 0;
+            if (sp[1]) learn_add(frame, sp + 1, learn_id_of(sp + 1));
+        }
+        fclose(f);
+    }
+    learned_loaded = learned_n;
+}
+
+/* A game frame drawn (not the loading screen): what it drew first in this visit learned, the pages ahead asked for. */
+static void learn_drawn(void) {
+    unsigned i, k;
+    if (!learn_scene[0]) return;
+    for (i = 0; i < draw_item_count; i++) {
+        int id = draw_items[i].texture, n;
+        if (id < 0 || (unsigned)id >= plat_names_cap || plat_names[id] == NULL) continue;
+        if (!learn_grow((void**)&plat_seen, &plat_seen_cap, (unsigned)id + 1, 1)) continue;
+        n = (unsigned)id < plat_learned_cap ? plat_learned[id] - 1 : -1;
+        if (!plat_seen[id]) {
+            plat_seen[id] = 1;
+            if (n < 0) {
+                learn_add(learn_frame, plat_names[id], id);
+                learn_dirty = 1;
+            } else if (learned[n].frame > learn_frame) {
+                learned[n].frame = learn_frame;
+                learn_dirty = 1;
+            }
+        }
+        if (n >= 0 && (unsigned)n < learned_loaded && n > learn_far) learn_far = n;
+    }
+    for (k = (unsigned)(learn_far + 1); k < learned_loaded && k <= (unsigned)(learn_far + LEARN_AHEAD); k++)
+        if (learned[k].id >= 0) {
+            ch360_plat_texture_prefetch(learned[k].id, 1);
+            learn_asks++;
+        }
+    learn_frame++;
+}
+
+/* A scene activated (SceneLoad, ConsoleHost): its learned read-ahead begins. */
+void i5_ch36014_texturesX5Flevel(wasmModuleInstance* inst, U32 name, U32 len) {
+    char scene[128];
+    (void)inst;
+    if (len == 0 || len >= sizeof(scene) || !srt_mem_ok(name, len)) {
+        learn_begin(NULL);
+        return;
+    }
+    memcpy(scene, srt_mem_ptr(name), len);
+    scene[len] = 0;
+    learn_begin(scene);
+}
+
 void i5_ch3608_drawX5Fend(wasmModuleInstance* inst) {
     ch360_frame f;
     (void)inst;
@@ -869,6 +1105,7 @@ void i5_ch3608_drawX5Fend(wasmModuleInstance* inst) {
     f.vertex_count = draw_vert_count;
     f.build_ms = draw_build_ms;
     ch360_plat_draw(&f);
+    if (f.loading == 0) learn_drawn();
     /* the shifts cover every item (the submit path's items have none: none moved) */
     if (draw_tween && f.loading == 0 && draw_grow((void**)&draw_shift, &draw_shift_cap, draw_item_count + 1, 2 * sizeof(float))) {
         unsigned i;
@@ -957,7 +1194,7 @@ void i5_ch36012_textureX5Ffile(wasmModuleInstance* inst, U32 id, U32 key, U32 le
         int p = plat_id((int)id), page = remap_page_of(name, len);
         if (p < 0) return;
         page_of_plat[p] = page + 1;
-        ch360_plat_texture_file(p, name);
+        name_plat(p, name, 1);
     }
 }
 
@@ -1035,7 +1272,7 @@ void i5_ch36013_textureX5Fguess(wasmModuleInstance* inst, U32 id, F32 u0, F32 v0
         int t = b->target < rm_target_count ? rm_plat[b->target] : -1;
         if (t < 0 && b->target < rm_target_count) {
             t = rm_plat[b->target] = new_plat();
-            if (t >= 0) ch360_plat_texture_file(t, rm_strings + rm_names[b->target]);
+            if (t >= 0) name_plat(t, rm_strings + rm_names[b->target], 0);
         }
         if (t >= 0) ch360_plat_texture_guess(t);
     }
@@ -1112,6 +1349,7 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
     srt_config cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.root_dir = root_dir;
+    snprintf(learn_root, sizeof(learn_root), "%s", root_dir ? root_dir : ".");
     ch360_ogg_root(root_dir);
     cfg.argc = argc;
     cfg.argv = argv;
@@ -1172,6 +1410,7 @@ int ch360_start(unsigned stack_mb, int hw_thread) {
     }
     code = srt_guest_join();
     drain_stdout();
+    learn_save();   /* the scene played last: its learned list written too (a PC run that ends in a level) */
     return code;
 }
 

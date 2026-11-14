@@ -32,12 +32,38 @@ namespace Cuphead360.Engine
         /// back to 50), above any level build's, and the thirty-eighth run's player grew 135 -> 151 MB at one.
         /// </summary>
         static bool activating;
-        static long actCap, actMs, actPeak;
+        internal static bool Activating => activating;
+        static long actCap, actMs, actPeak, actLast;
         static int actCollects;
-        internal static void HeapCheck()
+        static string actLastName;
+        static readonly Dictionary<string, long> actGrowth = new Dictionary<string, long>();
+        /// <summary>A scene activated (its name): the console host's learned read-ahead begins for it.</summary>
+        public static Action<string> Activated;
+
+        // The heap's growth since the last instantiation (or the activation's start), put to that one's name: what an
+        // activation's peak is made of (the map's went 50 -> 76-80 MB, the unload pass back to 50).
+        static void ActGrowth(long h, string next)
+        {
+            if (actLastName != null && h > actLast) actGrowth[actLastName] = (actGrowth.TryGetValue(actLastName, out var g) ? g : 0) + (h - actLast);
+            actLast = h;
+            actLastName = next;
+        }
+
+        static string ActGrowthTop()
+        {
+            var list = new List<KeyValuePair<string, long>>(actGrowth);
+            list.Sort((x, y) => y.Value.CompareTo(x.Value));
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < list.Count && i < 6; i++)
+                sb.Append(i > 0 ? ", " : "").Append(list[i].Key).Append(" +").Append((list[i].Value / 1048576.0).ToString("0.0")).Append(" MB");
+            return sb.ToString();
+        }
+
+        internal static void HeapCheck(string name = null)
         {
             if (!activating) return;
             long h = GC.GetTotalMemory(false);
+            ActGrowth(h, name ?? "?");
             if (h > actPeak) actPeak = h;
             if (!MidLoadCollect || LoadHeapCap <= 0 || h < actCap) return;
             long c0 = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -81,7 +107,8 @@ namespace Cuphead360.Engine
             SceneBuild build;
             List<ChobObject> gameObjects;
             int stage, next, frames, warmed0, prepBest, prepSprites, prepClips, prepLeft, capCollects;
-            long t0, tWarm, tPrep, tReady, files0, bytes0, prepAt, heap0, collectMs, heapBefore, heapAfter, capNow, capMs, heapPeak;
+            long t0, tWarm, tPrep, tReady, files0, bytes0, prepAt, heap0, collectMs, heapBefore, heapAfter, capNow, capMs, heapPeak, dropT0;
+            int dropC0;
 
             public static SceneLoad Begin(int index, bool additive)
             {
@@ -92,11 +119,20 @@ namespace Cuphead360.Engine
                 l.files0 = ChobFile.LoadedFiles;
                 l.bytes0 = ChobFile.LoadedBytes;
                 l.heap0 = GC.GetTotalMemory(false);
+                l.dropC0 = ChobObject.DropCollects;
+                l.dropT0 = ChobObject.DropCollectTicks;
                 return l;
             }
 
             /// <summary>Builds until done (true) or until ms have gone by (false: more next frame).</summary>
             public bool Step(int ms)
+            {
+                ChobObject.LoadPhase = true;
+                try { return StepCore(ms); }
+                finally { ChobObject.LoadPhase = false; }
+            }
+
+            bool StepCore(int ms)
             {
                 long hz = System.Diagnostics.Stopwatch.Frequency;
                 long deadline = ms <= 0 ? long.MaxValue : System.Diagnostics.Stopwatch.GetTimestamp() + ms * hz / 1000;
@@ -223,10 +259,18 @@ namespace Cuphead360.Engine
             {
                 if (stage == 9) return;
                 activating = true;
+                ChobObject.LoadPhase = true;
+                int dc0 = ChobObject.DropCollects;
+                long dt0 = ChobObject.DropCollectTicks;
                 actCap = LoadHeapCap;
                 actMs = actPeak = 0;
                 actCollects = 0;
+                actGrowth.Clear();
+                actLast = GC.GetTotalMemory(false);
+                long actStart = actLast;
+                actLastName = "(unloading the old scene)";
                 if (!Additive) UnloadAll();
+                ActGrowth(GC.GetTotalMemory(false), "(Awake and OnEnable before any instantiation)");
                 scene.Building = false;
                 scene.Loaded = true;
                 if (!Additive) { Scenes.ActiveHandle = scene.Handle; Clock.TimeSinceLevelLoadBase = Clock.Time; }
@@ -236,7 +280,12 @@ namespace Cuphead360.Engine
                 long calls0 = Clone.Calls, copied0 = Clone.Copied, tree0 = Clone.TreeTicks, fields0 = Clone.FieldTicks;
                 long bind0 = Behaviours.BindTicks, objs0 = Behaviours.BoundObjects, thunks0 = Behaviours.BoundThunks;
                 build.Activate();
+                long actEnd = GC.GetTotalMemory(false);
+                ActGrowth(actEnd, null);
                 activating = false;
+                ChobObject.LoadPhase = false;
+                if (Timing) Log.Line($"SCENE {name} activation's heap: {actStart >> 20} -> {actEnd >> 20} MB (at most {Math.Max(actPeak, actEnd) >> 20}); grown by {ActGrowthTop()}"
+                    + $"; trees let go collected {ChobObject.DropCollects - dc0} times ({Ms(dt0, ChobObject.DropCollectTicks)} ms)");
                 if (!Additive) AssetUnload.SceneActivated(name);
                 if (Timing)
                 {
@@ -246,6 +295,7 @@ namespace Cuphead360.Engine
                         + (name.StartsWith("scene_level_") ? $" (and the stored bytes of {RenderList.Filled} sprites' pages)" : "")
                         + $" in {Ms(tPrep, tReady)} ms, {prepLeft} still coming; "
                         + (capCollects > 0 ? $"the heap kept near {LoadHeapCap >> 20} MB by {capCollects} collections in {capMs} ms, at most {heapPeak >> 20} MB; " : $"the heap at most {heapPeak >> 20} MB; ")
+                        + $"trees let go collected {ChobObject.DropCollects - dropC0} times in {Ms(dropT0, ChobObject.DropCollectTicks)} ms; "
                         + (collectMs > 0 ? $"the build's garbage collected while they were read: heap {heapBefore >> 20} -> {heapAfter >> 20} MB in {collectMs} ms), " : $"heap {heapBefore >> 20} MB before activation), ")
                         + $"activated in {Ms(t1, System.Diagnostics.Stopwatch.GetTimestamp())} ms "
                         + (actCollects > 0 ? $"(its heap kept near {LoadHeapCap >> 20} MB by {actCollects} collections in {actMs} ms, at most {actPeak >> 20} MB) " : $"(its heap at most {actPeak >> 20} MB) ")
@@ -253,6 +303,7 @@ namespace Cuphead360.Engine
                     MemoryLine();
                 }
                 AfterLoad(scene, Index, Additive);
+                if (!Additive) Activated?.Invoke(name);
             }
         }
         static readonly List<Pending> pending = new List<Pending>();

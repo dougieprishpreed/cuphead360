@@ -251,6 +251,11 @@ def main():
     packs = write_packs("CTEX", ctex, a.workers) + write_packs("AUDIO", audio, 1)
     plans = {"objects": plan(os.path.join(a.data, "objects"), (".chob", ".bin")),
              "": [(os.path.join(PACKS, f), f) for f in packs + [write_audio_info(audio)]]}
+    # Each level's sprite pages in first-draw order from the PC's bot plays (the console's learned read-ahead starts
+    # from these; it writes its own beside the XEX): work/console/learned, made by tools/learned_lists.py.
+    learned = os.path.join(ROOT, "work", "console", "learned")
+    if os.path.isdir(learned):
+        plans["learned"] = plan(learned, (".txt",))
     # The old layouts' textures and clips (staged names, loose files), and packs not written this time.
     removed = 0
     for sub in ("ctex", "audio"):

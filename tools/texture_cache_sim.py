@@ -111,6 +111,9 @@ class Sim:
         self.fill_seen = set()
         self.prefill = []
         self.prefill_set = set()
+        self.learned = []
+        self.win = 0
+        self.lk = -1
 
     def size_of(self, i):
         k = self.key.get(i)
@@ -332,8 +335,44 @@ class Sim:
                             self.st["prefilled"] += 1
                         self.prefill = []
                         self.prefill_set = set()
+                    if self.a.learn_prefill and self.learned:
+                        byk = {v: k for k, v in self.key.items()}
+                        for k2 in self.learned:
+                            i = byk.get(k2)
+                            if i is None or i in self.res:
+                                continue
+                            n = self.size_of(i)[1]
+                            if self.bytes + n > self.room:
+                                continue
+                            self.job_ms(i)
+                            self.res[i] = n
+                            self.res.move_to_end(i, last=False)
+                            self.bytes += n
+                            self.loaded_once.add(i)
+                            self.st["prefilled"] += 1
                     self.hold = False
                     loading = 1
+                if self.win and self.learned and not loading:
+                    if not hasattr(self, "lidx"):
+                        self.lidx = {k2: n for n, k2 in enumerate(self.learned)}
+                    for i in ids:
+                        n = self.lidx.get(self.key.get(i), -1)
+                        if n > self.lk:
+                            self.lk = n
+                    byk = getattr(self, "byk", None)
+                    if byk is None or len(byk) != len(self.key):
+                        byk = self.byk = {v: k for k, v in self.key.items()}
+                    for n in range(self.lk + 1, min(len(self.learned), self.lk + 1 + self.win)):
+                        i = byk.get(self.learned[n])
+                        if i is None or self.size_of(i) is None:
+                            continue
+                        if i in self.res:
+                            self.last[i] = max(self.last.get(i, -1), fr - 3)
+                        elif not self.busy(i) and i not in self.backset:
+                            self.last[i] = fr
+                            self.backlog.append(i)
+                            self.backset.add(i)
+                    self.feed()
                 t = self.draw(ids, now, loading)
                 if t > now and not loading:
                     self.waits.append((fr, t - now))
@@ -375,6 +414,11 @@ def main():
     ap.add_argument("--hitch", type=float, default=17.0)
     ap.add_argument("--ahead-age", type=int, default=180)
     ap.add_argument("--prefill", action="store_true", help="at a level's hold, decode its fill's pages (G lines, in order) into free room")
+    ap.add_argument("--learn", help="a trace of an earlier play of the level: its pages in first-draw order")
+    ap.add_argument("--learn-from", type=int, default=0)
+    ap.add_argument("--learn-to", type=int, default=1 << 30)
+    ap.add_argument("--window", type=int, nargs="+", default=[0], help="learned pages asked ahead of the furthest drawn (0: none)")
+    ap.add_argument("--learn-prefill", action="store_true", help="at the hold, the learned pages decoded in order into free room")
     ap.add_argument("--every", type=int, default=1, help="draw every nth traced frame (2: a 60 Hz trace played as the locked 30)")
     a = ap.parse_args()
     rows = pack_sizes()
@@ -396,15 +440,32 @@ def main():
         ev = [e for e in ev if e[0] != "F" or e[1] % a.every == 0]
     frames = sum(1 for e in ev if e[0] == "F" and not e[2])
     print("%d play frames" % frames)
+    learned = []
+    if a.learn:
+        lkeys, seen = {}, set()
+        for e in read_trace(a.learn, a.learn_from, a.learn_to) + [x for x in read_trace(a.learn, -1, -1) if x[0] == "K"]:
+            if e[0] == "K":
+                lkeys[e[1]] = e[2]
+        for e in read_trace(a.learn, a.learn_from, a.learn_to):
+            if e[0] == "F" and not e[2]:
+                for i in e[3]:
+                    k = lkeys.get(i)
+                    if k and k not in seen and sizes.get(k):
+                        seen.add(k)
+                        learned.append(k)
+        print("learned %d pages" % len(learned))
     for d in a.decoded:
+      for win in a.window:
         for s in a.stored:
             sim = Sim(a, sizes, d - s, s)
             sim.all_keys = {e[1]: e[2] for e in keys if e[0] == "K"}
+            sim.learned = learned
+            sim.win = win
             sim.run(ev)
             w = sim.waits
             total = sum(x for _, x in w)
             hitches = sum(1 for _, x in w if x > a.hitch)
-            print("decoded %3d MB + stored %2d MB%s: %4d frames waited, %6.0f ms in all, %4d over %.0f ms (worst %4.0f); "
+            print("window %2d: " % win + "decoded %3d MB + stored %2d MB%s: %4d frames waited, %6.0f ms in all, %4d over %.0f ms (worst %4.0f); "
                   "loaded %d (%d on demand, %d read again, %d prefilled), from the drive %d, from memory %d, held back %d" % (
                       d - s, s, " (filled)" if a.fill else " (its fill)" if a.guesses else "", len(w), total, hitches, a.hitch,
                       max((x for _, x in w), default=0), sim.st["loaded"], sim.st["on demand"], sim.st["read again"], sim.st["prefilled"],
