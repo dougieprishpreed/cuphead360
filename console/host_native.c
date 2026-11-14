@@ -39,7 +39,31 @@ static long trace_last_total = -1;
  * the textures its items sample, once each), each read-ahead ask ("A frame id wanted"), each texture named or
  * given pixels ("K id key", "P id") and the scene read-ahead's marks ("S frame begin"). */
 static FILE* drawn_trace;
+static unsigned long gc_decommits, gc_commits;   /* the collector's pages given back and taken again (calls) */
 static long drawn_mark[TRACE_IDS];
+/* The most screen pixels a unit of each texture's u and of its v was drawn across ("D id du dv" lines at the end: over
+ * the page's width and height, the screen pixels a texel covered at most; tools/texture_density.py). */
+static float drawn_du[TRACE_IDS], drawn_dv[TRACE_IDS];
+
+static void drawn_density(const ch360_frame* f, const ch360_item* it) {
+    const ch360_vertex* v = f->vertices + it->first;
+    unsigned t, n = it->count / 3;
+    if (n > 20) n = 3;   /* a mesh: one transform for all of it */
+    for (t = 0; t < n; t++, v += 3) {
+        double e1x = v[1].x - v[0].x, e1y = v[1].y - v[0].y, e2x = v[2].x - v[0].x, e2y = v[2].y - v[0].y;
+        double d1u = v[1].u - v[0].u, d1v = v[1].v - v[0].v, d2u = v[2].u - v[0].u, d2v = v[2].v - v[0].v;
+        double det = d1u * d2v - d1v * d2u, jxu, jyu, jxv, jyv, su, sv;
+        if (det > -1e-12 && det < 1e-12) continue;
+        jxu = (e1x * d2v - e2x * d1v) / det;
+        jyu = (e1y * d2v - e2y * d1v) / det;
+        jxv = (e2x * d1u - e1x * d2u) / det;
+        jyv = (e2y * d1u - e1y * d2u) / det;
+        su = sqrt(jxu * jxu + jyu * jyu);
+        sv = sqrt(jxv * jxv + jyv * jyv);
+        if (su > drawn_du[it->texture]) drawn_du[it->texture] = (float)su;
+        if (sv > drawn_dv[it->texture]) drawn_dv[it->texture] = (float)sv;
+    }
+}
 
 /* CH360_FRAME_MS=n: each frame takes at least n ms, as on the console (its
  * frame step and audio step follow the clock, so the game runs differently). */
@@ -118,6 +142,15 @@ int ch360_plat_frame_begin(void) {
         }
         frame_start = clock();
     }
+    if (frame_no > 0 && frame_no % 300 == 0) {
+        unsigned reserved, fails, out = ch360_gc_memory(&reserved, &fails);
+        static unsigned least = 0xFFFFFFFFu;
+        unsigned held = ch360_memory_kb() - out;
+        if (held < least) least = held;
+        printf("[host] frame %ld: collector's blocks %u MB, %u MB of linear memory given back: %u of %u MB held (least %u); "
+               "%lu decommits, %lu commits, %u failed\n", frame_no, reserved >> 10, out >> 10, held >> 10, ch360_memory_kb() >> 10,
+               least >> 10, gc_decommits, gc_commits, fails);
+    }
     if (frame_no > 0 && frame_no % 600 == 0) {
         double secs = (double)(clock() - started) / CLOCKS_PER_SEC;
         unsigned am[7];
@@ -166,6 +199,7 @@ void ch360_plat_draw(const ch360_frame* f) {
         fprintf(drawn_trace, "F %ld %d", frame_no, f->loading ? 1 : 0);
         for (i = 0; i < f->item_count; i++) {
             int id = f->items[i].texture;
+            if (id >= 0 && id < TRACE_IDS && !f->loading) drawn_density(f, &f->items[i]);
             if (id < 0 || id >= TRACE_IDS || drawn_mark[id] == frame_no + 1) continue;
             drawn_mark[id] = frame_no + 1;
             fprintf(drawn_trace, " %d", id);
@@ -211,6 +245,41 @@ void ch360_plat_texture_prefetch(int id, int wanted) {
 }
 
 /* A level's page kept as stored bytes on the console (its fill under the hourglass): traced ("G frame id"). */
+/* The collector's pages: decommitted and committed in the linear memory's reservation (VirtualAlloc'd by
+ * srt_plat_win32.c), so a touch of a page given back faults here as it would freeze the console. */
+#ifdef _WIN32
+__declspec(dllimport) void* __stdcall VirtualAlloc(void* p, size_t n, unsigned long type, unsigned long protect);
+__declspec(dllimport) int __stdcall VirtualFree(void* p, size_t n, unsigned long type);
+int ch360_plat_memory_decommit(void* p, size_t n) {
+    ++gc_decommits;
+    return VirtualFree(p, n, 0x4000 /* MEM_DECOMMIT */) ? 0 : -1;
+}
+int ch360_plat_memory_commit(void* p, size_t n) {
+    ++gc_commits;
+    return VirtualAlloc(p, n, 0x1000 /* MEM_COMMIT */, 0x04 /* PAGE_READWRITE */) != NULL ? 0 : -1;
+}
+#else
+int ch360_plat_memory_decommit(void* p, size_t n) { (void)p; (void)n; return -1; }
+int ch360_plat_memory_commit(void* p, size_t n) { (void)p; (void)n; return 0; }
+#endif
+
+int ch360_plat_file_write(const char* path, const void* data, size_t n) {
+    FILE* f = getenv("CH360_FILE_WRITE_FAILS") ? NULL : fopen(path, "wb");   /* the env: the fallback, tested */
+    int ok;
+    if (f == NULL) {
+        printf("[host] file write: cannot open %s (left to the game)\n", path);
+        return 0;
+    }
+    ok = n == 0 || fwrite(data, 1, n, f) == n;
+    fclose(f);
+    printf("[host] file write: %s, %u bytes%s\n", path, (unsigned)n, ok ? "" : " (short: left to the game)");
+    return ok;
+}
+
+int ch360_plat_texture_tight(void) {
+    return getenv("CH360_TEXTURE_TIGHT") != NULL;
+}
+
 void ch360_plat_texture_guess(int id) {
     if (drawn_trace) fprintf(drawn_trace, "G %ld %d\n", frame_no, id);
 }
@@ -358,6 +427,7 @@ int main(int argc, char** argv) {
     }
     trace_dir = getenv("CH360_TRACE_TEX");
     if (getenv("CH360_TRACE_DRAWN")) drawn_trace = fopen(getenv("CH360_TRACE_DRAWN"), "w");
+    if (getenv("CH360_GC_DECOMMIT") && atoi(getenv("CH360_GC_DECOMMIT")) == 0) ch360_gc_memory_off = 1;
     {
         extern int ch360_pcm_whole;
         ch360_pcm_whole = getenv("CH360_PCM_WHOLE") != NULL;
@@ -387,7 +457,11 @@ int main(int argc, char** argv) {
     code = ch360_run(root, guestc, guest, memory_mb, 64, -1);
     if (wav) { wav_header(wav, audio_frames); fclose(wav); }
     if (dump_file) fclose(dump_file);
-    if (drawn_trace) fclose(drawn_trace);
+    if (drawn_trace) {
+        for (i = 0; i < TRACE_IDS; i++)
+            if (drawn_du[i] > 0 || drawn_dv[i] > 0) fprintf(drawn_trace, "D %d %.1f %.1f\n", i, drawn_du[i], drawn_dv[i]);
+        fclose(drawn_trace);
+    }
     printf("[host] exit %d after %ld frames; linear memory %u MB; bad lists %lu\n", code, frame_no, ch360_memory_kb() / 1024,
            bad_lists);
     return code;

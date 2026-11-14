@@ -247,7 +247,7 @@ namespace Cuphead360.Engine
             {
                 heapBefore = GC.GetTotalMemory(false);
                 if (heapBefore > heapPeak) heapPeak = heapBefore;
-                if (!MidLoadCollect || heapBefore - heap0 < (8L << 20)) return;
+                if (!MidLoadCollect || heapBefore - heap0 < (8L << 20) || AssetUnload.LightHeap()) return;
                 long c0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 GC.Collect();
                 collectMs = Ms(c0, System.Diagnostics.Stopwatch.GetTimestamp());
@@ -359,6 +359,7 @@ namespace Cuphead360.Engine
         {
             if (CollectEveryBytes <= 0) return;
             if (!always && GC.GetTotalMemory(false) < collectAt) return;
+            if (AssetUnload.LightHeap()) return;   // a menu's load: nothing worth the pause
             GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
             collectAt = GC.GetTotalMemory(false) + CollectEveryBytes;
         }

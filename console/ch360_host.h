@@ -129,6 +129,8 @@ void ch360_plat_texture_file(int id, const char* key);
 /* A level's page whose stored bytes the host keeps in its memory, not decoded (RenderList.FillAhead, under the
  * hourglass): drawn later, it decodes from there instead of the drive. */
 void ch360_plat_texture_guess(int id);
+/* Whether the read-ahead was held back for want of memory lately (the learned read-ahead then asks less far). */
+int ch360_plat_texture_tight(void);
 /* Texture id is likely drawn soon: read it ahead if memory allows (never waited for). wanted: a sprite near
  * the view or a frame of a clip on screen (room is made from textures not drawn lately); else a guess (an
  * atlas the game loaded, the other pages of one drawn): only its stored bytes are kept, and only with room. */
@@ -241,6 +243,20 @@ unsigned ch360_remap_misses(void);
 unsigned ch360_remap_counts(unsigned* boxes, unsigned* targets);
 /* The player's linear memory, in KB (committed as it grows). */
 unsigned ch360_memory_kb(void);
+
+/* A whole file to write (the game's save, at a host path; the bytes are the caller's: copied before this returns).
+ * The console writes it on another thread and makes any later open of a save file wait for it. 1 if taken; 0 if
+ * not (the caller then writes it through the runtime's files, as the game always did). */
+int ch360_plat_file_write(const char* path, const void* data, size_t n);
+
+/* The collector's memory (ch360_imports.c): linear memory pages the player doesn't use for now, given back to
+ * the platform (n bytes at p, whole 64 KB pages), and taken again, zeroed, before the player touches them. Both 0
+ * when done. ch360_gc_memory: KB given back now (reserved_kb: the collector's blocks; fails: calls that failed).
+ * ch360_gc_memory_off: 1 leaves the pages the player's (set before the player starts). */
+int ch360_plat_memory_decommit(void* p, size_t n);
+int ch360_plat_memory_commit(void* p, size_t n);
+unsigned ch360_gc_memory(unsigned* reserved_kb, unsigned* fails);
+extern int ch360_gc_memory_off;
 /* Moves the player's buffered stdout into the log now. One thread drains:
  * each frame unless the host clears ch360_frame_drain and drains itself. */
 void ch360_drain_output(void);

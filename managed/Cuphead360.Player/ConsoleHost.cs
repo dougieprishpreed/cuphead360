@@ -48,6 +48,8 @@ namespace Cuphead360.Player
         static extern void TextureAhead(int id, float u0, float v0, float u1, float v1);
         [DllImport("ch360", EntryPoint = "textures_level"), WasmImportLinkage]
         static extern void TexturesLevel(byte* name, int length);
+        [DllImport("ch360", EntryPoint = "file_write_later"), WasmImportLinkage]
+        static extern int FileWriteLater(byte* path, int pathLength, byte* data, int length);
         [DllImport("ch360", EntryPoint = "texture_guess"), WasmImportLinkage]
         static extern void TextureGuess(int id, float u0, float v0, float u1, float v1);
         [DllImport("ch360", EntryPoint = "textures_pending"), WasmImportLinkage]
@@ -439,6 +441,12 @@ namespace Cuphead360.Player
             {
                 var b = Encoding.UTF8.GetBytes(name ?? "");
                 fixed (byte* p = b) TexturesLevel(p, b.Length);
+            };
+            // The game's save files: written whole by the host (the console: on another thread, off the frame).
+            Cuphead360.Engine.Platform.WriteFileLater = (path, data, length) =>
+            {
+                var pb = Encoding.UTF8.GetBytes(path ?? "");
+                fixed (byte* pp = pb) fixed (byte* pd = data) return FileWriteLater(pp, pb.Length, pd, length) != 0;
             };
             // An atlas the game loads: its pages read ahead (the boot's preload of the title's atlases readies the logo).
             Atlases.Prefetch = src => TexturePrefetch(FileTextureId(src));

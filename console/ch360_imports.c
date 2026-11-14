@@ -904,6 +904,11 @@ void i5_ch36014_loadingX5Fscreen(wasmModuleInstance* inst, U32 on) {
 #define learn_mkdir(p) mkdir(p, 0777)
 #endif
 #define LEARN_AHEAD 4
+/* With room (the platform's read-ahead not held back by memory lately) twice as far: tools/texture_cache_sim.py with the
+ * console's measured loader (15.8 MB/s, the forty-second run), Hilda Berg learned from one play and tried on another:
+ * 14 -> 9 frames late at 150 MB of room, 10 -> 4 at 170; Forest Follies and Treetop the same or one fewer. Tight (110 MB),
+ * eight cost more than they saved (Forest Follies 10 -> 15). */
+#define LEARN_AHEAD_ROOM 8
 #define LEARN_MAX 4096
 typedef struct learned_page {
     unsigned frame;
@@ -1053,7 +1058,7 @@ static void learn_begin(const char* scene) {
 
 /* A game frame drawn (not the loading screen): what it drew first in this visit learned, the pages ahead asked for. */
 static void learn_drawn(void) {
-    unsigned i, k;
+    unsigned i, k, ahead;
     if (!learn_scene[0]) return;
     for (i = 0; i < draw_item_count; i++) {
         int id = draw_items[i].texture, n;
@@ -1072,7 +1077,8 @@ static void learn_drawn(void) {
         }
         if (n >= 0 && (unsigned)n < learned_loaded && n > learn_far) learn_far = n;
     }
-    for (k = (unsigned)(learn_far + 1); k < learned_loaded && k <= (unsigned)(learn_far + LEARN_AHEAD); k++)
+    ahead = ch360_plat_texture_tight() ? LEARN_AHEAD : LEARN_AHEAD_ROOM;
+    for (k = (unsigned)(learn_far + 1); k < learned_loaded && k <= (unsigned)learn_far + ahead; k++)
         if (learned[k].id >= 0) {
             ch360_plat_texture_prefetch(learned[k].id, 1);
             learn_asks++;
@@ -1091,6 +1097,32 @@ void i5_ch36014_texturesX5Flevel(wasmModuleInstance* inst, U32 name, U32 len) {
     memcpy(scene, srt_mem_ptr(name), len);
     scene[len] = 0;
     learn_begin(scene);
+}
+
+/* A whole file the game wrote (its save: Platform.FileWriter), at a guest path under the root: handed to the platform,
+ * which writes it without holding the frame up where it can. */
+/* (1 taken; 0 not: the game then writes it itself through the runtime's files.) The game joins its folder and file
+ * with both separators ("Cuphead\/cuphead_player_data..."): one forward slash between names here. */
+U32 i5_ch36016_fileX5FwriteX5Flater(wasmModuleInstance* inst, U32 path, U32 path_len, U32 data, U32 len) {
+    char host[768];
+    size_t r = strlen(learn_root);
+    (void)inst;
+    if (path_len == 0 || r + path_len + 2 > sizeof(host) || !srt_mem_ok(path, path_len) || (len > 0 && !srt_mem_ok(data, len))) return 0;
+    memcpy(host, learn_root, r);
+    if (r > 0 && host[r - 1] != '/' && host[r - 1] != '\\') host[r++] = '/';
+    {
+        const U8* p = srt_mem_ptr(path);
+        U32 k;
+        int sep = 1;   /* the root ends with one */
+        for (k = 0; k < path_len; k++) {
+            int s = p[k] == '/' || p[k] == '\\';
+            if (s && sep) continue;
+            host[r++] = s ? '/' : (char)p[k];
+            sep = s;
+        }
+        host[r] = 0;
+    }
+    return ch360_plat_file_write(host, len > 0 ? srt_mem_ptr(data) : (const U8*)"", len) ? 1u : 0u;
 }
 
 void i5_ch3608_drawX5Fend(wasmModuleInstance* inst) {
@@ -1423,4 +1455,166 @@ int ch360_run(const char* root_dir, int argc, const char* const* argv, unsigned 
 unsigned ch360_memory_kb(void) {
     wasmMemory* m = m6_playerExport6_memory(&instance);
     return m ? (unsigned)(m->size / 1024) : 0;
+}
+
+/* ---- the collector's memory ----
+ * The .NET collector reserves its heap in blocks (16 MB each for small objects, large ones and pinned ones at start,
+ * more as the heap grows) and commits them piece by piece; in the wasm build "reserve" is a malloc of the whole block
+ * (linear memory grown for all of it), "commit" does nothing and "decommit" zeroes. On the console every grown page
+ * is physical memory, so the player held the blocks whole (20 -> 68 MB before its first object) and every load's
+ * peak for good: 152 MB by the forty-first run's fifth level with a 56 MB heap in play, and the textures had what was
+ * left (Glumstone's pages read again 2,500 times in a fight).
+ * tools/build_managed.py (hook_gc_memory) points the translated GCToOSInterface::VirtualReserve, VirtualCommit,
+ * VirtualDecommit and VirtualRelease here: a reserved block's pages are given back to the platform until the
+ * collector commits them, and again when it decommits them. Pages are GC_PAGE (64 KB: wasm's, and no smaller than
+ * the console's); a piece of a page the collector decommits is zeroed as before. A block released is whole again
+ * first (malloc's lists write in it), or kept here for the collector's next. ch360_gc_memory_off (the console's nodecommit.txt, CH360_GC_DECOMMIT=0 on the
+ * PC) leaves everything as it was. */
+#define GC_PAGE 65536u
+#define GC_BLOCKS 256
+int ch360_gc_memory_off;
+static unsigned char* gc_out;            /* a page of linear memory is given back to the platform */
+static unsigned gc_out_pages, gc_out_cap;
+static struct { U32 p, n; int kept; } gc_block[GC_BLOCKS];   /* kept: let go by the collector, held for its next */
+static unsigned gc_reserved_kb, gc_kept_kb, gc_fails;
+
+unsigned ch360_gc_memory(unsigned* reserved_kb, unsigned* fails) {
+    if (reserved_kb != NULL) *reserved_kb = gc_reserved_kb;
+    if (fails != NULL) *fails = gc_fails;
+    return gc_out_pages * (GC_PAGE / 1024u);
+}
+
+static int gc_map(U32 end) {
+    unsigned need = (unsigned)(((U64)end + GC_PAGE - 1) / GC_PAGE);
+    if (need > gc_out_cap) {
+        unsigned cap = gc_out_cap ? gc_out_cap : 4096;
+        unsigned char* b;
+        while (cap < need) cap *= 2;
+        b = (unsigned char*)realloc(gc_out, cap);
+        if (b == NULL) return 0;
+        memset(b + gc_out_cap, 0, cap - gc_out_cap);
+        gc_out = b;
+        gc_out_cap = cap;
+    }
+    return 1;
+}
+
+/* Pages wholly inside [p, p + n) given back. */
+static void gc_give(U32 p, U32 n) {
+    U32 a = (p + GC_PAGE - 1) / GC_PAGE, b = (U32)(((U64)p + n) / GC_PAGE), k, run;
+    if (ch360_gc_memory_off || b <= a || !gc_map(b * GC_PAGE)) return;
+    for (k = a; k < b; k = run) {
+        for (run = k; run < b && !gc_out[run]; run++) {}
+        if (run > k) {
+            if (ch360_plat_memory_decommit(srt_mem_ptr(k * GC_PAGE), (size_t)(run - k) * GC_PAGE) == 0) {
+                memset(gc_out + k, 1, run - k);
+                gc_out_pages += run - k;
+            } else {
+                gc_fails++;
+                memset(srt_mem_ptr(k * GC_PAGE), 0, (size_t)(run - k) * GC_PAGE);   /* as before */
+            }
+        }
+        for (; run < b && gc_out[run]; run++) {}
+    }
+}
+
+/* Every page [p, p + n) touches is the player's again (zeroed by the platform). 0 if the platform has none. */
+static int gc_take(U32 p, U32 n) {
+    U32 a = p / GC_PAGE, b = (U32)(((U64)p + n + GC_PAGE - 1) / GC_PAGE), k, run;
+    if (n == 0 || gc_out == NULL) return 1;
+    if (b > gc_out_cap) b = gc_out_cap;
+    for (k = a; k < b; k = run) {
+        for (run = k; run < b && gc_out[run]; run++) {}
+        if (run > k) {
+            if (ch360_plat_memory_commit(srt_mem_ptr(k * GC_PAGE), (size_t)(run - k) * GC_PAGE) != 0) {
+                gc_fails++;
+                return 0;
+            }
+            memset(gc_out + k, 0, run - k);
+            gc_out_pages -= run - k;
+        }
+        for (; run < b && !gc_out[run]; run++) {}
+    }
+    return 1;
+}
+
+void ch360_gc_reserved(wasmModuleInstance* inst, U32 p, U32 n) {
+    unsigned i;
+    (void)inst;
+    if (p == 0 || n == 0) return;
+    for (i = 0; i < GC_BLOCKS && gc_block[i].p != 0; i++) {}
+    if (i == GC_BLOCKS) return;   /* not tracked: stays whole */
+    gc_block[i].p = p;
+    gc_block[i].n = n;
+    gc_reserved_kb += n / 1024u;
+    gc_give(p, n);
+}
+
+U32 ch360_gc_commit(wasmModuleInstance* inst, U32 p, U32 n) {
+    (void)inst;
+    return gc_take(p, n) ? 1u : 0u;
+}
+
+U32 ch360_gc_decommit(wasmModuleInstance* inst, U32 p, U32 n) {
+    U32 a, b, end;
+    unsigned i;
+    (void)inst;
+    if (n == 0) return 1;
+    end = p + n;
+    /* only inside a block this file tracks: the rest is zeroed, as it was */
+    for (i = 0; i < GC_BLOCKS && !(gc_block[i].p != 0 && !gc_block[i].kept && p >= gc_block[i].p && end <= gc_block[i].p + gc_block[i].n); i++) {}
+    a = (p + GC_PAGE - 1) / GC_PAGE * GC_PAGE;
+    b = end / GC_PAGE * GC_PAGE;
+    if (i == GC_BLOCKS || ch360_gc_memory_off || b <= a) {
+        memset(srt_mem_ptr(p), 0, n);
+        return 1;
+    }
+    if (a > p) memset(srt_mem_ptr(p), 0, a - p);
+    if (end > b) memset(srt_mem_ptr(b), 0, end - b);
+    gc_give(a, b - a);
+    return 1;
+}
+
+/* A block the collector lets go: kept here with its pages given back, for its next reserve of that size (1), where
+ * free() would write its lists in it and hold it whole until something mallocs it again. One that doesn't lie on
+ * whole pages is made whole and freed as before (0). */
+U32 ch360_gc_release(wasmModuleInstance* inst, U32 p, U32 n) {
+    unsigned i;
+    (void)inst;
+    (void)n;
+    for (i = 0; i < GC_BLOCKS; i++)
+        if (gc_block[i].p == p && p != 0 && !gc_block[i].kept) {
+            if (!ch360_gc_memory_off && p % GC_PAGE == 0 && gc_block[i].n % GC_PAGE == 0) {
+                gc_give(p, gc_block[i].n);
+                gc_block[i].kept = 1;
+                gc_reserved_kb -= gc_block[i].n / 1024u;
+                gc_kept_kb += gc_block[i].n / 1024u;
+                return 1;
+            }
+            if (!gc_take(gc_block[i].p, gc_block[i].n)) {
+                static const char msg[] = "memory: a released block's pages could not be committed again";
+                ch360_plat_log(msg, sizeof(msg) - 1);
+                abort();
+            }
+            gc_reserved_kb -= gc_block[i].n / 1024u;
+            gc_block[i].p = gc_block[i].n = 0;
+            return 0;
+        }
+    return 0;
+}
+
+/* A kept block of n bytes for the collector's reserve (aligned as it asks), or 0. */
+U32 ch360_gc_reuse(wasmModuleInstance* inst, U32 n, U32 align) {
+    unsigned i;
+    (void)inst;
+    if (align < GC_PAGE) align = GC_PAGE;
+    for (i = 0; i < GC_BLOCKS; i++)
+        if (gc_block[i].kept && gc_block[i].n == n && gc_block[i].p % align == 0) {
+            gc_block[i].kept = 0;
+            gc_reserved_kb += n / 1024u;
+            gc_kept_kb -= n / 1024u;
+            gc_give(gc_block[i].p, n);   /* all of it still out (a failed give left some in) */
+            return gc_block[i].p;
+        }
+    return 0;
 }

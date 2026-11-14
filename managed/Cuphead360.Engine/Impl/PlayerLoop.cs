@@ -210,7 +210,9 @@ namespace Cuphead360.Engine
         public static bool CountAllocs;
         /// <summary>Script calls timed too (one frame in AllocSampling); off, only the phases are.</summary>
         public static bool ProfileScripts = Environment.GetEnvironmentVariable("CH360_PROFILE_SCRIPTS") != "0";
-        public const int AllocSampling = 4;
+        // CH360_PROFILE_EVERY=1: every frame (a PC look at one frame's calls: a death, a phase change).
+        public static readonly int AllocSampling =
+            int.TryParse(Environment.GetEnvironmentVariable("CH360_PROFILE_EVERY"), out var pe) && pe > 0 ? pe : 4;
         public static readonly string[] PhaseNames = { "pump", "fixed", "physics", "update", "animators", "late", "ui", "end", "audio" };
         public static readonly double[] PhaseMs = new double[9];
         /// <summary>What each phase allocated (bytes, with Profile on): the engine's share of the GC's work beside the scripts'.</summary>

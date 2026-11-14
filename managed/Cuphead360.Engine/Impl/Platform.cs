@@ -65,6 +65,111 @@ namespace Cuphead360.Engine
         /// </summary>
         public static void GameCollect() { }
 
+        // ---- the game's save (PlayerData.Save: at every death, win and map event) ----
+        // On the console a death's frame took 150-270 ms (the forty-first run: update 80-140 of it): the save builds
+        // an XmlSerializer for Dialoguer's variables each time (the type's mapping worked out by reflection, 43
+        // floats written), then opens and writes its file on the drive, all in the frame the player dies in.
+
+        // CH360_SAVE_PLAIN=1: the save as the game wrote it (a serializer each time, the file written in the frame): a PC
+        // measure of what the rest saves.
+        static readonly bool savePlain = Environment.GetEnvironmentVariable("CH360_SAVE_PLAIN") == "1";
+
+        static readonly System.Collections.Generic.Dictionary<Type, System.Xml.Serialization.XmlSerializer> xmlSerializers =
+            new System.Collections.Generic.Dictionary<Type, System.Xml.Serialization.XmlSerializer>();
+
+        /// <summary>The game's new XmlSerializer(type): one per type, kept (they hold no state between calls).</summary>
+        public static System.Xml.Serialization.XmlSerializer XmlSerializerFor(Type type)
+        {
+            if (savePlain) return new System.Xml.Serialization.XmlSerializer(type);
+            if (!xmlSerializers.TryGetValue(type, out var s)) xmlSerializers[type] = s = new System.Xml.Serialization.XmlSerializer(type);
+            return s;
+        }
+
+        static string dialoguerKey, dialoguerXml;
+        static System.Reflection.FieldInfo dialoguerBools, dialoguerFloats, dialoguerStrings;
+        static Type dialoguerType;
+        static bool dialoguerKnown;
+
+        /// <summary>
+        /// The game's XmlSerializer.Serialize(TextWriter, object). Dialoguer's variables (what every save writes)
+        /// come out as the text the serializer gave for the same values last time; anything else, and any change,
+        /// goes through the serializer as before, so the text is always its own.
+        /// </summary>
+        public static void XmlSerialize(System.Xml.Serialization.XmlSerializer serializer, TextWriter writer, object o)
+        {
+            if (!savePlain && o != null && writer is StringWriter && o.GetType().FullName == "DialoguerCore.DialoguerGlobalVariables")
+            {
+                string key = DialoguerKey(o);
+                if (key != null)
+                {
+                    if (key != dialoguerKey)
+                    {
+                        var sw = new StringWriter();
+                        serializer.Serialize(sw, o);
+                        dialoguerXml = sw.ToString();
+                        dialoguerKey = key;
+                    }
+                    writer.Write(dialoguerXml);
+                    return;
+                }
+            }
+            serializer.Serialize(writer, o);
+        }
+
+        /// <summary>Every value of Dialoguer's variables in one string (null if the class is not the one known).</summary>
+        static string DialoguerKey(object o)
+        {
+            const System.Reflection.BindingFlags all = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+            var t = o.GetType();
+            if (dialoguerType != t)
+            {
+                dialoguerType = t;
+                dialoguerBools = t.GetField("booleans", all); dialoguerFloats = t.GetField("floats", all); dialoguerStrings = t.GetField("strings", all);
+                dialoguerKnown = dialoguerBools != null && dialoguerFloats != null && dialoguerStrings != null && t.GetFields(all).Length == 3;
+                dialoguerKey = null;
+            }
+            if (!dialoguerKnown) return null;
+            var sb = new System.Text.StringBuilder(512);
+            if (dialoguerBools.GetValue(o) is System.Collections.Generic.List<bool> bools) { foreach (bool b in bools) sb.Append(b ? '1' : '0'); sb.Append('|'); }
+            else sb.Append("-|");
+            if (dialoguerFloats.GetValue(o) is System.Collections.Generic.List<float> floats) { foreach (float v in floats) sb.Append(BitConverter.SingleToInt32Bits(v).ToString("x")).Append(','); sb.Append('|'); }
+            else sb.Append("-|");
+            if (dialoguerStrings.GetValue(o) is System.Collections.Generic.List<string> strings)
+                foreach (string v in strings) { if (v == null) sb.Append("n,"); else sb.Append(v.Length).Append(':').Append(v).Append(','); }
+            else sb.Append('-');
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// The host's way of writing a whole file without holding the game up (the console: its bytes copied and
+        /// written by another thread; a read of the file waits for it). Null, or false from it (the host could not
+        /// write the last one): written here, through the runtime's files as the game always did.
+        /// </summary>
+        public static Func<string, byte[], int, bool> WriteFileLater;
+
+        /// <summary>
+        /// The game's new StreamWriter(path) (its save files): the text gathers in memory and the whole file is
+        /// written when the writer closes, by the host where it can (WriteFileLater).
+        /// </summary>
+        public static StreamWriter FileWriter(string path) => new StreamWriter(new WholeFileStream(path));
+
+        sealed class WholeFileStream : MemoryStream
+        {
+            readonly string path;
+            bool done;
+            public WholeFileStream(string path) { this.path = path; }
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing && !done)
+                {
+                    done = true;
+                    if (WriteFileLater == null || savePlain || !WriteFileLater(path, GetBuffer(), (int)Length))
+                        using (var f = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read)) f.Write(GetBuffer(), 0, (int)Length);
+                }
+                base.Dispose(disposing);
+            }
+        }
+
         /// <summary>Refuses any port folder that is (or is inside) a real special folder of this PC.</summary>
         public static void Guard(string dir)
         {

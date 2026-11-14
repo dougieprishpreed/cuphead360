@@ -1181,8 +1181,24 @@ namespace Cuphead360.Engine
                 for (int i = 0; i < snap.Count; i++)
                 {
                     var kv = snap[i];
-                    if (!contacts.ContainsKey(kv.Key)) continue;
                     bool stay = old.TryGetValue(kv.Key, out var prev) && prev.Trigger == kv.Value.Trigger;
+                    if (!contacts.ContainsKey(kv.Key))
+                    {
+                        // Gone since the step found it: an earlier callback of this step disabled one of its colliders.
+                        // Unity still reports a contact the step began (it gathers them all, then calls): a bullet that
+                        // entered two triggers in one step hits both, though the first hit switched its collider off
+                        // (AbstractProjectile.Die). Treetop Trouble's log stacks need it: the stack's box and each
+                        // log's own cover the same width, a shot enters both at once, the stack's took the damage and
+                        // the log, whose HitFlash it is, never flashed (the forty-first run). A contact that was
+                        // already there, or with a destroyed collider, is dropped as before.
+                        if (!stay && Alive(kv.Value.A) && Alive(kv.Value.B))
+                        {
+                            if (TraceContact != null && (Traced(kv.Value.A) || Traced(kv.Value.B)))
+                                Log.Line($"TRACE contact frame {Clock.FrameCount} entered after its collider was disabled: {Describe(kv.Value.A)} / {Describe(kv.Value.B)}");
+                            Send(kv.Value, 0);
+                        }
+                        continue;
+                    }
                     Send(kv.Value, stay ? 1 : 0);
                 }
                 snap.Clear();

@@ -40,9 +40,28 @@ namespace Cuphead360.Engine
             // loader's empty scene after a level, against the map's; the map's load after Treetop Trouble peaked on
             // it and grew the console's player 135 -> 151 MB, the thirty-eighth run).
             ControllerData.KeepWithAsset = ControllerData.WarmScene(name);
-            if (name == "scene_load_helper") { Run("after " + name); passedThisLoad = true; return; }
-            if (passedThisLoad) { passedThisLoad = false; Settle(name); return; }
-            Run("after " + name);
+            if (name == "scene_load_helper") { if (!LightHeap()) Run("after " + name); passedThisLoad = true; return; }
+            if (passedThisLoad) { passedThisLoad = false; if (!LightHeap()) Settle(name); return; }
+            if (!LightHeap()) Run("after " + name);
+        }
+
+        /// <summary>
+        /// A load with the heap this small has nothing worth a pass or a forced collection: from the title to the
+        /// slots the heap is 32-37 MB, and the passes and collections of that load were its picture standing still
+        /// four times (1.3 s, 0.4, 1.5 and 0.4 on the console's forty-first run, 3 to 5 full collections each
+        /// time) where the game fades through black with nothing to load but a menu. The first load after a level
+        /// is far above it, and so is the boot (its garbage: no pass yet, so never light). Light: under
+        /// CH360_LIGHT_HEAP_MB (44; 0: every load gets its pass) and grown by less than 16 MB since the last pass.
+        /// </summary>
+        public static readonly long LightHeapBytes =
+            (long.TryParse(Environment.GetEnvironmentVariable("CH360_LIGHT_HEAP_MB"), out var lh) ? lh : 44) << 20;
+        /// <summary>The heap after the last pass or forced collection (0 before the first: the boot gets its pass).</summary>
+        public static long HeapAfterPass;
+        public static bool LightHeap()
+        {
+            if (LightHeapBytes <= 0 || HeapAfterPass == 0) return false;
+            long h = GC.GetTotalMemory(false);
+            return h < LightHeapBytes && h - HeapAfterPass < (16L << 20);
         }
 
         /// <summary>
@@ -60,6 +79,7 @@ namespace Cuphead360.Engine
             long t0 = System.Diagnostics.Stopwatch.GetTimestamp(), heap0 = GC.GetTotalMemory(false);
             Run("after " + name);
             GC.Collect(2, GCCollectionMode.Forced, true, true);
+            HeapAfterPass = GC.GetTotalMemory(false);
             Log.Line($"GC after {name}: heap {heap0 >> 20} -> {GC.GetTotalMemory(false) >> 20} MB in "
                 + $"{(System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000 / System.Diagnostics.Stopwatch.Frequency} ms; {HeapSplit()}");
         }
@@ -184,6 +204,7 @@ namespace Cuphead360.Engine
             Released += released;
             Passes++;
             long heap1 = GC.GetTotalMemory(false);
+            HeapAfterPass = GC.GetTotalMemory(false);
             Log.Line($"UNLOAD {why}: {released} of {cands.Count} assets let go ({rounds} collections) in {(System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000 / System.Diagnostics.Stopwatch.Frequency} ms; "
                 + $"heap {heap0 >> 20} -> {heap1 >> 20} MB, live objects {Objects.LiveCount}; {files} converted files no longer read let go");
         }

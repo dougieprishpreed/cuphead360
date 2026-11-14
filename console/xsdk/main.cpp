@@ -116,6 +116,7 @@ void flush_log(bool sync = false) {
 void logf(const char* fmt, ...);
 double now_ms();
 void memory_mb(unsigned* free_mb, unsigned* total_mb);
+static unsigned g_gc_decommits, g_gc_commits, g_gc_made_room;   // the collector's pages: calls, and times textures made room
 extern "C" void srt_get_stats(void* out);
 
 // The USB drive is slow per write, and the texture loader and the clip reader read from it: lines queue in
@@ -262,7 +263,9 @@ const VkDeviceSize VERTEX_RING = 4 * 1024 * 1024;
 // gave back ~18 MB (the module's data segments read from GameData/PLAYER.DAT, the memory base loaded once a
 // function): the room goes to the textures, whose pages read again in play were the run and gun levels'
 // hitches (Forest Follies 248 on the thirtieth run, at 122 MB with 25 free), and the cap would have taken it.
-const size_t TEXTURE_BUDGET = 192u << 20;
+// 256 MB since the collector's unused pages go back to the console (ch360_imports.c, "the collector's memory": 36 MB
+// of the player's 119 in Hilda Berg's fight on the PC): free memory above the floor is the limit, as before.
+const size_t TEXTURE_BUDGET = 256u << 20;
 // Uploads go through one staging buffer, run (submitted and waited) when it
 // fills: one buffer per texture until the frame ended doubled a scene's first
 // frame in memory, and the fifth run froze there.
@@ -270,6 +273,10 @@ const size_t STAGING_RING = 8u << 20;
 // Free memory kept for the player's linear memory (it grows during scene
 // loads), the kernel and the driver: textures are not loaded into it.
 const unsigned MEMORY_FLOOR_MB = 24;
+// Free memory the player's own commits leave (the collector's pages, a growth of its linear memory): textures not
+// drawn lately go only under this, so the 12 MB between the two floors takes the collector's ups and downs in play
+// without a texture let go for them or read into what it gave back for a moment.
+const unsigned PLAYER_FLOOR_MB = 12;
 // Read-ahead makes room from textures not drawn for this many frames (behind the camera, a phase gone by),
 // never from what the screen showed lately; a sprite page is 4 MB at most (tools/cluster_console.py).
 const unsigned AHEAD_AGE = 180;
@@ -646,6 +653,8 @@ public:
     void fill(int id);
     void scene_read_ahead(bool begin);
     void take_asks();
+    // The read-ahead waited for memory within the last ten seconds.
+    bool ahead_tight() const { return held_frame_ != 0 && frame_no_ - held_frame_ < 600; }
     void held_ahead(unsigned free_mb) {
         if (held_frame_ == frame_no_) return;
         held_frame_ = frame_no_;
@@ -3187,12 +3196,12 @@ void host_report() {
     memory_mb(&f, &tot);
     struct mallinfo mi = mallinfo();   // newlib's heap: grown to (arena), in use
     // Times in tenths of a millisecond (integers only in the log).
-    logf("frame %u: %u ms/frame x10 (worst %u, %u over 17.5); gpu wait %u, present %u; memory %u MB free of %u, player %u MB, "
-         "textures %u MB (%u uploads, %u evicted), stored %u MB; host heap %u MB (%u in use); items left out for the vertex ring %u; audio underruns %u, "
+    logf("frame %u: %u ms/frame x10 (worst %u, %u over 17.5); gpu wait %u, present %u; memory %u MB free of %u, player %u MB (%u given back: %u "
+         "commits, %u decommits, room made %u times), textures %u MB (%u uploads, %u evicted), stored %u MB; host heap %u MB (%u in use); items left out for the vertex ring %u; audio underruns %u, "
          "%u ms carried on; %u frames drawn in between",
          g_report_frames, (unsigned)(g_report_logic_ms / 60), (unsigned)(g_report_worst_ms * 10), g_report_slow,
          (unsigned)(g_renderer->gpu_wait_ms / 60), (unsigned)(g_renderer->present_ms / 60), f, tot, ch360_memory_kb() / 1024,
-         (unsigned)(g_renderer->texture_bytes() >> 20), g_renderer->uploads, g_renderer->evictions,
+         ch360_gc_memory(NULL, NULL) / 1024, g_gc_commits, g_gc_decommits, g_gc_made_room, (unsigned)(g_renderer->texture_bytes() >> 20), g_renderer->uploads, g_renderer->evictions,
          (unsigned)(g_renderer->stored_bytes() >> 20), (unsigned)(mi.arena >> 20), (unsigned)(mi.uordblks >> 20), g_renderer->ring_drops,
          g_audio_underruns, (unsigned)(ch360_mix_carried() / 48), g_tweens_drawn);
     unsigned am[7];
@@ -3455,10 +3464,116 @@ extern "C" void __wrap_srt_plat_sleep_ns(unsigned long long ns) {
     __real_srt_plat_sleep_ns(ns);
 }
 
+// The game's save files (Platform.FileWriter -> ch360_plat_file_write): written whole by a thread of their own. A
+// save comes at every death, win and map event, and its open, write and close on the drive were part of the frame
+// the player died in (150-270 ms, the forty-first run). The file is on the drive a moment later, as before; a second
+// save of the same file while one waits takes its place, and anything that opens a file under save/ waits for the
+// queue first (save_drain: so does the exit).
+struct SaveJob {
+    std::string path;
+    std::vector<unsigned char> data;
+};
+static pthread_mutex_t g_save_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_save_cond = PTHREAD_COND_INITIALIZER, g_save_idle = PTHREAD_COND_INITIALIZER;
+static std::deque<SaveJob*> g_save_queue;
+static bool g_save_busy = false, g_save_thread = false;
+static volatile bool g_save_failed = false;   // a write here failed: every save after it is left to the game
+static unsigned g_saves_written = 0;
+
+static void save_write(const SaveJob& j) {
+    double t0 = now_ms();
+    int fd = open(j.path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) {
+        logf("save: cannot open %s to write: saves go through the game's own writes from now", j.path.c_str());
+        g_save_failed = true;
+        return;
+    }
+    size_t done = 0;
+    while (done < j.data.size()) {
+        ssize_t w = write(fd, &j.data[done], j.data.size() - done);
+        if (w <= 0) break;
+        done += (size_t)w;
+    }
+    close(fd);
+    ++g_saves_written;
+    if (done != j.data.size()) {
+        logf("save: %s short, %u of %u bytes written: saves go through the game's own writes from now", j.path.c_str(), (unsigned)done,
+             (unsigned)j.data.size());
+        g_save_failed = true;
+    }
+    else if (g_saves_written <= 4 || ch360_verbose)
+        logf("save: %s written off the frame, %u bytes in %u ms", j.path.c_str(), (unsigned)done, (unsigned)(now_ms() - t0));
+}
+
+static void* save_writer(void*) {
+    xsdk_thread_move(5);
+    for (;;) {
+        pthread_mutex_lock(&g_save_lock);
+        while (g_save_queue.empty()) pthread_cond_wait(&g_save_cond, &g_save_lock);
+        SaveJob* j = g_save_queue.front();
+        g_save_queue.pop_front();
+        g_save_busy = true;
+        pthread_mutex_unlock(&g_save_lock);
+        save_write(*j);
+        delete j;
+        pthread_mutex_lock(&g_save_lock);
+        g_save_busy = false;
+        if (g_save_queue.empty()) pthread_cond_broadcast(&g_save_idle);
+        pthread_mutex_unlock(&g_save_lock);
+    }
+    return NULL;
+}
+
+// Every queued save on the drive (nothing queued: no wait).
+static void save_drain() {
+    if (!g_save_thread) return;
+    pthread_mutex_lock(&g_save_lock);
+    while (!g_save_queue.empty() || g_save_busy) pthread_cond_wait(&g_save_idle, &g_save_lock);
+    pthread_mutex_unlock(&g_save_lock);
+}
+
+extern "C" int ch360_plat_file_write(const char* path, const void* data, size_t n) {
+    if (g_save_failed) return 0;
+    SaveJob* j = new SaveJob();
+    j->path = path;
+    j->data.assign((const unsigned char*)data, (const unsigned char*)data + n);
+    pthread_mutex_lock(&g_save_lock);
+    if (!g_save_thread) {
+        pthread_t th;
+        g_save_thread = pthread_create(&th, NULL, save_writer, NULL) == 0;
+    }
+    if (!g_save_thread) {   // no thread: written here, as it always was
+        pthread_mutex_unlock(&g_save_lock);
+        save_write(*j);
+        delete j;
+        return g_save_failed ? 0 : 1;
+    }
+    for (size_t i = 0; i < g_save_queue.size(); ++i)
+        if (g_save_queue[i]->path == j->path) {   // a newer save of a file still waiting: in its place
+            delete g_save_queue[i];
+            g_save_queue[i] = j;
+            j = NULL;
+            break;
+        }
+    if (j) g_save_queue.push_back(j);
+    pthread_cond_signal(&g_save_cond);
+    pthread_mutex_unlock(&g_save_lock);
+    return 1;
+}
+
+// Whether a path is under the port's save folder (game:/save/...).
+static bool save_path(const char* path) {
+    for (const char* p = path; *p; ++p)
+        if ((p[0] == '/' || p[0] == '\\') && p[1] == 's' && p[2] == 'a' && p[3] == 'v' && p[4] == 'e' && (p[5] == '/' || p[5] == '\\' || p[5] == 0))
+            return true;
+    return false;
+}
+
 // The runtime's file calls, counted and timed for the heartbeat.
 extern "C" int __real_srt_plat_open(const char* path, int flags, void** out);
 extern "C" int __wrap_srt_plat_open(const char* path, int flags, void** out) {
     Stage stage("runtime: opening a file");
+    if (g_save_thread && save_path(path)) save_drain();   // a save still waiting is on the drive first
     ++g_io_opens;
     double t0 = now_ms();
     int r = __real_srt_plat_open(path, flags, out);
@@ -3505,7 +3620,7 @@ extern "C" int __wrap_srt_plat_commit(void* base, unsigned long long from, unsig
         // Each growth, to find why the console's player outgrows the PC's.
         logf("memory: player %u -> %u MB at frame %u (%s); %u MB free, textures %u MB", (unsigned)(from >> 20),
              (unsigned)(to >> 20), g_frames_seen, (const char*)g_stage, free_mb, (unsigned)(g_texture_bytes >> 20));
-        unsigned need_mb = (unsigned)((to - from) >> 20) + 1 + MEMORY_FLOOR_MB;
+        unsigned need_mb = (unsigned)((to - from) >> 20) + 1 + PLAYER_FLOOR_MB;
         if (free_mb < need_mb) {
             size_t freed = 0;
             if (gpu_lock_within(1000)) {
@@ -3530,6 +3645,58 @@ extern "C" int __wrap_srt_plat_commit(void* base, unsigned long long from, unsig
     }
     if (r != 0) logf("memory: the player couldn't grow to %u MB", (unsigned)(to >> 20));
     return r;
+}
+
+extern "C" int ch360_plat_texture_tight(void) {
+    return g_renderer && g_renderer->ahead_tight() ? 1 : 0;
+}
+
+// The collector's pages (ch360_imports.c, "the collector's memory"): linear memory the player doesn't use for now
+// goes back to the console (decommitted: the textures' room), and comes back, zeroed, before the collector uses it;
+// textures not drawn lately make room when free memory would fall under the player's floor.
+extern "C" int ch360_plat_memory_decommit(void* p, size_t n) {
+    void* q = p;
+    uint32_t size = (uint32_t)n;
+    NTSTATUS st = NtFreeVirtualMemory(&q, &size, MEM_DECOMMIT, 0);
+    if (!NT_SUCCESS(st)) {
+        // never seen; if a console refuses, the pages stay the player's from here on (zeroed by the caller)
+        logf("memory: the console didn't take %u KB of the player's pages back (status %08x): none given back from now",
+             (unsigned)(n >> 10), (unsigned)st);
+        ch360_gc_memory_off = 1;
+        return -1;
+    }
+    ++g_gc_decommits;
+    return 0;
+}
+extern "C" int ch360_plat_memory_commit(void* p, size_t n) {
+    unsigned free_mb, total_mb;
+    memory_mb(&free_mb, &total_mb);
+    unsigned need_mb = (unsigned)(n >> 20) + 1 + PLAYER_FLOOR_MB;
+    if (g_renderer && free_mb < need_mb && gpu_lock_within(1000)) {
+        g_renderer->make_room((size_t)(need_mb - free_mb) << 20);
+        pthread_mutex_unlock(&g_gpu_lock);
+        ++g_gc_made_room;
+    }
+    for (int tries = 0;; ++tries) {
+        void* q = p;
+        uint32_t size = (uint32_t)n;
+        if (NT_SUCCESS(NtAllocateVirtualMemory(&q, &size, MEM_COMMIT, PAGE_READWRITE, 0))) {
+            ++g_gc_commits;
+            return 0;
+        }
+        // no memory: twice what it asks from the textures, and again (the renderer's lock can be held a while)
+        size_t freed = 0;
+        if (g_renderer && gpu_lock_within(1000)) {
+            freed = g_renderer->make_room(n * 2 + (4u << 20));
+            pthread_mutex_unlock(&g_gpu_lock);
+        }
+        if (tries >= 5 || (freed == 0 && tries >= 2)) {
+            memory_mb(&free_mb, &total_mb);
+            logf("memory: %u KB of the player's pages could not be committed again (%u MB free, textures %u MB)", (unsigned)(n >> 10),
+                 free_mb, (unsigned)(g_texture_bytes >> 20));
+            return -1;
+        }
+    }
 }
 
 
@@ -3557,6 +3724,11 @@ int main() {
             fclose(q);
             ch360_verbose = 1;
             logf("profile run (profile.txt): scripts timed, texture and slow-part lines");
+        }
+        if ((q = fopen("game:/nodecommit.txt", "rb")) != NULL) {
+            fclose(q);
+            ch360_gc_memory_off = 1;
+            logf("nodecommit.txt: the collector's unused memory stays the player's (as before the forty-second run's build)");
         }
         if ((q = fopen("game:/full60.txt", "rb")) != NULL) {
             fclose(q);
@@ -3627,6 +3799,7 @@ int main() {
     ch360_frame_drain = 0;   // the log thread drains the player's output instead
     g_player_started = true;
     int code = ch360_start(16, 0);
+    save_drain();
     memory_mb(&f, &t);
     logf("player exit %d after %u frames; memory %u MB free, player %u MB", code, g_frames, f, ch360_memory_kb() / 1024);
     flush_log();

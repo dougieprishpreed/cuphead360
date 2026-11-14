@@ -423,6 +423,11 @@ internal static class Program
         // The game's GC.Collect() (opening the pause and equip menus, starting a load): a full
         // collection is ~0.5 s on the console, so the engine decides (AssetUnload collects at loads).
         ["System.Void System.GC::Collect()"] = "GameCollect",
+        // The save (PlayerData.Save, at every death): its XmlSerializer built once a type and Dialoguer's variables'
+        // text kept while they don't change; its file written whole when its writer closes (Platform, "the game's save").
+        ["System.Void System.Xml.Serialization.XmlSerializer::.ctor(System.Type)"] = "XmlSerializerFor",
+        ["System.Void System.Xml.Serialization.XmlSerializer::Serialize(System.IO.TextWriter,System.Object)"] = "XmlSerialize",
+        ["System.Void System.IO.StreamWriter::.ctor(System.String)"] = "FileWriter",
     };
 
     static int ReplaceCalls(List<AssemblyDefinition> assemblies, AssemblyDefinition engine)
@@ -437,8 +442,10 @@ internal static class Program
                     if (!m.HasBody) continue;
                     foreach (var ins in m.Body.Instructions)
                     {
-                        if ((ins.OpCode != OpCodes.Call && ins.OpCode != OpCodes.Callvirt) || !(ins.Operand is MethodReference mr)) continue;
+                        // newobj of a replaced constructor becomes a call that returns the object
+                        if ((ins.OpCode != OpCodes.Call && ins.OpCode != OpCodes.Callvirt && ins.OpCode != OpCodes.Newobj) || !(ins.Operand is MethodReference mr)) continue;
                         if (!CallReplacements.TryGetValue(mr.FullName, out var name)) continue;
+                        if ((ins.OpCode == OpCodes.Newobj) != (mr.Name == ".ctor")) continue;
                         var target = platform.Methods.First(x => x.Name == name);
                         ins.OpCode = OpCodes.Call;
                         ins.Operand = m.Module.ImportReference(target);

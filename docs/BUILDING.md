@@ -316,6 +316,24 @@ writes them to `work/console/learned`; `tools/stage_console.py` copies them
 into `GameData/learned`. Delete the `learned` folder next to the XEX to start
 over from the shipped lists.
 
+The game's .NET runtime reserves its memory in 16 MB blocks and uses part of
+each. The console gives the unused parts back to the textures and takes them
+again when the runtime asks (the log's `frame` lines say how much is given
+back). `nodecommit.txt` next to `default.xex` turns that off, so every block
+stays whole as it did before; use it only to tell whether a problem comes
+from there.
+
+`python tools/level_textures.py --jobs 5` plays every level with the bot on
+the PC host and prints, per level, how many MB of sprite pages one frame
+draws and how many are drawn within 2 and 5 seconds (a looping animation's
+frames all come round within its loop, so that is what has to be in memory
+together), against the room the console's textures have (`--room`), and the
+image effects the level runs on cameras of its own. `--report` prints the
+table again from the traces it kept in `work/leveltex`.
+`python tools/texture_density.py <trace>` reads the same traces and says how
+many screen pixels a texel of each page covered at most: at 720p nearly all
+of the art is drawn at one pixel a texel, so smaller pages would show.
+
 ## After an update
 
 After `git pull` in `cuphead360` (and in `spire360`):

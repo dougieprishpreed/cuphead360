@@ -199,6 +199,7 @@ def stage_c(a):
         split_cold(cdir, LINKMAP, HOT_LIST)
     else:
         print("the -Os split is off (--no-cold-os): every function -O2")
+    hook_gc_memory(cdir, LINKMAP)
     print(len([f for f in os.listdir(cdir) if f.endswith(".c")]), "C files in", cdir)
 
 
@@ -293,6 +294,73 @@ def split_cold(cdir, linkmap, hot_list):
         with open(path[:-2] + "_cold.c", "wb") as f:
             f.write(eol.join(head + rare).encode("utf-8"))
     print("hot list: %d functions -O2 (%d not in the list), %d to the -Os files" % (n_hot, n_new, n_cold))
+
+
+# The collector's four calls for memory (libPortableRuntime's gcenv.wasm.cpp) and what each becomes: the host's hook
+# in its place, or the hook around the function as translated (kept as <fN>_translated).
+GC_HOOKS = {
+    "_ZN15GCToOSInterface14VirtualReserveEmmjt": ("around", "U32 p=ch360_gc_reuse(instance,l0,l1);\nif(p==0U){p=%(inner)s(instance,l0,l1,l2,l3);ch360_gc_reserved(instance,p,l0);}\nreturn p;",
+                                                  "void ch360_gc_reserved(wasmModuleInstance*,U32,U32);U32 ch360_gc_reuse(wasmModuleInstance*,U32,U32);"),
+    "_ZN15GCToOSInterface14VirtualReleaseEPvm": ("around", "if(ch360_gc_release(instance,l0,l1))return 1U;\nreturn %(inner)s(instance,l0,l1);",
+                                                 "U32 ch360_gc_release(wasmModuleInstance*,U32,U32);"),
+    "_ZN15GCToOSInterface13VirtualCommitEPvmt": ("instead", "return ch360_gc_commit(instance,l0,l1);",
+                                                 "U32 ch360_gc_commit(wasmModuleInstance*,U32,U32);"),
+    "_ZN15GCToOSInterface15VirtualDecommitEPvm": ("instead", "return ch360_gc_decommit(instance,l0,l1);",
+                                                  "U32 ch360_gc_decommit(wasmModuleInstance*,U32,U32);"),
+}
+
+
+def hook_gc_memory(cdir, linkmap):
+    """The collector's reserve, commit, decommit and release of memory go through the host (console/ch360_imports.c,
+    "the collector's memory"): in the wasm build a reserve mallocs the whole block, commit does nothing and decommit
+    zeroes, so on the console every block was physical memory whole, used or not. The functions are found by name in
+    the link map; all four or the build stops (a runtime update that renames them must not ship half-hooked)."""
+    if not os.path.exists(linkmap):
+        sys.exit("hook_gc_memory: no link map (%s)" % linkmap)
+    names = function_names(linkmap, os.path.join(cdir, "player.h"))
+    want = {f: GC_HOOKS[n] for f, n in names.items() if n in GC_HOOKS}
+    if len(want) != len(GC_HOOKS):
+        sys.exit("hook_gc_memory: %d of the collector's %d memory functions found in the link map" % (len(want), len(GC_HOOKS)))
+    done = set()
+    for name in sorted(os.listdir(cdir)):
+        if not re.match(r"m6_player\.s\d+(_cold)?\.c$", name):
+            continue
+        path = os.path.join(cdir, name)
+        with open(path, "rb") as f:
+            text = f.read().decode("utf-8")
+        changed = False
+        for fn, (how, body, decl) in want.items():
+            if re.search(r"(?m)^(static )?U32 %s_translated\(" % fn, text):
+                done.add(fn)   # hooked already (this C was patched before)
+                continue
+            m = re.search(r"(?m)^(U32 %s\((wasmModuleInstance\* instance[^)]*)\) \{)(\r?\n)" % fn, text)
+            if not m:
+                continue
+            eol = m.group(3)
+            # the function's end: w2c2 closes inner blocks at the line's start too, so by depth
+            depth, at = 1, m.end()
+            while depth > 0:
+                nl = text.index(eol, at)
+                line = text[at:nl]
+                depth += line.count("{") - line.count("}")
+                at = nl + len(eol)
+            whole = text[m.start():at - len(eol)]
+            inner = fn + "_translated"
+            new = decl + eol
+            if how == "around":
+                new += "static " + whole.replace("U32 %s(" % fn, "U32 %s(" % inner, 1) + eol
+            else:
+                new += "U32 %s(void);   /* left out: the host's in its place */%s" % (inner, eol)
+            new += m.group(1) + eol + (body % {"inner": inner}).replace("\n", eol) + eol + "}"
+            text = text[:m.start()] + new + text[at - len(eol):]
+            changed = True
+            done.add(fn)
+        if changed:
+            with open(path, "wb") as f:
+                f.write(text.encode("utf-8"))
+    if len(done) != len(want):
+        sys.exit("hook_gc_memory: %d of %d functions patched in the C" % (len(done), len(want)))
+    print("the collector's memory calls go through the host: %s" % ", ".join(sorted(want)))
 
 
 ACCESS = re.compile(r"\b((?:i32|i64|f32|f64)_(?:load|store)(?:8|16|32)?(?:_[su])?)\(i->m0,")
