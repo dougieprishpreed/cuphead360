@@ -333,6 +333,22 @@ table again from the traces it kept in `work/leveltex`.
 `python tools/texture_density.py <trace>` reads the same traces and says how
 many screen pixels a texel of each page covered at most: at 720p nearly all
 of the art is drawn at one pixel a texel, so smaller pages would show.
+With `--dump 60` it also keeps every 60th frame's draw list and prints, per
+level, the render passes, the pixels drawn into render textures and an
+estimate of the console's GPU time a frame (fitted to a console run's
+measured scenes); `--gpu` prints that table again. With `--cover` it records
+which 4x4 blocks of each atlas page the sprites' triangles read, in every
+level and scene, merged into `work/console/cover.bin`.
+`python tools/remap_check.py <dump> work/GameData` checks a draw dump against
+the full-size pages: each item's texels, and every texel under its triangles
+that bilinear filtering can read.
+
+Image effects that run over an empty layer are left out: a camera that draws
+nothing, blurred and copied, gives a transparent picture, so its passes and
+the full-screen sprite that shows it are skipped (Glumstone's geese, about
+half its GPU time), and a clear that a later pass overwrites unread is
+dropped. The picture is the same. `nofold.txt` next to `default.xex` draws
+every pass as the game asks.
 
 ## After an update
 

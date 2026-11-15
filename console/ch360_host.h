@@ -131,6 +131,14 @@ void ch360_plat_texture_file(int id, const char* key);
 void ch360_plat_texture_guess(int id);
 /* Whether the read-ahead was held back for want of memory lately (the learned read-ahead then asks less far). */
 int ch360_plat_texture_tight(void);
+/* Image effects over nothing folded away (ch360_imports.c): 0 leaves every view as the game made it (set before the
+ * player starts). ch360_fold_counts: views left out, passes made clears, sprites left out, frames that had any. */
+extern int ch360_fold_effects;
+/* The PC host's trace of what each atlas page's sprite triangles read (ch360_imports.c, CH360_TRACE_COVER): the path, and
+ * its writing at exit. */
+extern const char* ch360_cover_path;
+void ch360_cover_write(void);
+unsigned ch360_fold_counts(unsigned* cleared, unsigned* items, unsigned* frames);
 /* Texture id is likely drawn soon: read it ahead if memory allows (never waited for). wanted: a sprite near
  * the view or a frame of a clip on screen (room is made from textures not drawn lately); else a guess (an
  * atlas the game loaded, the other pages of one drawn): only its stored bytes are kept, and only with room. */
@@ -243,6 +251,8 @@ unsigned ch360_remap_misses(void);
 unsigned ch360_remap_counts(unsigned* boxes, unsigned* targets);
 /* The player's linear memory, in KB (committed as it grows). */
 unsigned ch360_memory_kb(void);
+/* Items kept on their atlas page because they reach beyond their sprite's copied texels (ctexmap version 2). */
+unsigned ch360_remap_guarded(void);
 
 /* A whole file to write (the game's save, at a host path; the bytes are the caller's: copied before this returns).
  * The console writes it on another thread and makes any later open of a save file wait for it. 1 if taken; 0 if

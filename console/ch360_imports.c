@@ -3,6 +3,7 @@
  * because the translated module's header is C. Guest pointers become host
  * pointers through srt_mem_ptr; multi-byte values in guest memory are
  * little-endian, which the platform layer reads with ch360_u32/ch360_f32. */
+#include <math.h>
 #include "w2c2_base.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -217,6 +218,9 @@ typedef struct remap_page {
 typedef struct remap_box {
     float u0, v0, u1, v1, su, ou, sv, ov;
     unsigned target;
+    /* version 2: 8 x 8 cells over the box (bit 8 * row + column, rows along v), set where its sprite page holds the
+     * sprite's texels; all set: the whole box (version 1, or a sprite copied whole). */
+    unsigned mask_lo, mask_hi;
 } remap_box;
 
 int ch360_ctex_pack = -1;
@@ -288,24 +292,30 @@ static int plat_id(int player_id) {
     return plat_of_player[player_id];
 }
 
-/* The remap table: 'CHRM' u32 version (1) pages boxes targets string-bytes;
+/* The remap table: 'CHRM' u32 version (1 or 2) pages boxes targets string-bytes;
  * pages (u32 hash_hi hash_lo first count, by hash), boxes (f32 u0 v0 u1 v1
- * su ou sv ov, u32 target), targets (u32 offset of the page's key), keys. */
+ * su ou sv ov, u32 target; version 2: u32 mask_lo mask_hi), targets (u32 offset of the page's key), keys.
+ * Version 2 is for a layout that copies onto the sprite pages only the blocks the sprites' triangles were seen to read
+ * (the PC sweep's CH360_TRACE_COVER; tools/cluster_console.py doesn't make it: packed by shape, Glumstone's pages came
+ * out only 7% smaller, 2026-11-14); a draw whose vertices leave those blocks (a quad over a sprite seen only as its
+ * mesh) would stay on the atlas page (remap_fits). Version 1's boxes are whole: the check returns at once. */
 static void remap_load(void) {
     ch360_pack_entry e;
     unsigned char* d;
-    unsigned i, need, sb;
+    unsigned i, need, sb, bs, version;
     if (ch360_ctex_pack < 0 || !ch360_pack_find(ch360_ctex_pack, "ctexmap", 7, &e) || e.size < 24) return;
     d = (unsigned char*)malloc(e.size);
-    if (d == NULL || ch360_pack_read(&e, 0, d, e.size) != 0 || le32(d) != 0x4d524843u || le32(d + 4) != 1) {
+    if (d == NULL || ch360_pack_read(&e, 0, d, e.size) != 0 || le32(d) != 0x4d524843u || (le32(d + 4) != 1 && le32(d + 4) != 2)) {
         free(d);
         return;
     }
+    version = le32(d + 4);
+    bs = version == 2 ? 44u : 36u;
     rm_page_count = le32(d + 8);
     rm_box_count = le32(d + 12);
     rm_target_count = le32(d + 16);
     sb = le32(d + 20);
-    need = 24 + rm_page_count * 16 + rm_box_count * 36 + rm_target_count * 4 + sb;
+    need = 24 + rm_page_count * 16 + rm_box_count * bs + rm_target_count * 4 + sb;
     rm_pages = (remap_page*)malloc((rm_page_count + 1) * sizeof(remap_page));
     rm_boxes = (remap_box*)malloc((rm_box_count + 1) * sizeof(remap_box));
     rm_names = (unsigned*)malloc((rm_target_count + 1) * sizeof(unsigned));
@@ -327,7 +337,7 @@ static void remap_load(void) {
         rm_pages[i].prefetched = 0;
     }
     for (i = 0; i < rm_box_count; i++) {
-        const U8* p = d + 24 + rm_page_count * 16 + i * 36;
+        const U8* p = d + 24 + rm_page_count * 16 + i * bs;
         rm_boxes[i].u0 = lef(p);
         rm_boxes[i].v0 = lef(p + 4);
         rm_boxes[i].u1 = lef(p + 8);
@@ -337,9 +347,11 @@ static void remap_load(void) {
         rm_boxes[i].sv = lef(p + 24);
         rm_boxes[i].ov = lef(p + 28);
         rm_boxes[i].target = le32(p + 32);
+        rm_boxes[i].mask_lo = version == 2 ? le32(p + 36) : 0xFFFFFFFFu;
+        rm_boxes[i].mask_hi = version == 2 ? le32(p + 40) : 0xFFFFFFFFu;
     }
     for (i = 0; i < rm_target_count; i++) {
-        rm_names[i] = le32(d + 24 + rm_page_count * 16 + rm_box_count * 36 + i * 4);
+        rm_names[i] = le32(d + 24 + rm_page_count * 16 + rm_box_count * bs + i * 4);
         rm_plat[i] = -1;
     }
     memcpy(rm_strings, d + need - sb, sb);
@@ -456,6 +468,144 @@ static int remap_find(remap_page* p, float u0, float v0, float u1, float v1) {
     return -1;
 }
 
+/* ---- what of each atlas page the sprites' triangles read (CH360_TRACE_COVER, the PC host) ----
+ * Per source atlas page a 1024 x 1024 grid over its uv (4 texels a cell on a 4096 page: one DXT block), a cell set
+ * where any triangle drawn from the page's sprites, widened by a cell, meets it: the texels a draw can sample
+ * (bilinear reads half a texel beyond a triangle). tools/cluster_console.py (--cover) copies only those blocks of
+ * each sprite: transparent space around and inside irregular shapes was 37-85% of Glumstone's pages. Each sprite mesh
+ * once (a table of the meshes seen); written at exit (ch360_cover_write): per page u32 hi, lo, then 1024 * 1024 / 8
+ * bytes; then u32 0xFFFFFFFF, the count of sprite boxes drawn and each as u32 hi, lo and f32 u0, v0, u1, v1. */
+#define COVER_N 1024u
+const char* ch360_cover_path;
+static unsigned char** cover_bits;     /* per remap page */
+static unsigned* cover_seen;
+static unsigned cover_seen_cap, cover_seen_n;
+
+static int cover_new_mesh(unsigned key) {
+    unsigned h, i;
+    if (key == 0) key = 1;
+    if (cover_seen_n * 2 >= cover_seen_cap) {
+        unsigned cap = cover_seen_cap ? cover_seen_cap * 2 : 65536, *b = (unsigned*)calloc(cap, sizeof(unsigned));
+        if (b == NULL) return 1;
+        for (i = 0; i < cover_seen_cap; i++)
+            if (cover_seen[i]) {
+                for (h = cover_seen[i] & (cap - 1); b[h]; h = (h + 1) & (cap - 1)) {}
+                b[h] = cover_seen[i];
+            }
+        free(cover_seen);
+        cover_seen = b;
+        cover_seen_cap = cap;
+    }
+    for (h = key & (cover_seen_cap - 1); cover_seen[h]; h = (h + 1) & (cover_seen_cap - 1))
+        if (cover_seen[h] == key) return 0;
+    cover_seen[h] = key;
+    cover_seen_n++;
+    return 1;
+}
+
+static void cover_tri(unsigned char* bits, const float* a, const float* b, const float* c) {
+    float x[3] = { a[0] * COVER_N, b[0] * COVER_N, c[0] * COVER_N }, y[3] = { a[1] * COVER_N, b[1] * COVER_N, c[1] * COVER_N };
+    float area = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]), nx[3], ny[3], off[3], d[3];
+    int x0, x1, y0, y1, cx, cy, e;
+    if (area > -1e-9f && area < 1e-9f) return;   /* draws nothing */
+    for (e = 0; e < 3; e++) {
+        int f = (e + 1) % 3;
+        /* inward normal of the edge (e, f) whatever the winding */
+        nx[e] = area > 0 ? -(y[f] - y[e]) : (y[f] - y[e]);
+        ny[e] = area > 0 ? (x[f] - x[e]) : -(x[f] - x[e]);
+        d[e] = nx[e] * x[e] + ny[e] * y[e];
+        /* a cell's half extent projected, and one cell more */
+        off[e] = 0.5f * (fabsf(nx[e]) + fabsf(ny[e])) + sqrtf(nx[e] * nx[e] + ny[e] * ny[e]);
+    }
+    x0 = (int)floorf(fminf(x[0], fminf(x[1], x[2]))) - 2;
+    x1 = (int)floorf(fmaxf(x[0], fmaxf(x[1], x[2]))) + 2;
+    y0 = (int)floorf(fminf(y[0], fminf(y[1], y[2]))) - 2;
+    y1 = (int)floorf(fmaxf(y[0], fmaxf(y[1], y[2]))) + 2;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int)COVER_N - 1) x1 = (int)COVER_N - 1;
+    if (y1 > (int)COVER_N - 1) y1 = (int)COVER_N - 1;
+    for (cy = y0; cy <= y1; cy++)
+        for (cx = x0; cx <= x1; cx++) {
+            float px = cx + 0.5f, py = cy + 0.5f;
+            if (nx[0] * px + ny[0] * py - d[0] >= -off[0] && nx[1] * px + ny[1] * py - d[1] >= -off[1] &&
+                nx[2] * px + ny[2] * py - d[2] >= -off[2])
+                bits[(cy * COVER_N + cx) >> 3] |= (unsigned char)(1u << (cx & 7));
+        }
+}
+
+static unsigned char* cover_box_drawn;   /* per box: drawn */
+
+/* An item about to be drawn from an atlas page: all its mesh's triangles (before any culling or clipping), in the
+ * page's uv, onto the page's grid; the sprite box that holds the mesh marked drawn. Each mesh once. */
+static void cover_mesh(const ch360_item* it, const U8* tri, U32 ntri, const U8* uv, U32 nuv) {
+    remap_page* p;
+    float u0 = 3.0e38f, v0 = 3.0e38f, u1 = -3.0e38f, v1 = -3.0e38f;
+    unsigned k, key = 2166136261u, pi;
+    int bi;
+    if (ch360_cover_path == NULL || nuv == 0 || (p = remap_page_for(it)) == NULL) return;
+    for (k = 0; k < nuv; k++) {
+        float u = lef(uv + 8 * k), v = lef(uv + 8 * k + 4);
+        if (u < u0) u0 = u;
+        if (u > u1) u1 = u;
+        if (v < v0) v0 = v;
+        if (v > v1) v1 = v;
+        key = (key ^ le32(uv + 8 * k)) * 16777619u;
+        key = (key ^ le32(uv + 8 * k + 4)) * 16777619u;
+    }
+    if ((bi = remap_find(p, u0, v0, u1, v1)) < 0) return;
+    key = (key ^ (unsigned)bi) * 16777619u;
+    key = (key ^ ntri) * 16777619u;
+    if (!cover_new_mesh(key)) return;
+    pi = (unsigned)(p - rm_pages);
+    if (cover_bits == NULL) cover_bits = (unsigned char**)calloc(rm_page_count, sizeof(unsigned char*));
+    if (cover_box_drawn == NULL) cover_box_drawn = (unsigned char*)calloc(rm_box_count, 1);
+    if (cover_bits == NULL || cover_box_drawn == NULL || pi >= rm_page_count) return;
+    if (cover_bits[pi] == NULL && (cover_bits[pi] = (unsigned char*)calloc(COVER_N * COVER_N / 8, 1)) == NULL) return;
+    cover_box_drawn[bi] = 1;
+    for (k = 0; k + 2 < ntri; k += 3) {
+        float t[3][2];
+        unsigned q;
+        for (q = 0; q < 3; q++) {
+            U32 i = le32(tri + 4 * (k + q));
+            if (i >= nuv) i = 0;
+            t[q][0] = lef(uv + 8 * i);
+            t[q][1] = lef(uv + 8 * i + 4);
+        }
+        cover_tri(cover_bits[pi], t[0], t[1], t[2]);
+    }
+}
+
+void ch360_cover_write(void) {
+    FILE* f;
+    unsigned i, n = 0;
+    if (ch360_cover_path == NULL || cover_bits == NULL || (f = fopen(ch360_cover_path, "wb")) == NULL) return;
+    for (i = 0; i < rm_page_count; i++)
+        if (cover_bits[i] != NULL) {
+            fwrite(&rm_pages[i].hi, 4, 1, f);
+            fwrite(&rm_pages[i].lo, 4, 1, f);
+            fwrite(cover_bits[i], 1, COVER_N * COVER_N / 8, f);
+            n++;
+        }
+    {
+        unsigned boxes = 0, mark = 0xFFFFFFFFu;
+        for (i = 0; i < rm_box_count; i++) boxes += cover_box_drawn != NULL && cover_box_drawn[i];
+        fwrite(&mark, 4, 1, f);
+        fwrite(&boxes, 4, 1, f);
+        for (i = 0; i < rm_page_count; i++) {
+            unsigned k;
+            for (k = rm_pages[i].first; k < rm_pages[i].first + rm_pages[i].count && k < rm_box_count; k++)
+                if (cover_box_drawn != NULL && cover_box_drawn[k]) {
+                    fwrite(&rm_pages[i].hi, 4, 1, f);
+                    fwrite(&rm_pages[i].lo, 4, 1, f);
+                    fwrite(&rm_boxes[k].u0, 4, 4, f);
+                }
+        }
+        fclose(f);
+        printf("[host] cover: %u atlas pages, %u sprite meshes, %u sprites drawn, written to %s\n", n, cover_seen_n, boxes, ch360_cover_path);
+    }
+}
+
 /* A box's sprite page's id, given to the host the first time (its siblings read ahead then). */
 static int remap_target_id(remap_page* p, const remap_box* b) {
     int id = b->target < rm_target_count ? rm_plat[b->target] : -1;
@@ -469,14 +619,61 @@ static int remap_target_id(remap_page* p, const remap_box* b) {
     return id;
 }
 
-static const remap_box* remap_lookup(remap_page* p, ch360_item* it, float u0, float v0, float u1, float v1) {
+/* CH360_TRACE_MISSES=n (the PC host): the first n items whose uv box no sprite box holds, logged. */
+int rm_trace_misses;
+
+/* Every vertex (n uvs, stride floats apart) in a cell of the box its sprite page holds. */
+static unsigned rm_guarded;
+static int remap_fits(const remap_box* b, const float* uv, unsigned n, unsigned stride) {
+    float fu, fv;
+    unsigned k;
+    if ((b->mask_lo & b->mask_hi) == 0xFFFFFFFFu) return 1;
+    fu = 8.0f / (b->u1 - b->u0);
+    fv = 8.0f / (b->v1 - b->v0);
+    for (k = 0; k < n; k++, uv += stride) {
+        int cu = (int)((uv[0] - b->u0) * fu), cv = (int)((uv[1] - b->v0) * fv), bit;
+        if (cu < 0) cu = 0;
+        if (cu > 7) cu = 7;
+        if (cv < 0) cv = 0;
+        if (cv > 7) cv = 7;
+        bit = cv * 8 + cu;
+        if (!((bit < 32 ? b->mask_lo >> bit : b->mask_hi >> (bit - 32)) & 1u)) return 0;
+    }
+    return 1;
+}
+
+unsigned ch360_remap_guarded(void) {
+    return rm_guarded;
+}
+
+static const remap_box* remap_lookup(remap_page* p, ch360_item* it, float u0, float v0, float u1, float v1,
+                                     const float* uv, unsigned n, unsigned stride) {
     int bi = remap_find(p, u0, v0, u1, v1), id;
     const remap_box* b;
     if (bi < 0) {
         rm_misses++;
+        if (rm_trace_misses > 0 && it->texture >= 0 && (unsigned)it->texture < plat_names_cap && plat_names[it->texture] != NULL) {
+            char line[512];
+            int n;
+            rm_trace_misses--;
+            n = snprintf(line, sizeof(line), "REMAP miss: %s uv %.5f %.5f - %.5f %.5f, mode %u, %u vertices\n",
+                         plat_names[it->texture], u0, v0, u1, v1, it->mode, it->count);
+            if (n > 0) ch360_plat_log(line, (size_t)(n < (int)sizeof(line) ? n : (int)sizeof(line) - 1));
+        }
         return NULL;
     }
     b = &rm_boxes[bi];
+    if (!remap_fits(b, uv, n, stride)) {
+        /* drawn in a way the sweep never saw: the atlas page (halved) rather than a neighbour's texels */
+        rm_guarded++;
+        if (rm_guarded <= 8) {
+            char line[512];
+            int m = snprintf(line, sizeof(line), "REMAP guard: an item of %u vertices (mode %u) on %s reaches beyond its sprite's copied texels; drawn from the atlas page\n",
+                             n, it->mode, it->texture >= 0 && (unsigned)it->texture < plat_names_cap && plat_names[it->texture] ? plat_names[it->texture] : "?");
+            if (m > 0) ch360_plat_log(line, (size_t)(m < (int)sizeof(line) ? m : (int)sizeof(line) - 1));
+        }
+        return NULL;
+    }
     id = remap_target_id(p, b);
     if (id < 0) return NULL;
     if (it->mode == 10 || it->mode == 35) { /* their taps' offsets are in the page's uvs */
@@ -504,7 +701,7 @@ static void remap_item(ch360_item* it) {
         if (v[k].v < v0) v0 = v[k].v;
         if (v[k].v > v1) v1 = v[k].v;
     }
-    b = remap_lookup(p, it, u0, v0, u1, v1);
+    b = remap_lookup(p, it, u0, v0, u1, v1, &draw_verts[it->first].u, it->count, (unsigned)(sizeof(ch360_vertex) / sizeof(float)));
     if (b == NULL) return;
     for (k = 0; k < it->count; k++) {
         v[k].u = v[k].u * b->su + b->ou;
@@ -660,7 +857,7 @@ static void draw_item_unclipped(ch360_item* it, const U8* tri, U32 ntri, const U
             if (v < v0) v0 = v;
             if (v > v1) v1 = v;
         }
-        b = remap_lookup(p, it, u0, v0, u1, v1);
+        b = remap_lookup(p, it, u0, v0, u1, v1, fu, nuv, 2);
         if (b != NULL)
             for (i = 0; i < nuv; i++) {
                 fu[2 * i] = fu[2 * i] * b->su + b->ou;
@@ -782,6 +979,7 @@ void i5_ch3609_drawX5Fitem(wasmModuleInstance* inst, U32 args) {
     it->textures[1] = draw_texture((int)le32(a + 108));
     for (k = 0; k < 12; k++) it->params[k] = mode == 6 ? (k < 3 ? lef(a + 112 + 4 * k) : 0.0f) : lef(a + 128 + 4 * k);
     it->stencil = le32(a + 124);
+    if (ch360_cover_path != NULL) cover_mesh(it, tri, ntri, uv, nuv < npos ? nuv : npos);
     if (!clipped) {
         draw_item_unclipped(it, tri, ntri, pos, npos, uv, nuv, col, ncol, affine ? m : NULL, blend);
         if (draw_item_count > kept_from) tween_item(draw_item_count - 1, key, affine, m[2], m[5]);
@@ -1125,12 +1323,142 @@ U32 i5_ch36016_fileX5FwriteX5Flater(wasmModuleInstance* inst, U32 path, U32 path
     return ch360_plat_file_write(host, len > 0 ? srt_mem_ptr(data) : (const U8*)"", len) ? 1u : 0u;
 }
 
+/* ---- image effects over nothing, folded ----
+ * A camera that draws nothing into a render texture cleared to transparent black, and image effects after it that
+ * only average texels (BlurOptimized's downsample, its blur passes, a copy), leave transparent black in every target
+ * they write; a sprite drawing that texture premultiplied over adds nothing. Glumstone's GeeseCamera did all of it
+ * every frame of the fight, the geese in view in about one frame in twenty-five: its camera's clear, six full-screen
+ * passes and a full-screen sprite (11 passes a frame, 14 ms of the console's GPU, the forty-first run). Here, per frame
+ * and in order:
+ *   - a pass that averages a target known to be transparent black becomes a clear of its own target (or nothing, if
+ *     that is transparent black already);
+ *   - a sprite that samples such a target, premultiplied over without a stencil, is left out;
+ *   - a view that only clears a target, which a later view of the frame overwrites (a clear of at least the same
+ *     buffers over all of it, or a pass over all of it) before anything reads it, is left out.
+ * The picture is the same: every texel any kept draw reads holds what it held before. ch360_fold_effects = 0 (the
+ * PC's CH360_FOLD_EFFECTS=0, the console's nofold.txt) leaves every view as the game made it. */
+#define FOLD_RTS 64
+int ch360_fold_effects = 1;
+static ch360_view* fold_views;
+static unsigned fold_views_cap;
+static unsigned fold_dropped, fold_cleared, fold_items, fold_frames;
+
+unsigned ch360_fold_counts(unsigned* cleared, unsigned* items, unsigned* frames) {
+    if (cleared != NULL) *cleared = fold_cleared;
+    if (items != NULL) *items = fold_items;
+    if (frames != NULL) *frames = fold_frames;
+    return fold_dropped;
+}
+
+static int fold_rt(int texture) {
+    return texture >= CH360_RT_BASE && texture < CH360_RT_BASE + FOLD_RTS ? texture - CH360_RT_BASE : -1;
+}
+
+static int fold_whole(const ch360_view* v) {
+    return v->target != 0 && v->x <= 0.0f && v->y <= 0.0f && v->x + v->w >= (float)v->tw && v->y + v->h >= (float)v->th;
+}
+
+/* An item over all of the view's target (a blit's one quad). */
+static int fold_covers(const ch360_item* it, const ch360_view* v) {
+    return it->x0 <= 0.0f && it->y0 <= 0.0f && it->x1 >= (float)v->tw && it->y1 >= (float)v->th;
+}
+
+static int fold_averages(unsigned mode) {
+    return mode == 11u || mode == 12u || mode == 13u || mode == 18u;   /* Copy, Down4, Blur7, Blur7Alpha (Effects.cs) */
+}
+
+/* The frame's views as the platform gets them (draw_views itself when nothing folds). */
+static const ch360_view* fold_frame(unsigned* count) {
+    unsigned char zero[FOLD_RTS], read_since[FOLD_RTS];
+    int writer[FOLD_RTS];            /* the kept view that last wrote the target, -1 none this frame */
+    unsigned writer_bits[FOLD_RTS];  /* what it wrote: its clear bits, 1 for a pass over all of it */
+    unsigned char writer_clear_only[FOLD_RTS];
+    unsigned v, i, kept = 0, any = 0;
+    *count = draw_view_count;
+    if (!ch360_fold_effects || draw_view_count == 0) return draw_views;
+    if (!draw_grow((void**)&fold_views, &fold_views_cap, draw_view_count, sizeof(ch360_view))) return draw_views;
+    memset(zero, 0, sizeof(zero));
+    memset(read_since, 0, sizeof(read_since));
+    memset(writer_clear_only, 0, sizeof(writer_clear_only));
+    for (i = 0; i < FOLD_RTS; i++) writer[i] = -1;
+    for (v = 0; v < draw_view_count; v++) {
+        ch360_view* w = &fold_views[kept];
+        const ch360_item* first;
+        int t, s;
+        unsigned bits = 0;
+        *w = draw_views[v];
+        t = w->target != 0 && w->target < FOLD_RTS ? (int)w->target : -1;
+        first = w->items > 0 && w->first_item < draw_item_count ? &draw_items[w->first_item] : NULL;
+        /* a pass that averages a target known to be transparent black */
+        if (t >= 0 && w->items == 1 && first != NULL && fold_whole(w) && !(w->clear & 4u) && fold_averages(first->mode) && fold_covers(first, w) &&
+            first->textures[0] < 0 && first->textures[1] < 0 && first->stencil == 0 && (s = fold_rt(first->texture)) >= 0 && zero[s]) {
+            any = 1;
+            if (zero[t]) {
+                fold_dropped++;
+                continue;                       /* already what it would write */
+            }
+            w->clear = 1u;
+            w->r = w->g = w->b = w->a = 0.0f;
+            w->items = 0;
+            fold_cleared++;
+            bits = 1u;
+        } else {
+            /* what its items read (a sprite over a transparent black target: left out) */
+            unsigned end = w->first_item + w->items;
+            for (i = w->first_item; i < end && i < draw_item_count; i++) {
+                ch360_item* it = &draw_items[i];
+                int r0 = fold_rt(it->texture), r1 = fold_rt(it->textures[0]), r2 = fold_rt(it->textures[1]);
+                if (r0 >= 0 && zero[r0] && it->mode == 0u && it->stencil == 0u && r1 < 0 && r2 < 0 && it->count > 0) {
+                    it->count = 0;              /* the platform skips an item without vertices */
+                    fold_items++;
+                    any = 1;
+                    continue;
+                }
+                if (r0 >= 0) read_since[r0] = 1;
+                if (r1 >= 0) read_since[r1] = 1;
+                if (r2 >= 0) read_since[r2] = 1;
+            }
+            if (t >= 0) {
+                if (w->clear & 4u) read_since[t] = 1;   /* goes on from what the target held */
+                if (fold_whole(w) && !(w->clear & 4u)) {
+                    if (w->clear & 1u) bits = w->clear & 3u;
+                    else if (w->items == 1 && first != NULL && first->mode >= 11u && first->mode <= 18u && fold_covers(first, w)) bits = 1u;   /* a blit replaces it */
+                }
+            }
+        }
+        if (t >= 0) {
+            /* the last clear-only writer, overwritten before anything read it */
+            if (bits != 0 && writer[t] >= 0 && writer_clear_only[t] && !read_since[t] && (writer_bits[t] & ~bits) == 0) {
+                unsigned k;
+                for (k = (unsigned)writer[t]; k + 1 < kept + 1; k++) fold_views[k] = fold_views[k + 1];
+                for (i = 0; i < FOLD_RTS; i++)
+                    if (writer[i] > writer[t]) writer[i]--;
+                kept--;
+                w = &fold_views[kept];
+                fold_dropped++;
+                any = 1;
+            }
+            if (bits != 0 || w->items > 0 || (w->clear & 1u)) {
+                int clear_only = w->items == 0 && (w->clear & 1u) && fold_whole(w) && !(w->clear & 4u);
+                zero[t] = (unsigned char)(clear_only && w->r == 0.0f && w->g == 0.0f && w->b == 0.0f && w->a == 0.0f);
+                writer[t] = (int)kept;
+                writer_bits[t] = bits ? bits : (w->clear & 3u);
+                writer_clear_only[t] = (unsigned char)clear_only;
+                read_since[t] = 0;
+            }
+        }
+        kept++;
+    }
+    if (any) fold_frames++;
+    *count = kept;
+    return fold_views;
+}
+
 void i5_ch3608_drawX5Fend(wasmModuleInstance* inst) {
     ch360_frame f;
     (void)inst;
     f.loading = draw_loading;
-    f.views = draw_views;
-    f.view_count = draw_view_count;
+    f.views = fold_frame(&f.view_count);
     f.items = draw_items;
     f.item_count = draw_item_count;
     f.vertices = draw_verts;

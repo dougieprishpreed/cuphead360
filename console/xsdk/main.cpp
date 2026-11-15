@@ -116,7 +116,17 @@ void flush_log(bool sync = false) {
 void logf(const char* fmt, ...);
 double now_ms();
 void memory_mb(unsigned* free_mb, unsigned* total_mb);
-static unsigned g_gc_decommits, g_gc_commits, g_gc_made_room;   // the collector's pages: calls, and times textures made room
+static unsigned g_gc_decommits, g_gc_commits, g_gc_made_room;
+static unsigned fold_cleared_now() {
+    unsigned c;
+    ch360_fold_counts(&c, NULL, NULL);
+    return c;
+}
+static unsigned fold_items_now() {
+    unsigned n;
+    ch360_fold_counts(NULL, &n, NULL);
+    return n;
+}   // the collector's pages: calls, and times textures made room
 extern "C" void srt_get_stats(void* out);
 
 // The USB drive is slow per write, and the texture loader and the clip reader read from it: lines queue in
@@ -2864,9 +2874,11 @@ void Renderer::frame(const ch360_frame* f) {
         // The GPU's own time (time stamps on every 4th frame), the passes and the pixels the items cover.
         double gf = host_gpu_frames_ ? host_gpu_frames_ : 1;
         logf("GPU frames %u-%u: %.1f ms/frame (render textures %.1f, effects %.1f, screen %.1f; %u frames timed); %.1f passes a frame; "
-             "fill %.2f screens + %.2f in render textures a frame; %u slow host parts (%u said)",
+             "fill %.2f screens + %.2f in render textures a frame; %u slow host parts (%u said); effects over nothing so far: %u views "
+             "left out, %u passes made clears, %u sprites left out",
              frame_no_ - 299, frame_no_, host_gpu_[GPU_KINDS] / gf, host_gpu_[GPU_RT] / gf, host_gpu_[GPU_FX] / gf, host_gpu_[GPU_SCREEN] / gf,
-             host_gpu_frames_, host_passes_ / 300.0, host_fill_[0] / 300, host_fill_[1] / 300, host_slow_, host_slow_logged_);
+             host_gpu_frames_, host_passes_ / 300.0, host_fill_[0] / 300, host_fill_[1] / 300, host_slow_, host_slow_logged_,
+             ch360_fold_counts(NULL, NULL, NULL), fold_cleared_now(), fold_items_now());
         if (dense_verts_) logf("HOST densest frame %u: %u vertices: %s", dense_frame_, dense_verts_, dense_top_);
         dense_verts_ = 0;
         memset(host_ms_, 0, sizeof(host_ms_));
@@ -3724,6 +3736,11 @@ int main() {
             fclose(q);
             ch360_verbose = 1;
             logf("profile run (profile.txt): scripts timed, texture and slow-part lines");
+        }
+        if ((q = fopen("game:/nofold.txt", "rb")) != NULL) {
+            fclose(q);
+            ch360_fold_effects = 0;
+            logf("nofold.txt: image effects over an empty layer are drawn as the game asks (Glumstone's geese)");
         }
         if ((q = fopen("game:/nodecommit.txt", "rb")) != NULL) {
             fclose(q);

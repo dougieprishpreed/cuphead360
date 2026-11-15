@@ -147,6 +147,11 @@ int ch360_plat_frame_begin(void) {
         static unsigned least = 0xFFFFFFFFu;
         unsigned held = ch360_memory_kb() - out;
         if (held < least) least = held;
+        {
+            unsigned fc, fi, ff, fd = ch360_fold_counts(&fc, &fi, &ff);
+            printf("[host] frame %ld: effects over nothing: %u views left out, %u passes made clears, %u sprites left out, in %u frames\n",
+                   frame_no, fd, fc, fi, ff);
+        }
         printf("[host] frame %ld: collector's blocks %u MB, %u MB of linear memory given back: %u of %u MB held (least %u); "
                "%lu decommits, %lu commits, %u failed\n", frame_no, reserved >> 10, out >> 10, held >> 10, ch360_memory_kb() >> 10,
                least >> 10, gc_decommits, gc_commits, fails);
@@ -428,6 +433,9 @@ int main(int argc, char** argv) {
     trace_dir = getenv("CH360_TRACE_TEX");
     if (getenv("CH360_TRACE_DRAWN")) drawn_trace = fopen(getenv("CH360_TRACE_DRAWN"), "w");
     if (getenv("CH360_GC_DECOMMIT") && atoi(getenv("CH360_GC_DECOMMIT")) == 0) ch360_gc_memory_off = 1;
+    if (getenv("CH360_FOLD_EFFECTS") && atoi(getenv("CH360_FOLD_EFFECTS")) == 0) ch360_fold_effects = 0;
+    if (getenv("CH360_TRACE_COVER")) ch360_cover_path = getenv("CH360_TRACE_COVER");
+    if (getenv("CH360_TRACE_MISSES")) { extern int rm_trace_misses; rm_trace_misses = atoi(getenv("CH360_TRACE_MISSES")); }
     {
         extern int ch360_pcm_whole;
         ch360_pcm_whole = getenv("CH360_PCM_WHOLE") != NULL;
@@ -457,6 +465,7 @@ int main(int argc, char** argv) {
     code = ch360_run(root, guestc, guest, memory_mb, 64, -1);
     if (wav) { wav_header(wav, audio_frames); fclose(wav); }
     if (dump_file) fclose(dump_file);
+    ch360_cover_write();
     if (drawn_trace) {
         for (i = 0; i < TRACE_IDS; i++)
             if (drawn_du[i] > 0 || drawn_dv[i] > 0) fprintf(drawn_trace, "D %d %.1f %.1f\n", i, drawn_du[i], drawn_dv[i]);

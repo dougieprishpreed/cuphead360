@@ -11,6 +11,9 @@ frames all come round within its loop: what must be in memory together for the l
 the room the console's textures have (--room MB); and the image effects the level's cameras run besides the two every
 scene has (EFFECT lines: a full-screen blur on a camera of its own is several passes of GPU time).
 --report: only the table, from the traces already there. A level takes 1-3 minutes.
+--cover: each play also writes what its sprites' triangles read (CH360_TRACE_COVER, work/leveltex/cover_<name>.bin),
+and the scenes (maps, shops, menus, cutscenes: --scenes) are visited too; --merge-cover writes them all as one,
+work/console/cover.bin, for tools/cluster_console.py --cover.
 """
 import argparse, concurrent.futures, os, re, shutil, subprocess, sys, time
 
@@ -24,22 +27,33 @@ OUT = os.path.join(ROOT, "work", "leveltex")
 EVERY = ("BlurGamma on RenderCamera", "ChromaticAberrationFilmGrain on RenderCamera")
 
 
-def play(level, root, fight, phase):
-    n = sw.LEVELS.index(level)
-    lo = sw.LOADOUTS[n % len(sw.LOADOUTS)]
-    load, setup = sw.SETUPS.get(level, (level, ""))
-    text = ll.LEVEL_SCRIPT.format(name=level, map="scene_map_world_1", primary=lo[0], secondary=lo[1], super=lo[2],
-                                  charm=lo[3], mugman="on" if lo[4] == "mugman" else "off", mode="Normal", level=load,
-                                  setup=setup, fight=fight, phase=phase)
+def play(level, root, fight, phase, cover=False, visit=2400, dump=0):
+    if level in sw.LEVELS:
+        n = sw.LEVELS.index(level)
+        lo = sw.LOADOUTS[n % len(sw.LOADOUTS)]
+        load, setup = sw.SETUPS.get(level, (level, ""))
+        text = ll.LEVEL_SCRIPT.format(name=level, map="scene_map_world_1", primary=lo[0], secondary=lo[1], super=lo[2],
+                                      charm=lo[3], mugman="on" if lo[4] == "mugman" else "off", mode="Normal", level=load,
+                                      setup=setup, fight=fight, phase=phase)
+        frames = 1800 + 900 + fight + 1500
+    else:   # a scene ("name" or "name:quiet")
+        scene, _, quiet = level.partition(":")
+        text = ll.SCENE_SCRIPT.format(name=scene, map="scene_map_world_1", scene=scene, frames=visit, quiet=" quiet" if quiet else "")
+        frames = 1800 + 900 + visit + 600
+        level = scene
     save = os.path.join(root, "save_trace")
     shutil.rmtree(save, ignore_errors=True)
     shutil.copytree(os.path.join(ROOT, "work", "console", "pcroot", "save_pc"), save)
     with open(os.path.join(root, "bot_trace.txt"), "w", encoding="utf-8") as f:
         f.write(text)
     env = dict(os.environ, CH360_GUEST_ENV=ll.GUEST_ENV, CH360_TRACE_DRAWN=os.path.join(OUT, "drawn_%s.txt" % level))
+    if cover:
+        env["CH360_TRACE_COVER"] = os.path.join(OUT, "cover_%s.bin" % level)
+    if dump:
+        env["CH360_DUMP_DRAW"] = "%s:%d" % (os.path.join(OUT, "dump_%s.bin" % level), dump)
     t0 = time.time()
     with open(os.path.join(OUT, "trace_%s.log" % level), "w", encoding="utf-8") as f:
-        subprocess.run([ll.HOST, "--root", root, "--frames", str(1800 + 900 + fight + 1500), "--", "run", "--console", "1",
+        subprocess.run([ll.HOST, "--root", root, "--frames", str(frames), "--", "run", "--console", "1",
                         "--data", "/GameData", "--save", "/save_trace", "--bot", "/bot_trace.txt"], stdout=f,
                        stderr=subprocess.STDOUT, cwd=ROOT, env=env, creationflags=0x08000000 if os.name == "nt" else 0)
     return time.time() - t0
@@ -55,7 +69,7 @@ def job(k, levels, a):
         shutil.copytree(learned, keep)
     try:
         for level in levels:
-            secs = play(level, root, a.fight, a.phase)
+            secs = play(level, root, a.fight, a.phase, a.cover, dump=a.dump)
             print("%-28s %4.0f s" % (level, secs), flush=True)
     finally:
         if os.path.exists(keep):
@@ -167,6 +181,117 @@ def report(levels, room):
     print("%d levels; !! %d draw more than the room (%d MB) within 2 s nine times in ten; ! %d more do within 5 s" % (len(rows), over2, room, over5))
 
 
+def merge_cover(out):
+    """Every cover_*.bin in OUT as one: the pages' grids OR'd, the drawn boxes put together."""
+    import glob, struct
+    grids, boxes = {}, set()
+    n = 1024 * 1024 // 8
+    for path in sorted(glob.glob(os.path.join(OUT, "cover_*.bin"))):
+        d = open(path, "rb").read()
+        p = 0
+        while p + 8 <= len(d):
+            hi, lo = struct.unpack_from("<II", d, p)
+            if hi == 0xFFFFFFFF:
+                count = lo
+                p += 8
+                for i in range(count):
+                    boxes.add(d[p:p + 24])
+                    p += 24
+                break
+            g = grids.get((hi, lo))
+            chunk = d[p + 8:p + 8 + n]
+            grids[(hi, lo)] = chunk if g is None else bytes(x | y for x, y in zip(g, chunk)) if False else (
+                (int.from_bytes(g, "little") | int.from_bytes(chunk, "little")).to_bytes(n, "little"))
+            p += 8 + n
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "wb") as f:
+        for (hi, lo), g in sorted(grids.items()):
+            f.write(struct.pack("<II", hi, lo))
+            f.write(g)
+        f.write(struct.pack("<II", 0xFFFFFFFF, len(boxes)))
+        for b in sorted(boxes):
+            f.write(b)
+    print("cover: %d atlas pages, %d sprites drawn -> %s" % (len(grids), len(boxes), out))
+
+
+# The console's GPU time a frame from its draw list, fitted to the forty-first run's measured scenes (SCENE GPU lines,
+# 11 scenes from 5.0 to 14.2 ms, 0.2 ms off on average): a pass (a render target begun), a screen of pixels covered in
+# render textures (the game's cameras draw into them; the screen's own fill is the last blit's, the same everywhere).
+GPU_BASE, GPU_PASS, GPU_RT_SCREEN, GPU_DRAW = 1.06, 0.74, 0.228, 0.006
+
+
+def gpu_frames(level):
+    """[(frame, passes, render texture fill in screens, items, blits, effects of its own)] from the level's draw dumps."""
+    import struct
+    path = os.path.join(OUT, "dump_%s.bin" % level)
+    if not os.path.exists(path):
+        return None
+    d = open(path, "rb").read()
+    p, out = 0, []
+    while p + 8 <= len(d):
+        f, n = struct.unpack_from("<II", d, p)
+        body = d[p + 8:p + 8 + n]
+        p += 8 + n
+        nv, ni, nx = struct.unpack_from("<III", body, 0)
+        io = 12 + 56 * nv
+        cur, passes, fill, items, blits = None, 0, 0.0, 0, 0
+        for v in range(nv):
+            x, y, w, h, clear, r, g, b, first, cnt, target, tw, th, a = struct.unpack_from("<4fI3fIIIIIf", body, 12 + 56 * v)
+            if target != cur:
+                passes += 1
+                cur = target
+            for i in range(first, min(first + cnt, ni)):
+                tex, mode, vf, vc, x0, y0, x1, y1 = struct.unpack_from("<iIIIffff", body, io + 92 * i)
+                if vc == 0:
+                    continue
+                items += 1
+                if 11 <= mode <= 18:
+                    blits += 1
+                if target:
+                    ww, hh = (tw or 1280), (th or 720)
+                    fill += max(0.0, min(x1, ww) - max(x0, 0.0)) * max(0.0, min(y1, hh) - max(y0, 0.0)) / (1280.0 * 720.0)
+        out.append((f, passes, fill, items, blits))
+    return out
+
+
+def level_range(level):
+    """The level's own frames (from its drawn trace's scene marks: the third load's start to the next), or None."""
+    path = os.path.join(OUT, "drawn_%s.txt" % level)
+    if not os.path.exists(path):
+        return None
+    marks = []
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for ln in f:
+            if ln.startswith("S "):
+                p = ln.split()
+                if p[2] == "1":
+                    marks.append(int(p[1]))
+    marks = sorted(set(marks))
+    return (marks[2], marks[3] if len(marks) > 3 else 1 << 30) if len(marks) > 2 else None
+
+
+def gpu_report(levels):
+    rows = []
+    for level in levels:
+        fr = gpu_frames(level)
+        rng = level_range(level)
+        if not fr or rng is None:
+            continue
+        play = [r for r in fr if rng[0] + 120 <= r[0] < rng[1]]
+        if not play:
+            continue
+        est = [GPU_BASE + GPU_PASS * r[1] + GPU_RT_SCREEN * r[2] + GPU_DRAW * r[3] for r in play]
+        k = len(play)
+        rows.append((level, k, sum(r[1] for r in play) / k, sum(r[2] for r in play) / k, sum(r[3] for r in play) / k,
+                     sum(r[4] for r in play) / k, sum(est) / k, sorted(est)[int(k * 0.95)] if k > 1 else est[0], max(est), effects(level)))
+    rows.sort(key=lambda r: -r[7])
+    print("%-26s %6s %7s %8s %6s %6s  %s" % ("level", "frames", "passes", "rt fill", "items", "blits", "GPU ms a frame, estimated: mean / 95% / most"))
+    for level, k, ps, fl, it, bl, mean, p95, mx, fx in rows:
+        flag = "!!" if p95 > 16.0 else "! " if p95 > 12.0 else "  "
+        print("%s %-23s %6d %7.1f %8.1f %6.0f %6.1f  %5.1f / %5.1f / %5.1f  %s" % (flag, level, k, ps, fl, it, bl, mean, p95, mx, "; ".join(fx)))
+    print("!! over 16 ms (a 60 Hz frame) in 5% of frames; ! over 12")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--levels", default="all")
@@ -175,15 +300,32 @@ def main():
     ap.add_argument("--phase", type=int, default=1200)
     ap.add_argument("--room", type=int, default=180, help="MB the console's textures have in a level")
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--cover", action="store_true", help="also trace what the sprites' triangles read, and visit the scenes")
+    ap.add_argument("--scenes", default="all", help="with --cover: the scenes visited (all, none or a list)")
+    ap.add_argument("--merge-cover", action="store_true", help="only merge the cover traces into work/console/cover.bin")
+    ap.add_argument("--dump", type=int, default=0, help="every this many frames, the draw list (CH360_DUMP_DRAW), for --gpu")
+    ap.add_argument("--gpu", action="store_true", help="only the GPU table, from the draw dumps already there")
     a = ap.parse_args()
+    if a.merge_cover:
+        merge_cover(os.path.join(ROOT, "work", "console", "cover.bin"))
+        return
+    if a.gpu:
+        gpu_report(sw.LEVELS if a.levels == "all" else [x for x in a.levels.split(",") if x])
+        return
     levels = sw.LEVELS if a.levels == "all" else [x for x in a.levels.split(",") if x]
+    if a.cover and a.scenes != "none":
+        levels = levels + (sw.SCENES if a.scenes == "all" else [x for x in a.scenes.split(",") if x])
     os.makedirs(OUT, exist_ok=True)
     if not a.report:
         jobs = max(1, min(a.jobs, len(levels)))
         with concurrent.futures.ThreadPoolExecutor(jobs) as pool:
             for f in [pool.submit(job, k, levels[k::jobs], a) for k in range(jobs)]:
                 f.result()
-    report(levels, a.room)
+    if a.cover:
+        merge_cover(os.path.join(ROOT, "work", "console", "cover.bin"))
+    report([x for x in levels if x in sw.LEVELS], a.room)
+    if a.dump:
+        gpu_report([x for x in levels if x in sw.LEVELS])
 
 
 if __name__ == "__main__":
