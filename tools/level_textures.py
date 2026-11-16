@@ -292,6 +292,90 @@ def gpu_report(levels):
     print("!! over 16 ms (a 60 Hz frame) in 5% of frames; ! over 12")
 
 
+def phase_report(levels, warn=110, bad=135):
+    """Per boss phase (the bot's "BOT phase" lines; a run-and-gun level in 20 s stretches): the MB of sprite pages drawn
+    within any 2 s, median / 90% / most, and its largest atlases. Glumstone's first phase (median 149, 90% 182 at the
+    forty-third run's ~195 MB of room) kept letting pages go it needed again; Hilda Berg, Cagney and Moonshine Mob's
+    first phases (50-80) played smoothly. A phase whose median passes --warn or whose 90% passes --bad is marked."""
+    import re, collections
+    sizes = sim.pack_sizes()
+    print("%-26s %-16s %6s  %s" % ("level", "phase", "frames", "MB within 2 s: median / 90% / most; largest atlases at 90%"))
+    flagged = []
+    for level in levels:
+        path, log = os.path.join(OUT, "drawn_%s.txt" % level), os.path.join(OUT, "trace_%s.log" % level)
+        if not os.path.exists(path) or not os.path.exists(log):
+            continue
+        rng = level_range(level)
+        if rng is None:
+            continue
+        marks = []
+        with open(log, encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                m = re.match(r"BOT phase (\S+) at frame (\d+)", ln)
+                if m:
+                    marks.append((int(m.group(2)), m.group(1)))
+                m = re.match(r"BOT won at frame (\d+)", ln)
+                if m:
+                    marks.append((int(m.group(1)), None))
+        key, frames = {}, []
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                if ln[0] == "K":
+                    q = ln.split()
+                    if len(q) >= 3:
+                        key[int(q[1])] = q[2]
+                elif ln[0] == "F":
+                    q = ln.split()
+                    if q[2] == "0" and rng[0] <= int(q[1]) < rng[1]:
+                        frames.append((int(q[1]), [int(x) for x in q[3:]]))
+        if not frames:
+            continue
+        if not [m for m in marks if m[1]]:   # no phases: 20 s stretches
+            f0, f1 = frames[0][0], frames[-1][0] + 1
+            marks = [(f, "%d-%ds" % ((f - f0) // 60, (f - f0) // 60 + 20)) for f in range(f0, f1, 1200)] + [(f1, None)]
+        marks.sort()
+        size = {}
+
+        def sz(i):
+            v = size.get(i)
+            if v is None:
+                k = key.get(i)
+                r = sizes.get(fnv(k)) if k else None
+                v = size[i] = r[1] if r else 0
+            return v
+
+        for (a0, name), (a1, _) in zip(marks, marks[1:]):
+            if name is None:
+                continue
+            fr = [x for x in frames if a0 + 60 <= x[0] < a1]
+            last, sets = {}, []
+            for n, (fno, ids) in enumerate(fr):
+                for i in ids:
+                    last[i] = n
+                if n % 15 == 0 and n >= 120:
+                    cur = [i for i, m in last.items() if n - m < 120]
+                    sets.append((sum(sz(i) for i in cur), cur))
+            if len(sets) < 4:
+                continue
+            sets.sort(key=lambda t: t[0])
+            p50, p90, mx = sets[len(sets) // 2][0] / 2**20, sets[int(len(sets) * 0.9)][0] / 2**20, sets[-1][0] / 2**20
+            g = collections.Counter()
+            for i in sets[int(len(sets) * 0.9)][1]:
+                m = re.match(r"bundles_atlas_(.*?)_CAB", key.get(i, ""))
+                g[m.group(1) if m else "other"] += sz(i)
+            mark = "!!" if p50 > warn or p90 > bad else "  "
+            if mark == "!!":
+                flagged.append((level, name, p50, p90))
+            print("%s %-23s %-16s %6d  %4.0f / %4.0f / %4.0f  %s" % (mark, level, name[:16], len(fr), p50, p90, mx,
+                  ", ".join("%s %.0f" % (k, v / 2**20) for k, v in g.most_common(3))))
+    print("!! median over %d MB or 90%% over %d MB (Glumstone's first phase: 149 / 182 at ~195 MB of room): %d phases" % (warn, bad, len(flagged)))
+    return flagged
+
+
+def fnv(k):
+    return sim.fnv64(k)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--levels", default="all")
@@ -305,12 +389,16 @@ def main():
     ap.add_argument("--merge-cover", action="store_true", help="only merge the cover traces into work/console/cover.bin")
     ap.add_argument("--dump", type=int, default=0, help="every this many frames, the draw list (CH360_DUMP_DRAW), for --gpu")
     ap.add_argument("--gpu", action="store_true", help="only the GPU table, from the draw dumps already there")
+    ap.add_argument("--phases", action="store_true", help="only the per-phase table, from the traces already there")
     a = ap.parse_args()
     if a.merge_cover:
         merge_cover(os.path.join(ROOT, "work", "console", "cover.bin"))
         return
     if a.gpu:
         gpu_report(sw.LEVELS if a.levels == "all" else [x for x in a.levels.split(",") if x])
+        return
+    if a.phases:
+        phase_report(sw.LEVELS if a.levels == "all" else [x for x in a.levels.split(",") if x])
         return
     levels = sw.LEVELS if a.levels == "all" else [x for x in a.levels.split(",") if x]
     if a.cover and a.scenes != "none":
@@ -324,6 +412,7 @@ def main():
     if a.cover:
         merge_cover(os.path.join(ROOT, "work", "console", "cover.bin"))
     report([x for x in levels if x in sw.LEVELS], a.room)
+    phase_report([x for x in levels if x in sw.LEVELS])
     if a.dump:
         gpu_report([x for x in levels if x in sw.LEVELS])
 

@@ -359,6 +359,12 @@ static void remap_load(void) {
     free(d);
 }
 
+/* A sprite page's key as the host reads it: the table's, or a smaller copy's (art_scale_apply). */
+static char** rm_keys;
+static const char* rm_key(unsigned t) {
+    return rm_keys != NULL && rm_keys[t] != NULL ? rm_keys[t] : rm_strings + rm_names[t];
+}
+
 static int remap_page_of(const char* key, size_t len) {
     unsigned hi, lo, a = 0, b = rm_page_count;
     if (rm_page_count == 0) return -1;
@@ -420,7 +426,7 @@ static void remap_prefetch(remap_page* p, int always) {
         if (rm_plat[t] < 0) {
             int id = rm_plat[t] = new_plat();
             if (id < 0) return;
-            name_plat(id, rm_strings + rm_names[t], 0);
+            name_plat(id, rm_key(t), 0);
         }
         ch360_plat_texture_prefetch(rm_plat[t], 0);
     }
@@ -612,7 +618,7 @@ static int remap_target_id(remap_page* p, const remap_box* b) {
     if (id < 0 && b->target < rm_target_count) {
         id = rm_plat[b->target] = new_plat();
         if (id >= 0) {
-            name_plat(id, rm_strings + rm_names[b->target], 0);
+            name_plat(id, rm_key(b->target), 0);
             remap_prefetch(p, 0);
         }
     }
@@ -1155,7 +1161,7 @@ static int learn_id_of(const char* key) {
                 int id = rm_plat[t - 1];
                 if (id < 0) {
                     id = rm_plat[t - 1] = new_plat();
-                    if (id >= 0) name_plat(id, rm_strings + rm_names[t - 1], 0);
+                    if (id >= 0) name_plat(id, rm_key(t - 1), 0);
                 }
                 return id;
             }
@@ -1212,9 +1218,15 @@ static void learn_add(unsigned frame, const char* key, int id) {
     size_t n;
     if (learned_n >= LEARN_MAX) return;
     n = strlen(key);
+    {   /* a smaller copy's key ("..._s75"): the page's own */
+        size_t k = n;
+        while (k > 0 && key[k - 1] >= '0' && key[k - 1] <= '9') k--;
+        if (k < n && k >= 2 && key[k - 1] == 's' && key[k - 2] == '_') n = k - 2;
+    }
     learned[learned_n].key = (char*)malloc(n + 1);
     if (learned[learned_n].key == NULL) return;
-    memcpy(learned[learned_n].key, key, n + 1);
+    memcpy(learned[learned_n].key, key, n);
+    learned[learned_n].key[n] = 0;
     learned[learned_n].frame = frame;
     learned[learned_n].id = id;
     if (id >= 0 && learn_grow((void**)&plat_learned, &plat_learned_cap, (unsigned)id + 1, sizeof(int))) plat_learned[id] = (int)learned_n + 1;
@@ -1632,7 +1644,7 @@ void i5_ch36013_textureX5Fguess(wasmModuleInstance* inst, U32 id, F32 u0, F32 v0
         int t = b->target < rm_target_count ? rm_plat[b->target] : -1;
         if (t < 0 && b->target < rm_target_count) {
             t = rm_plat[b->target] = new_plat();
-            if (t >= 0) name_plat(t, rm_strings + rm_names[b->target], 0);
+            if (t >= 0) name_plat(t, rm_key(b->target), 0);
         }
         if (t >= 0) ch360_plat_texture_guess(t);
     }
@@ -1672,6 +1684,76 @@ void ch360_staged_name(const char* key, size_t len, char* out) {
     out[2] = '/';
     for (k = 0; k < 8; k++) out[3 + k] = hex[(lo >> (28 - 4 * k)) & 15];
     out[11] = 0;
+}
+
+/* ---- levels drawn from smaller copies of their sprite pages ----
+ * GameData/artscale.txt (console/artscale.txt, staged) and then an artscale.txt next to default.xex, which wins:
+ * lines "<atlas name> <percent>" ("oldman 75": every sprite page whose key holds "atlas_oldman_" read from its copy
+ * at 75%, tools/scale_pages.py, if the texture pack holds it; 100: the full page); "#" starts a note. For a level whose
+ * art doesn't fit the console's memory at full size: Glumstone draws about 150 MB of pages within any two seconds of
+ * its first phase against ~195 MB of room, and kept letting go of pages it needed again a moment later (the
+ * forty-third run: 59% of its frames at 60, 33 hitches in every 300); the levels that play smoothly draw 50-80. */
+#define ART_SCALES 32
+static struct { char name[64]; int pct; } art_scales[ART_SCALES];
+static unsigned art_scale_n;
+
+static void art_scale_read(const char* path) {
+    FILE* f = fopen(path, "rb");
+    char line[256];
+    if (f == NULL) return;
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char name[64];
+        int pct;
+        unsigned i;
+        char* hash = strchr(line, '#');
+        if (hash != NULL) *hash = 0;
+        if (sscanf(line, "%63s %d", name, &pct) != 2 || pct < 10 || pct > 100) continue;
+        for (i = 0; i < art_scale_n && strcmp(art_scales[i].name, name) != 0; i++) {}
+        if (i == art_scale_n) {
+            if (art_scale_n == ART_SCALES) continue;
+            art_scale_n++;
+            strcpy(art_scales[i].name, name);
+        }
+        art_scales[i].pct = pct;
+    }
+    fclose(f);
+}
+
+static void art_scale_apply(void) {
+    char path[768], line[256];
+    unsigned i, t, used[ART_SCALES], missing[ART_SCALES];
+    snprintf(path, sizeof(path), "%s/GameData/artscale.txt", learn_root);
+    art_scale_read(path);
+    snprintf(path, sizeof(path), "%s/artscale.txt", learn_root);
+    art_scale_read(path);
+    if (art_scale_n == 0 || rm_target_count == 0) return;
+    rm_keys = (char**)calloc(rm_target_count, sizeof(char*));
+    if (rm_keys == NULL) return;
+    memset(used, 0, sizeof(used));
+    memset(missing, 0, sizeof(missing));
+    for (t = 0; t < rm_target_count; t++) {
+        const char* key = rm_strings + rm_names[t];
+        for (i = 0; i < art_scale_n; i++) {
+            char want[96];
+            ch360_pack_entry e;
+            snprintf(want, sizeof(want), "atlas_%s_", art_scales[i].name);
+            if (art_scales[i].pct >= 100 || strstr(key, want) == NULL) continue;
+            snprintf(path, sizeof(path), "%s_s%d", key, art_scales[i].pct);
+            if (ch360_ctex_pack >= 0 && ch360_pack_find(ch360_ctex_pack, path, strlen(path), &e)) {
+                rm_keys[t] = (char*)malloc(strlen(path) + 1);
+                if (rm_keys[t] != NULL) strcpy(rm_keys[t], path);
+                used[i]++;
+            } else {
+                missing[i]++;
+            }
+            break;
+        }
+    }
+    for (i = 0; i < art_scale_n; i++) {
+        int n = snprintf(line, sizeof(line), "artscale: %s at %d%%: %u sprite pages from smaller copies%s\n", art_scales[i].name,
+                         art_scales[i].pct, used[i], missing[i] ? " (some missing from the pack: drawn at full size)" : "");
+        if (n > 0) ch360_plat_log(line, (size_t)(n < (int)sizeof(line) ? n : (int)sizeof(line) - 1));
+    }
 }
 
 int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsigned memory_mb) {
@@ -1754,6 +1836,7 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
     /* after the module's memory (xsdk's heap takes the free address space at its first growth) */
     ch360_ctex_pack = ch360_pack_open(root_dir, "CTEX");
     remap_load();
+    art_scale_apply();
     return 0;
 }
 

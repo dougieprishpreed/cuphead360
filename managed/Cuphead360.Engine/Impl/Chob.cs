@@ -65,10 +65,12 @@ namespace Cuphead360.Engine
         /// generation, and let go it stays until a full one: a load let 20-30 MB of them pile up (the map's activation
         /// 53 -> 81 MB on the PC, its unload pass back to 48; Map_UI's Awake allocated 11.7 MB and kept 1.8, most of it
         /// clip and sprite trees), and the console's player memory steps up 16 MB for good at such a peak.
-        /// CH360_DROP_COLLECT_MB (0: never).
+        /// Every 32 MB since the console takes the collector's unused pages back (console/ch360_imports.c, "the
+        /// collector's memory"): a peak's pages return to the textures after the load, and at 16 MB Glumstone's first
+        /// load spent 14 of its ~50 s in 20 of these collections (the forty-third run). CH360_DROP_COLLECT_MB (0: never).
         /// </summary>
         public static bool LoadPhase;
-        public static long DropCollectBytes = (long.TryParse(Environment.GetEnvironmentVariable("CH360_DROP_COLLECT_MB"), out var dc) ? dc : 16) << 20;
+        public static long DropCollectBytes = (long.TryParse(Environment.GetEnvironmentVariable("CH360_DROP_COLLECT_MB"), out var dc) ? dc : 32) << 20;
         public static int DropCollects;
         public static long DropCollectTicks;
         static long droppedSince;

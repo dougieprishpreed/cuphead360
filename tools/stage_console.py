@@ -245,6 +245,8 @@ def main():
     stats = {"files": 0, "bytes": 0, "copied": 0}
     gd = os.path.join(a.to, "GameData")
     ctex = entries_of(os.path.join(a.data, "ctex"), ".ctx", True) + entries_of(os.path.join(a.data, "ctexc"), ".ctx", True)
+    # smaller copies of some levels' sprite pages (tools/scale_pages.py), chosen by GameData/artscale.txt
+    ctex += entries_of(os.path.join(a.data, "ctexs"), ".ctx", True)
     if os.path.exists(os.path.join(a.data, "ctexc", "ctexmap.bin")):
         ctex.append(("ctexmap", os.path.join(a.data, "ctexc", "ctexmap.bin"), True))
     audio = entries_of(os.path.join(a.data, "audio"), ".ogg", False)
@@ -256,6 +258,10 @@ def main():
     learned = os.path.join(ROOT, "work", "console", "learned")
     if os.path.isdir(learned):
         plans["learned"] = plan(learned, (".txt",))
+    # Which levels draw from smaller copies of their sprite pages (console/ch360_imports.c, art_scale).
+    artscale = os.path.join(ROOT, "console", "artscale.txt")
+    if os.path.exists(artscale):
+        plans[""].append((artscale, "artscale.txt"))
     # The old layouts' textures and clips (staged names, loose files), and packs not written this time.
     removed = 0
     for sub in ("ctex", "audio"):
