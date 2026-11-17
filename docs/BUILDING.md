@@ -136,7 +136,7 @@ python -I tools\convert_objects.py --game game --out work\GameData
 python -I tools\convert_objects.py --game game --out work\GameData --files none --bundles
 python -I tools\convert_textures.py --game game --out work\GameData --bundles
 python -I tools\convert_console.py --data work\GameData
-python -I tools\convert_console.py --data work\GameData --max-size 4096 --out work\GameData\ctex4k --halved-only --workers 2
+python -I tools\convert_console.py --data work\GameData --max-size 8192 --out work\GameData\ctex4k --halved-only --workers 2
 python -I tools\cluster_console.py --data work\GameData
 python -I tools\scale_pages.py --data work\GameData
 python -I tools\simplify_meshes.py --data work\GameData
@@ -148,7 +148,7 @@ python -I tools\convert_audio.py --game game --out work\GameData --bundles
 | `convert_objects` (twice) | `objects\*.chob`, about 580 files, 770 MB | 2 min | `0 errors` |
 | `convert_textures` | `textures\*.tex`, 14 GB | 2 min | `0 errors` |
 | `convert_console` | `ctex\*.ctx`, halved pages, 4 GB | 30 min | `0 errors` |
-| `convert_console --max-size 4096` | `ctex4k\*.ctx`, full-size pages, 13 GB | 45 min | `0 errors` |
+| `convert_console --max-size 8192` | `ctex4k\*.ctx`, full-size pages, 13 GB | 45 min | `0 errors` |
 | `cluster_console` | `ctexc\`, sprite pages (4 MB at most) and `ctexmap.bin`, 13 GB | 5 min | `cluster_console: ... sprite pages` |
 | `scale_pages` | `ctexs\`, smaller pages of the atlases `console\artscale.txt` names | 4 min | `scale_pages: ... 0 errors` |
 | `simplify_meshes` | `objects\meshes.bin`: lighter meshes for the sprites with the most triangles (skies, cloud banks), drawing the same pixels | 15 min | `wrote ...meshes.bin` |
@@ -161,6 +161,21 @@ that step another time.
 
 **Check:** `work\GameData` holds `objects`, `ctex`, `ctex4k`, `ctexc`
 (with `ctexmap.bin`) and `audio`.
+
+To cut one atlas's sprite pages again without the whole `ctex4k` folder (it
+can be deleted once `ctexc` is made), convert just its bundle and merge it
+into the table, for example the DLC island map's:
+
+```
+python -I tools\convert_textures.py --game game --out work\GameData --files none --bundles atlas_world_dlc
+python -I tools\convert_console.py --data work\GameData --max-size 8192 --out work\GameData\ctex4k --halved-only --keys <its texture's key>
+python -I tools\cluster_console.py --data work\GameData --only bundles/atlas_world_dlc/ --merge
+```
+
+The texture's key is its `.tex` file's name in `work\GameData\textures`
+without `.tex`. The atlas's sprite pages now hold other sprites under the
+same names, so drop its lines from the learned lists (`console\learned`,
+`work\console\learned` and the `learned` folder next to the XEX).
 
 If The Delicious Last Course is installed, its asset bundles are converted
 with the rest (`work\GameData\objects\bundles\atlas_world_dlc` is there),
@@ -299,6 +314,11 @@ step); the boss fights run at a real 60. `full60.txt` next to `default.xex`
 turns the locked 30 off everywhere. `locked30.txt` names more levels to run
 that way, one a line, by their scene name with or without `scene_level_`
 (for example `flying_blimp` for Hilda Berg); `#` starts a note.
+
+For playing every level through as a test, `invincible.txt` next to
+`default.xex` keeps the game's own debug invincibility on: hits and pits
+take no hearts. The log's first lines say so. Delete it for normal play.
+On the PC the same switch is the player's `--invincible 1` argument.
 
 To see where a level's frames wait for textures without a console run, run
 the PC host (`work/console/native/host_native.exe`) with

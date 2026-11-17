@@ -5,7 +5,7 @@
                        [--out DIR] [--halved-only] [--workers N]
 
 The full-size atlas pages tools/cluster_console.py cuts sprites from:
-    convert_console.py --data work/GameData --max-size 4096 --out work/GameData/ctex4k --halved-only --workers 2
+    convert_console.py --data work/GameData --max-size 8192 --out work/GameData/ctex4k --halved-only --workers 2
 
 Reads <data>/textures/*.tex (tools/convert_textures.py) and writes
 <data>/ctex/<key>.ctx, the format the console host loads. Xenos has no BC7,

@@ -3437,6 +3437,8 @@ extern "C" int ch360_plat_pad(int index, ch360_pad* out) {
 // still waiting and draws it first, so the order holds). game:\full60.txt turns it off.
 namespace {
 bool g_tween_off = false;
+// invincible.txt next to default.xex: the game's own debug invincibility kept on (TestSwitches.cs), for testing
+bool g_invincible = false;
 std::vector<ch360_view> g_tw_views;
 std::vector<ch360_item> g_tw_items;
 std::vector<ch360_vertex> g_tw_verts;
@@ -3902,6 +3904,11 @@ int main() {
             g_tween_off = true;
             logf("full60.txt: the run-and-gun levels run as fast as they can, without the locked 30 and its frames in between");
         }
+        if ((q = fopen("game:/invincible.txt", "rb")) != NULL) {
+            fclose(q);
+            g_invincible = true;
+            logf("invincible.txt: the player takes no damage (for playing every level through as a test)");
+        }
     }
     unsigned f, t;
     memory_mb(&f, &t);
@@ -3916,15 +3923,20 @@ int main() {
 #ifdef CH360_TEST64
     static const char* const argv[] = { "cuphead360", "run", "--console", "1", "--data", "/GameData", "--save", "/save",
                                         "--test64", "1" };
+    const int argc = (int)(sizeof(argv) / sizeof(argv[0]));
 #else
-    static const char* const argv[] = { "cuphead360", "run", "--console", "1", "--data", "/GameData", "--save", "/save" };
+    static const char* const argv_play[] = { "cuphead360", "run", "--console", "1", "--data", "/GameData", "--save", "/save" };
+    static const char* const argv_invincible[] = { "cuphead360", "run", "--console", "1", "--data", "/GameData", "--save", "/save",
+                                                   "--invincible", "1" };
+    const char* const* argv = g_invincible ? argv_invincible : argv_play;
+    const int argc = g_invincible ? (int)(sizeof(argv_invincible) / sizeof(argv_invincible[0])) : (int)(sizeof(argv_play) / sizeof(argv_play[0]));
 #endif
     ch360_staged_names = 1;   // GameData/ctex and audio as stage_console.py writes them
 #ifdef CH360_TEST64
     // Its own data segments file, so a test build from another wasm build sits beside the play build.
     ch360_player_data_at("game:/GameData/PLAYER_TEST.DAT");
 #endif
-    if (ch360_prepare("game:/", (int)(sizeof(argv) / sizeof(argv[0])), argv, 448) != 0) {
+    if (ch360_prepare("game:/", argc, argv, 448) != 0) {
         logf("player set-up failed");
         flush_log();
         return 1;

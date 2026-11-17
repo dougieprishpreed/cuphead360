@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export the game's Texture2D data as the GPU uses it (no recompression).
 
-    convert_textures.py --game <GOG Cuphead folder> --out <GameData dir> [--files a,b] [--bundles] [--only-missing]
+    convert_textures.py --game <GOG Cuphead folder> --out <GameData dir> [--files a,b] [--bundles [a,b]] [--only-missing]
 
 Writes <out>/textures/<key>.tex for every Texture2D, where <key> is the
 converted object file's path below objects/ (slashes as "_", without
@@ -69,7 +69,8 @@ def main():
     ap.add_argument("--game", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--files", help="comma-separated serialized files (default: all; 'none' for bundles only)")
-    ap.add_argument("--bundles", action="store_true")
+    ap.add_argument("--bundles", nargs="?", const="", default=None,
+                    help="the asset bundles too: all, or the comma-separated bundles named (with --files none: only those)")
     ap.add_argument("--only-missing", action="store_true")
     a = ap.parse_args()
     data = os.path.join(a.game, "Cuphead_Data")
@@ -87,11 +88,12 @@ def main():
         for fname, sf in list(env.files.items()):
             if hasattr(sf, "objects"):
                 export(sf, os.path.basename(name) + ".chob", outdir, stats, a.only_missing)
-    if a.bundles:
+    if a.bundles is not None:
         bdir = os.path.join(data, "StreamingAssets", "AssetBundles")
+        only = set(b for b in a.bundles.split(",") if b)
         for bname in sorted(os.listdir(bdir)):
             path = os.path.join(bdir, bname)
-            if not os.path.isfile(path) or bname.endswith(".manifest"):
+            if not os.path.isfile(path) or bname.endswith(".manifest") or (only and bname not in only):
                 continue
             env = UnityPy.load(path)
 

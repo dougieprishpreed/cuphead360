@@ -101,8 +101,12 @@ while p + 8 <= len(d):
 for fn in os.listdir(os.path.join(data, 'ctex4k')):
     src_key_of_hash[fnv64(fn[:-4])] = fn[:-4]
 work.sort(key=lambda w: (w[1], w[0]))
+unchecked = 0
 for tkey, sh, b, uv, src in work:
     sk = src_key_of_hash.get(sh)
+    if sk is None:   # its source page isn't in ctex4k (a folder made for one atlas: cluster_console.py --merge)
+        unchecked += 1
+        continue
     W, H, S = texels(os.path.join(data, 'ctex4k', sk + '.ctx'))
     xs, ys = src[:, 0] * W, src[:, 1] * H
     tw, th, T = texels(os.path.join(data, 'ctexc', tkey + '.ctx'))
@@ -157,6 +161,6 @@ for tkey, sh, b, uv, src in work:
         tri_texels[0] += len(sx2)
     if bad:
         bad_area += 1
-print('items on sprite pages checked %d: shift not whole %d, texels differ %d; no box for %d; items left on atlas pages %d'
-      % (checked, bad_shift, bad_texel, no_box, on_page))
+print('items on sprite pages checked %d: shift not whole %d, texels differ %d; no box for %d; items left on atlas pages %d; '
+      'not checked (source page not in ctex4k) %d' % (checked, bad_shift, bad_texel, no_box, on_page, unchecked))
 print('under the triangles (each mesh once): %d texels compared, %d meshes with a texel that differs' % (tri_texels[0], bad_area))

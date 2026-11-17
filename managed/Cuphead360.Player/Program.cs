@@ -159,6 +159,7 @@ namespace Cuphead360.Player
                     case "--hidden": LiveHost.Hidden = a[i + 1] != "0"; break;
                     case "--audio-out": audioOut = a[i + 1]; break;
                     case "--mute": LiveHost.Muted = a[i + 1] != "0"; break;
+                    case "--invincible": if (a[i + 1] != "0") TestSwitches.Invincible(); break;
                     case "--inspect": inspect = a[i + 1]; break;
                     case "--dump-at":
                         foreach (var f in a[i + 1].Split(',')) dumpAt.Add(int.Parse(f));

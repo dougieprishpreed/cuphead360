@@ -5,15 +5,17 @@ rather than whole 4096 px pages.
 
     cluster_console.py --data work/GameData [--page 2048] [--report]
 
-The game's atlas pages are 4096 px. At 720p their sprites are drawn at 1 to
-1.45 screen pixels a texel, so convert_console.py's pages halved to 2048
-(to fit the console's memory: 16 MB a page at full size in DXT5) blurred
-them, the Root Pack's most. A scene draws a fraction of its pages: the
+The game's atlas pages are 4096 px (the DLC island map's 8192, the cowgirl
+background's 4096 x 8192). At 720p their sprites are drawn at 1 to 1.45
+screen pixels a texel (the DLC map's at 1.8), so convert_console.py's
+pages halved to 2048 (to fit the console's memory: 16 MB a page at full
+size in DXT5) blurred them, the Root Pack's most. A scene draws a fraction of its pages: the
 potato's fight drew 18 MB of sprites from 208 MB of pages.
 
 Reads the SpriteAtlas objects (<data>/objects, convert_objects.py) and the
-full-size pages (<data>/ctex4k: convert_console.py --max-size 4096 --out
-<data>/ctex4k --halved-only). Each sprite's textureRect, widened by 2
+full-size pages (<data>/ctex4k: convert_console.py --max-size 8192 --out
+<data>/ctex4k --halved-only; a page smaller than its texture has its
+sprites cut at that scale). Each sprite's textureRect, widened by 2
 texels and out to whole 4x4 blocks (a bilinear sample at its edge reads
 half a texel beyond it), is copied as DXT blocks: the same bytes the full
 page holds, nothing re-encoded. A sprite's animation is its name without
@@ -90,7 +92,7 @@ def atlases(objects, only=None):
             if not f.endswith(".chob"):
                 continue
             path = os.path.join(dirpath, f)
-            if only and only not in path.replace("\\", "/"):
+            if only and not any(o in path.replace("\\", "/") for o in only.split(",")):
                 continue
             with open(path, "rb") as fh:
                 if b"SpriteAtlas" not in fh.read():
@@ -114,6 +116,23 @@ def atlases(objects, only=None):
                     sprites.append((nm, fk + "_" + str(rd["texture"].path), (r["x"], r["y"], r["width"], r["height"])))
                 out.append((fk + "_" + str(pid), fk, sprites))
     return out
+
+
+def read_table(path):
+    """An existing ctexmap.bin: [(source page hash, [(u0, v0, u1, v1, su, ou, sv, ov, target index)])], [target keys]."""
+    d = open(path, "rb").read()
+    magic, version, npages, nboxes, ntargets, nstrings = struct.unpack_from("<4s5I", d, 0)
+    if magic != b"CHRM" or version != 1:
+        sys.exit("%s: not a version 1 table" % path)
+    at = 24
+    heads = [struct.unpack_from("<4I", d, at + 16 * i) for i in range(npages)]
+    at += 16 * npages
+    boxes = [struct.unpack_from("<8fI", d, at + 36 * i) for i in range(nboxes)]
+    at += 36 * nboxes
+    offs = struct.unpack_from("<%dI" % ntargets, d, at)
+    strings = d[at + 4 * ntargets:]
+    keys = [strings[o:strings.index(b"\0", o)].decode("utf-8") for o in offs]
+    return [((hi << 32) | lo, boxes[first:first + count]) for hi, lo, first, count in heads], keys
 
 
 class Page:
@@ -171,8 +190,14 @@ def main():
     ap.add_argument("--data", required=True)
     ap.add_argument("--page", type=int, default=2048)
     ap.add_argument("--report", action="store_true", help="per atlas sizes")
-    ap.add_argument("--only", help="atlases whose object file path holds this (a check; the table then has only those)")
+    ap.add_argument("--only", help="atlases whose object file path holds one of these (comma-separated; a check: the "
+                    "table then has only those, unless --merge)")
+    ap.add_argument("--merge", action="store_true",
+                    help="with --only: cut those atlases again and keep the rest of the existing table and pages "
+                         "(<data>/ctex4k then needs only their pages)")
     a = ap.parse_args()
+    if a.merge and not a.only:
+        sys.exit("--merge goes with --only")
     objects = os.path.join(a.data, "objects")
     full = os.path.join(a.data, "ctex4k")
     out_dir = os.path.join(a.data, "ctexc")
@@ -180,6 +205,22 @@ def main():
     t0 = time.time()
     found = atlases(objects, a.only)
     print("cluster_console: %d atlases, %d sprites (%.0f s)" % (len(found), sum(len(s) for _, _, s in found), time.time() - t0), flush=True)
+    # A page convert_console.py halved needs its full-size copy: without it its sprites would get no pages, and a
+    # whole run would delete the pages it made before (ctex4k may hold only the atlases a --merge run cut).
+    missing = set()
+    for _, _, sprites in found:
+        for _, pk, _ in sprites:
+            if pk not in missing and not os.path.exists(os.path.join(full, pk + ".ctx")):
+                try:
+                    with open(os.path.join(a.data, "ctex", pk + ".ctx"), "rb") as f:
+                        magic, kind, w, h, ow, oh, n = struct.unpack("<4s6I", f.read(28))
+                    if (w, h) != (ow, oh):
+                        missing.add(pk)
+                except (OSError, struct.error):
+                    pass
+    if missing:
+        sys.exit("cluster_console: %d halved atlas pages have no full-size copy in %s (convert_console.py --max-size 8192 "
+                 "--out %s --halved-only), for example %s" % (len(missing), full, full, sorted(missing)[0]))
 
     pages_cache = {}
 
@@ -202,7 +243,10 @@ def main():
                 if os.path.exists(p):
                     with open(p, "rb") as f:
                         magic, kind, w, h, ow, oh, n = struct.unpack("<4s6I", f.read(28))
-                    info[pk] = (kind, w, h) if kind in (1, 2) else None
+                    info[pk] = (kind, w, h, w / ow, h / oh) if kind in (1, 2) else None
+                    if info[pk] and (w, h) != (ow, oh):
+                        print("cluster_console: %s is %dx%d, its texture %dx%d: its sprites cut at %.0f%%"
+                              % (pk, w, h, ow, oh, 100.0 * w / ow), flush=True)
                 else:
                     info[pk] = None
         groups = {}
@@ -210,7 +254,10 @@ def main():
             pi = info.get(pk)
             if pi is None:
                 continue
-            kind, W, H = pi
+            kind, W, H, fx, fy = pi
+            # the sprite's rectangle is in its texture's texels; the page read may be smaller (convert_console's
+            # --max-size: the DLC map's 8192 page cut from a 4096 copy had every rectangle at twice its place)
+            x, y, w, h = x * fx, y * fy, w * fx, h * fy
             x0 = max(0, int(np.floor((x - MARGIN) / 4)) * 4)
             y0 = max(0, int(np.floor((y - MARGIN) / 4)) * 4)
             x1 = min(W, int(np.ceil((x + w + MARGIN) / 4)) * 4)
@@ -324,27 +371,49 @@ def main():
             t, PW, PH = names[id(pg)]
             su, sv = W / PW, H / PH
             remap.setdefault(pk, []).append(match + (su, (dx - sx) / PW, sv, (dy - sy) / PH, t))
-        total_src += sum(w * h // (2 if k == 1 else 1) for k, w, h in (v for v in info.values() if v))
+        total_src += sum(w * h // (2 if k == 1 else 1) for k, w, h, _, _ in (v for v in info.values() if v))
         pages_cache.clear()
         if a.report:
             print("  %-70s %3d pages, %6.1f MB" % (akey[:70], sum(len(p) for p in kpages.values()), sizes.get(akey, 0) / 2**20), flush=True)
 
     # the table
-    pages = sorted((fnv64(k), k) for k in remap)
+    pages = sorted((fnv64(k), remap[k]) for k in remap)
     if len(set(h for h, _ in pages)) != len(pages):
         sys.exit("two source pages share a hash")
+    redone = tuple(akey + "_c" for akey, _, _ in found)
+    if a.merge:
+        # the other atlases' source pages and boxes as the existing table has them, their targets first in its order
+        old_pages, old_targets = read_table(os.path.join(out_dir, "ctexmap.bin"))
+        new_hashes = set(h for h, _ in pages)
+        keep_t, keep_p = set(), []
+        for h, boxes in old_pages:
+            if any(old_targets[b[8]].startswith(redone) for b in boxes):
+                continue
+            if h in new_hashes:
+                sys.exit("a source page kept from the table is cut again")
+            keep_p.append((h, boxes))
+            keep_t.update(b[8] for b in boxes)
+        order = sorted(keep_t)
+        index = {t: i for i, t in enumerate(order)}
+        base = len(order)
+        merged = [(h, [b[:8] + (index[b[8]],) for b in boxes]) for h, boxes in keep_p]
+        merged += [(h, [b[:8] + (b[8] + base,) for b in boxes]) for h, boxes in pages]
+        print("cluster_console: merged: %d source pages and %d sprite pages kept, %d and %d cut again"
+              % (len(keep_p), base, len(pages), len(targets)), flush=True)
+        pages = sorted(merged)
+        targets = [old_targets[t] for t in order] + targets
     strings = bytearray()
     offs = []
     for t in targets:
         offs.append(len(strings))
         strings += t.encode("utf-8") + b"\0"
-    blob = bytearray(b"CHRM" + struct.pack("<5I", 1, len(pages), sum(len(v) for v in remap.values()), len(targets), len(strings)))
+    blob = bytearray(b"CHRM" + struct.pack("<5I", 1, len(pages), sum(len(v) for _, v in pages), len(targets), len(strings)))
     first = 0
-    for h, k in pages:
-        blob += struct.pack("<4I", h >> 32, h & 0xFFFFFFFF, first, len(remap[k]))
-        first += len(remap[k])
-    for h, k in pages:
-        for b in remap[k]:
+    for h, boxes in pages:
+        blob += struct.pack("<4I", h >> 32, h & 0xFFFFFFFF, first, len(boxes))
+        first += len(boxes)
+    for h, boxes in pages:
+        for b in boxes:
             blob += struct.pack("<8fI", *b)
     for o in offs:
         blob += struct.pack("<I", o)
@@ -353,16 +422,16 @@ def main():
         f.write(blob)
     os.replace(os.path.join(out_dir, "ctexmap.bin.tmp"), os.path.join(out_dir, "ctexmap.bin"))
     # pages an earlier layout wrote that this one doesn't (stage_console.py packs every page here)
-    if not a.only:
+    if not a.only or a.merge:
         keep = set(t + ".ctx" for t in targets)
-        stale = [f for f in os.listdir(out_dir) if f.endswith(".ctx") and f not in keep]
+        stale = [f for f in os.listdir(out_dir) if f.endswith(".ctx") and f not in keep and (not a.merge or f.startswith(redone))]
         for f in stale:
             os.remove(os.path.join(out_dir, f))
         if stale:
             print("cluster_console: %d pages of an earlier layout removed" % len(stale), flush=True)
     print("cluster_console: %d source pages -> %d sprite pages, %.1f MB (the source pages at full size: %.1f MB); "
           "%d boxes; %.0f s" % (len(pages), len(targets), written / 2**20, total_src / 2**20,
-                                 sum(len(v) for v in remap.values()), time.time() - t0))
+                                 sum(len(v) for _, v in pages), time.time() - t0))
     return 0
 
 
