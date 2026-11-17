@@ -138,7 +138,7 @@ python -I tools\convert_textures.py --game game --out work\GameData --bundles
 python -I tools\convert_console.py --data work\GameData
 python -I tools\convert_console.py --data work\GameData --max-size 4096 --out work\GameData\ctex4k --halved-only --workers 2
 python -I tools\cluster_console.py --data work\GameData
-python -I tools\scale_pages.py --data work\GameData --atlas oldman --scale 75,85
+python -I tools\scale_pages.py --data work\GameData
 python -I tools\simplify_meshes.py --data work\GameData
 python -I tools\convert_audio.py --game game --out work\GameData --bundles
 ```
@@ -150,7 +150,7 @@ python -I tools\convert_audio.py --game game --out work\GameData --bundles
 | `convert_console` | `ctex\*.ctx`, halved pages, 4 GB | 30 min | `0 errors` |
 | `convert_console --max-size 4096` | `ctex4k\*.ctx`, full-size pages, 13 GB | 45 min | `0 errors` |
 | `cluster_console` | `ctexc\`, sprite pages (4 MB at most) and `ctexmap.bin`, 13 GB | 5 min | `cluster_console: ... sprite pages` |
-| `scale_pages` (optional) | `ctexs\`, smaller copies of the atlases `console\artscale.txt` names | 4 min | `scale_pages: ... 0 errors` |
+| `scale_pages` | `ctexs\`, smaller pages of the atlases `console\artscale.txt` names | 4 min | `scale_pages: ... 0 errors` |
 | `simplify_meshes` | `objects\meshes.bin`: lighter meshes for the sprites with the most triangles (skies, cloud banks), drawing the same pixels | 15 min | `wrote ...meshes.bin` |
 | `convert_audio` | `audio\*.ogg`, about 4,000 clips, 390 MB | 10 min | `0 errors` |
 
@@ -314,9 +314,15 @@ per scene, the textures in the order its plays first drew them
 for the next few while you play. Its starting lists come from
 `python tools/learned_lists.py --jobs 5`, which plays every level and scene
 with the bot on the PC host (every boss state, then the results screen) and
-writes them to `work/console/learned`; `tools/stage_console.py` copies them
-into `GameData/learned`. Delete the `learned` folder next to the XEX to start
-over from the shipped lists.
+writes them to `work/console/learned`. Lists from your own console plays
+ship ahead of those: after a console session,
+`python tools/import_learned.py --from E:\Apps\cuphead360\learned` merges
+the console's lists into `console/learned` (kept in the repository), and
+`tools/stage_console.py` copies each scene's list into `GameData/learned`,
+the console's where there is one, else the bot's. Delete the `learned` folder
+next to the XEX to start over from the shipped lists. As a scene starts, the
+pages its list says the first two seconds draw are read while the loading
+screen holds (the log's `HOST first seconds' pages` line).
 
 The game's .NET runtime reserves its memory in 16 MB blocks and uses part of
 each. The console gives the unused parts back to the textures and takes them
@@ -354,17 +360,23 @@ every pass as the game asks.
 
 Some levels draw more art within a couple of seconds than the console has
 room for (Glumstone's first phase about 150 MB against about 195), and they
-keep reading pages they let go a moment before. Those levels can draw from
-smaller copies of their sprite pages:
-`python tools/scale_pages.py --data work\GameData --atlas oldman --scale 75,85`
-writes the copies to `work\GameData\ctexs` (stage_console.py packs them),
-and `console\artscale.txt` (staged to `GameData\artscale.txt`) says which
-atlases draw from which copy, a line such as `oldman 75`. An `artscale.txt`
-next to `default.xex` overrides it line by line: `oldman 85` for the 85%
-copy, `oldman 100` for full size. The log's `artscale:` line says what was
-used. `python tools/level_textures.py --phases` prints, per boss phase (and
+keep reading pages they let go a moment before. Those levels are drawn from
+smaller sprite pages. `console\artscale.txt` names them: a line such as
+`oldman 75` ships that atlas at 75% (the pack holds its pages only at that
+size, under the full pages' names), and `try flyinggenielevel 75,85` packs
+copies beside the full pages to try. `python tools/scale_pages.py --data
+work\GameData` makes the smaller pages it names (in `work\GameData\ctexs`);
+stage_console.py packs them and writes `GameData\artscale.txt`. An
+`artscale.txt` next to `default.xex` chooses copies to try, a line such as
+`flyinggenielevel 85`. The log's `artscale:` lines say what was used. `python tools/level_textures.py --phases` prints, per boss phase (and
 per 20 seconds of a run-and-gun level), how many MB of pages it draws within
 2 seconds, and marks the phases in Glumstone's range.
+
+For testing levels one after another, `python tools/unlock_save.py --from
+<a slot .sav> --to <another slot .sav>` writes a slot with every level won on
+Normal (the Devil and Chef Saltbaker left as they were), so the maps' bridges,
+boats and doors are open; it won't replace a slot that holds progress
+without `--force`, and keeps the old file as `.bak`.
 
 ## After an update
 

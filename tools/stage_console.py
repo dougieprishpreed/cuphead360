@@ -189,6 +189,60 @@ def write_audio_info(entries):
     return "AUDIOINFO.BIN"
 
 
+def art_scales(path=None):
+    """console/artscale.txt: ({atlas: percent} shipped smaller, {atlas: [percents]} copies to try), "#" notes."""
+    shipped, tried = {}, {}
+    path = path or os.path.join(ROOT, "console", "artscale.txt")
+    if not os.path.exists(path):
+        return shipped, tried
+    for ln in open(path, encoding="utf-8"):
+        w = ln.split("#", 1)[0].split()
+        if len(w) == 2 and w[1].isdigit() and 10 <= int(w[1]) < 100:
+            shipped[w[0]] = int(w[1])
+        elif len(w) == 3 and w[0] == "try":
+            tried[w[1]] = [int(x) for x in w[2].split(",") if x.isdigit() and 10 <= int(x) < 100]
+        elif w:
+            sys.exit("%s: can't read the line %r" % (path, ln.rstrip()))
+    return shipped, tried
+
+
+def atlas_of(key, names):
+    """The name (of names) whose atlas the page key belongs to: "atlas_<name>_" in it."""
+    for n in names:
+        if "atlas_%s_" % n in key:
+            return n
+    return None
+
+
+def sprite_pages(data, shipped, tried):
+    """The sprite pages' entries: each page full size from <data>/ctexc, a shipped atlas's from its smaller copy in
+    <data>/ctexs under the full page's name instead, and the tried atlases' copies under "<key>_s<percent>"."""
+    out, missing = [], []
+    counts = dict((n, 0) for n in shipped)
+    scaled = os.path.join(data, "ctexs")
+    for key, path, comp in entries_of(os.path.join(data, "ctexc"), ".ctx", True):
+        n = atlas_of(key, shipped)
+        if n:
+            small = os.path.join(scaled, "%s_s%d.ctx" % (key, shipped[n]))
+            if os.path.exists(small) and os.path.getmtime(small) >= os.path.getmtime(path):
+                out.append((key, small, comp))
+                counts[n] += 1
+                continue
+            missing.append(key)
+        out.append((key, path, comp))
+    if missing:
+        sys.exit("%d pages of shipped-smaller atlases have no up-to-date copy (%s...): run tools/scale_pages.py" % (
+            len(missing), missing[0]))
+    for key, path, comp in entries_of(scaled, ".ctx", True):
+        base, _, pct = key.rpartition("_s")
+        n = atlas_of(base, tried)
+        if n and pct.isdigit() and int(pct) in tried[n]:
+            out.append((key, path, comp))
+    for n, c in sorted(counts.items()):
+        print("artscale: %s shipped at %d%%: %d sprite pages" % (n, shipped[n], c), flush=True)
+    return out
+
+
 def entries_of(folder, ext, compress):
     out = []
     if os.path.isdir(folder):
@@ -244,24 +298,39 @@ def main():
         sys.exit("no XEX at %s (tools/build_console.py --stage xsdk)" % a.xex)
     stats = {"files": 0, "bytes": 0, "copied": 0}
     gd = os.path.join(a.to, "GameData")
-    ctex = entries_of(os.path.join(a.data, "ctex"), ".ctx", True) + entries_of(os.path.join(a.data, "ctexc"), ".ctx", True)
-    # smaller copies of some levels' sprite pages (tools/scale_pages.py), chosen by GameData/artscale.txt
-    ctex += entries_of(os.path.join(a.data, "ctexs"), ".ctx", True)
+    # The sprite pages: the levels console/artscale.txt ships smaller only at that size (tools/scale_pages.py's copies
+    # under the full pages' names), the copies it lists to try beside the full pages ("<key>_s<percent>").
+    shipped, tried = art_scales()
+    ctex = entries_of(os.path.join(a.data, "ctex"), ".ctx", True) + sprite_pages(a.data, shipped, tried)
     if os.path.exists(os.path.join(a.data, "ctexc", "ctexmap.bin")):
         ctex.append(("ctexmap", os.path.join(a.data, "ctexc", "ctexmap.bin"), True))
     audio = entries_of(os.path.join(a.data, "audio"), ".ogg", False)
     packs = write_packs("CTEX", ctex, a.workers) + write_packs("AUDIO", audio, 1)
     plans = {"objects": plan(os.path.join(a.data, "objects"), (".chob", ".bin")),
              "": [(os.path.join(PACKS, f), f) for f in packs + [write_audio_info(audio)]]}
-    # Each level's sprite pages in first-draw order from the PC's bot plays (the console's learned read-ahead starts
-    # from these; it writes its own beside the XEX): work/console/learned, made by tools/learned_lists.py.
-    learned = os.path.join(ROOT, "work", "console", "learned")
-    if os.path.isdir(learned):
-        plans["learned"] = plan(learned, (".txt",))
-    # Which levels draw from smaller copies of their sprite pages (console/ch360_imports.c, art_scale).
-    artscale = os.path.join(ROOT, "console", "artscale.txt")
-    if os.path.exists(artscale):
-        plans[""].append((artscale, "artscale.txt"))
+    # Each scene's sprite pages in first-draw order (the console's learned read-ahead starts from these; it writes its
+    # own beside the XEX): the player's console plays' (console/learned, tools/import_learned.py) where there are any,
+    # else the PC's bot plays' (work/console/learned, tools/learned_lists.py).
+    lists = {}
+    for src in (os.path.join(ROOT, "work", "console", "learned"), os.path.join(ROOT, "console", "learned")):
+        if os.path.isdir(src):
+            for f in sorted(os.listdir(src)):
+                if f.endswith(".txt"):
+                    lists[f] = os.path.join(src, f)
+    if lists:
+        plans["learned"] = sorted((p, f) for f, p in lists.items())
+        print("learned lists: %d scenes (%d from the console's plays)" % (
+            len(lists), sum(1 for p in lists.values() if os.sep + "work" + os.sep not in p)), flush=True)
+    # Which atlases are shipped smaller and which copies there are to try (console/ch360_imports.c, art_scale).
+    text = "# Written by tools/stage_console.py from console/artscale.txt. An artscale.txt next to default.xex chooses copies.\n"
+    text += "".join("shipped %s %d\n" % (n, p) for n, p in sorted(shipped.items()))
+    text += "".join("# to try: %s at %s\n" % (n, ",".join(map(str, p))) for n, p in sorted(tried.items()))
+    gen = os.path.join(PACKS, "artscale.txt")
+    if not (os.path.exists(gen) and open(gen, encoding="utf-8").read() == text):
+        os.makedirs(PACKS, exist_ok=True)
+        with open(gen, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    plans[""].append((gen, "artscale.txt"))
     # The old layouts' textures and clips (staged names, loose files), and packs not written this time.
     removed = 0
     for sub in ("ctex", "audio"):

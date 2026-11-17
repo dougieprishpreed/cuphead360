@@ -1107,12 +1107,23 @@ void i5_ch36014_loadingX5Fscreen(wasmModuleInstance* inst, U32 on) {
 #include <sys/stat.h>
 #define learn_mkdir(p) mkdir(p, 0777)
 #endif
-#define LEARN_AHEAD 4
+/* None while the platform's read-ahead is held back by memory (tight): only Glumstone's fight, in every frame of the
+ * forty-fourth run (at 75%), where tools/texture_cache_sim.py (its 75% trace, 150 MB of room) had the learned asks cost
+ * more than they saved: 230 frames late with none, 257 with four ahead, 309 with eight; the levels with room never were
+ * tight on the console (the forty-first run). Four before. */
+#define LEARN_AHEAD 0
 /* With room (the platform's read-ahead not held back by memory lately) twice as far: tools/texture_cache_sim.py with the
  * console's measured loader (15.8 MB/s, the forty-second run), Hilda Berg learned from one play and tried on another:
  * 14 -> 9 frames late at 150 MB of room, 10 -> 4 at 170; Forest Follies and Treetop the same or one fewer. Tight (110 MB),
  * eight cost more than they saved (Forest Follies 10 -> 15). */
 #define LEARN_AHEAD_ROOM 8
+/* A scene's first two seconds: the pages its plays first drew in them, asked for as it activates (behind the loading
+ * screen, ch360_plat_texture_first), read under the hold ahead of every other ask, room made from pages not drawn in the
+ * last frames that aren't among them. Glumstone at 75% on the forty-fourth run: the hold ended with 170-410 pages still
+ * coming (the read-ahead held back by memory: the room full of the load's own asks) and its first two seconds were slow
+ * (frames of 50-100 ms). tools/texture_cache_sim.py (its 75% trace, 150 MB of room, the first 120 frames' 71 MB swapped
+ * in at the hold): the fight's first five seconds 35 -> 21 frames late, 18 -> 9 over 17 ms; the rest the same. */
+#define LEARN_FIRST_FRAMES 120
 #define LEARN_MAX 4096
 typedef struct learned_page {
     unsigned frame;
@@ -1214,15 +1225,18 @@ static void learn_save(void) {
     learn_dirty = 0;
 }
 
+/* A key's length without a smaller copy's suffix ("..._s75": the page's own name). */
+static size_t learn_key_len(const char* key) {
+    size_t n = strlen(key), k = n;
+    while (k > 0 && key[k - 1] >= '0' && key[k - 1] <= '9') k--;
+    if (k < n && k >= 2 && key[k - 1] == 's' && key[k - 2] == '_') n = k - 2;
+    return n;
+}
+
 static void learn_add(unsigned frame, const char* key, int id) {
     size_t n;
     if (learned_n >= LEARN_MAX) return;
-    n = strlen(key);
-    {   /* a smaller copy's key ("..._s75"): the page's own */
-        size_t k = n;
-        while (k > 0 && key[k - 1] >= '0' && key[k - 1] <= '9') k--;
-        if (k < n && k >= 2 && key[k - 1] == 's' && key[k - 2] == '_') n = k - 2;
-    }
+    n = learn_key_len(key);
     learned[learned_n].key = (char*)malloc(n + 1);
     if (learned[learned_n].key == NULL) return;
     memcpy(learned[learned_n].key, key, n);
@@ -1243,6 +1257,7 @@ static void learn_begin(const char* scene) {
     learn_far = -1;
     learn_asks = 0;
     if (scene == NULL || !scene[0] || strcmp(scene, "scene_load_helper") == 0 || strlen(scene) >= sizeof(learn_scene)) return;
+    ch360_plat_texture_first(-1);   /* the scene before's first pages no longer kept for it */
     strcpy(learn_scene, scene);
     snprintf(path, sizeof(path), "%s/learned/%s.txt", learn_root, scene);
     f = fopen(path, "rb");
@@ -1264,6 +1279,11 @@ static void learn_begin(const char* scene) {
         fclose(f);
     }
     learned_loaded = learned_n;
+    {   /* its first seconds' pages, in the list's order (the frames they were first drawn in) */
+        unsigned k;
+        for (k = 0; k < learned_loaded; k++)
+            if (learned[k].frame < LEARN_FIRST_FRAMES && learned[k].id >= 0) ch360_plat_texture_first(learned[k].id);
+    }
 }
 
 /* A game frame drawn (not the loading screen): what it drew first in this visit learned, the pages ahead asked for. */
@@ -1278,8 +1298,24 @@ static void learn_drawn(void) {
         if (!plat_seen[id]) {
             plat_seen[id] = 1;
             if (n < 0) {
-                learn_add(learn_frame, plat_names[id], id);
-                learn_dirty = 1;
+                /* a texture its list names that wasn't named to the host when the list was read (not a sprite page:
+                 * the title's 52 pages had become 106 lines, one more each visit): that entry, not a new one */
+                unsigned k;
+                size_t len = learn_key_len(plat_names[id]);
+                for (k = 0; k < learned_n; k++)
+                    if (learned[k].id < 0 && strncmp(learned[k].key, plat_names[id], len) == 0 && learned[k].key[len] == 0) break;
+                if (k < learned_n) {
+                    learned[k].id = id;
+                    if (learn_grow((void**)&plat_learned, &plat_learned_cap, (unsigned)id + 1, sizeof(int))) plat_learned[id] = (int)k + 1;
+                    n = (int)k;
+                    if (learned[k].frame > learn_frame) {
+                        learned[k].frame = learn_frame;
+                        learn_dirty = 1;
+                    }
+                } else {
+                    learn_add(learn_frame, plat_names[id], id);
+                    learn_dirty = 1;
+                }
             } else if (learned[n].frame > learn_frame) {
                 learned[n].frame = learn_frame;
                 learn_dirty = 1;
@@ -1687,14 +1723,16 @@ void ch360_staged_name(const char* key, size_t len, char* out) {
 }
 
 /* ---- levels drawn from smaller copies of their sprite pages ----
- * GameData/artscale.txt (console/artscale.txt, staged) and then an artscale.txt next to default.xex, which wins:
- * lines "<atlas name> <percent>" ("oldman 75": every sprite page whose key holds "atlas_oldman_" read from its copy
- * at 75%, tools/scale_pages.py, if the texture pack holds it; 100: the full page); "#" starts a note. For a level whose
+ * GameData/artscale.txt (tools/stage_console.py writes it from console/artscale.txt) and then an artscale.txt next to
+ * default.xex, which wins: lines "<atlas name> <percent>" ("flyinggenielevel 85": every sprite page whose key holds
+ * "atlas_flyinggenielevel_" read from its copy at 85%, tools/scale_pages.py, if the texture pack holds it; 100: the
+ * full page); "#" starts a note. "shipped <atlas name> <percent>" (GameData's): the pack holds that atlas's pages only
+ * at that size, under the full pages' names (only logged: no other size to choose). For a level whose
  * art doesn't fit the console's memory at full size: Glumstone draws about 150 MB of pages within any two seconds of
  * its first phase against ~195 MB of room, and kept letting go of pages it needed again a moment later (the
  * forty-third run: 59% of its frames at 60, 33 hitches in every 300); the levels that play smoothly draw 50-80. */
 #define ART_SCALES 32
-static struct { char name[64]; int pct; } art_scales[ART_SCALES];
+static struct { char name[64]; int pct, shipped; } art_scales[ART_SCALES];
 static unsigned art_scale_n;
 
 static void art_scale_read(const char* path) {
@@ -1703,18 +1741,23 @@ static void art_scale_read(const char* path) {
     if (f == NULL) return;
     while (fgets(line, sizeof(line), f) != NULL) {
         char name[64];
-        int pct;
+        int pct, shipped;
         unsigned i;
         char* hash = strchr(line, '#');
         if (hash != NULL) *hash = 0;
-        if (sscanf(line, "%63s %d", name, &pct) != 2 || pct < 10 || pct > 100) continue;
+        if (sscanf(line, " shipped %63s %d", name, &pct) == 2 && pct >= 10 && pct <= 100) shipped = pct;
+        else if (sscanf(line, "%63s %d", name, &pct) == 2 && pct >= 10 && pct <= 100) shipped = 0;
+        else continue;
         for (i = 0; i < art_scale_n && strcmp(art_scales[i].name, name) != 0; i++) {}
         if (i == art_scale_n) {
             if (art_scale_n == ART_SCALES) continue;
             art_scale_n++;
             strcpy(art_scales[i].name, name);
+            art_scales[i].pct = 100;
+            art_scales[i].shipped = 0;
         }
-        art_scales[i].pct = pct;
+        if (shipped) art_scales[i].shipped = shipped;
+        else art_scales[i].pct = pct;
     }
     fclose(f);
 }
@@ -1750,7 +1793,15 @@ static void art_scale_apply(void) {
         }
     }
     for (i = 0; i < art_scale_n; i++) {
-        int n = snprintf(line, sizeof(line), "artscale: %s at %d%%: %u sprite pages from smaller copies%s\n", art_scales[i].name,
+        int n;
+        if (art_scales[i].shipped && art_scales[i].pct >= 100)
+            n = snprintf(line, sizeof(line), "artscale: %s shipped at %d%% (its pages in the pack are that size)\n", art_scales[i].name,
+                         art_scales[i].shipped);
+        else if (art_scales[i].shipped)
+            n = snprintf(line, sizeof(line), "artscale: %s at %d%%: %u sprite pages from copies at that size%s\n", art_scales[i].name,
+                         art_scales[i].pct, used[i], missing[i] ? "; the rest as shipped" : "");
+        else
+            n = snprintf(line, sizeof(line), "artscale: %s at %d%%: %u sprite pages from smaller copies%s\n", art_scales[i].name,
                          art_scales[i].pct, used[i], missing[i] ? " (some missing from the pack: drawn at full size)" : "");
         if (n > 0) ch360_plat_log(line, (size_t)(n < (int)sizeof(line) ? n : (int)sizeof(line) - 1));
     }

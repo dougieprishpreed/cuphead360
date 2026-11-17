@@ -289,6 +289,21 @@ void ch360_plat_texture_guess(int id) {
     if (drawn_trace) fprintf(drawn_trace, "G %ld %d\n", frame_no, id);
 }
 
+/* A scene's first seconds' page (its learned list, read under the hold on the console): traced ("A frame id 3"), and
+ * counted (CH360_TRACE_PREFETCH=1 names them). */
+static unsigned first_asked;
+void ch360_plat_texture_first(int id) {
+    if (id < 0) {
+        if (first_asked) printf("[host] first seconds' pages asked for: %u\n", first_asked);
+        first_asked = 0;
+        return;
+    }
+    ++first_asked;
+    if (trace_prefetch < 0) trace_prefetch = getenv("CH360_TRACE_PREFETCH") != NULL;
+    if (trace_prefetch && id < TRACE_IDS) printf("PREFETCH frame %ld first: %s\n", frame_no, tex_key[id] ? tex_key[id] : "(runtime)");
+    if (drawn_trace) fprintf(drawn_trace, "A %ld %d 3\n", frame_no, id);
+}
+
 /* The locked 30's frame in between: not drawn here; CH360_TWEEN=1 says yes when asked, 2 for every frame (the bot's
  * scripted runs never ask), and CH360_TRACE_TWEEN=1 tells, every 300 frames, how many items moved and the largest
  * move (a PC check of the matching). */

@@ -1,0 +1,8 @@
+0 resources.assets_117
+0 sharedassets2.assets_7
+1 sharedassets2.assets_18
+89 bundles_tmpfont_cupheadvogue_bold_merged__sdf_CAB-081ab55023945e52b64dd0e6923a2856_2491165492717614027
+89 bundles_tmpfont_cupheadvogue_extrabold_merged__sdf_CAB-bd3b23783fd25ab60a8e8686b7362551_9163577755226209782
+89 resources.assets_18
+89 sharedassets2.assets_25
+123 sharedassets2.assets_8

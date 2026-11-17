@@ -143,6 +143,10 @@ unsigned ch360_fold_counts(unsigned* cleared, unsigned* items, unsigned* frames)
  * the view or a frame of a clip on screen (room is made from textures not drawn lately); else a guess (an
  * atlas the game loaded, the other pages of one drawn): only its stored bytes are kept, and only with room. */
 void ch360_plat_texture_prefetch(int id, int wanted);
+/* Texture id is among the pages a scene's plays drew in its first seconds (its learned list): read under its hold
+ * ahead of every other ask, room made from what the last frames didn't draw and isn't one of these. -1: a new scene,
+ * the last one's no longer kept as such. */
+void ch360_plat_texture_first(int id);
 /* Textures being read or waiting to be (the loader's jobs and the read-ahead asked for): the boot's hold. */
 int ch360_plat_textures_pending(void);
 /* A new scene's read-ahead begins (1: what the last frames didn't draw counts as old, room made from it) or ends

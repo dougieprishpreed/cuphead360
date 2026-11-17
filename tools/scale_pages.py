@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """scale_pages.py: smaller copies of chosen levels' sprite pages, for levels whose art doesn't fit the console's memory.
 
-    python tools/scale_pages.py --data work/GameData --atlas oldman --scale 75,85 [--workers 2]
+    python tools/scale_pages.py --data work/GameData [--atlas oldman --scale 75,85] [--workers 2]
+
+Without --atlas, the atlases and sizes console/artscale.txt names (shipped smaller, or copies to try).
 
 Glumstone's fight draws about 150 MB of sprite pages within any two seconds of its first phase (182 at the 90th
 percentile) against the ~195 MB the console's textures have in a level, so it keeps letting pages go that it needs
@@ -61,18 +63,27 @@ def below_normal():
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", required=True)
-    ap.add_argument("--atlas", required=True, help="comma-separated atlas names (oldman: atlas_oldman_*)")
-    ap.add_argument("--scale", default="75", help="comma-separated percentages")
+    ap.add_argument("--atlas", help="comma-separated atlas names (oldman: atlas_oldman_*); without it, console/artscale.txt's")
+    ap.add_argument("--scale", default="75", help="comma-separated percentages (with --atlas)")
     ap.add_argument("--workers", type=int, default=2)
     a = ap.parse_args()
     src_dir, out_dir = os.path.join(a.data, "ctexc"), os.path.join(a.data, "ctexs")
     os.makedirs(out_dir, exist_ok=True)
-    names = [x for x in a.atlas.split(",") if x]
-    scales = [int(x) for x in a.scale.split(",") if x]
+    if a.atlas:
+        want_scales = dict((x, [int(s) for s in a.scale.split(",") if s]) for x in a.atlas.split(",") if x)
+    else:
+        import stage_console
+        shipped, tried = stage_console.art_scales()
+        want_scales = dict(tried)
+        for n, p in shipped.items():
+            want_scales[n] = sorted(set(want_scales.get(n, [])) | {p})
+    names = sorted(want_scales)
+    scales = sorted(set(s for v in want_scales.values() for s in v))
     pages = sorted(f for f in os.listdir(src_dir) if f.endswith(".ctx") and any("atlas_%s_" % n in f for n in names))
     jobs, want = [], set()
-    for s in scales:
-        for f in pages:
+    for f in pages:
+        n = next(x for x in names if "atlas_%s_" % x in f)
+        for s in want_scales[n]:
             src = os.path.join(src_dir, f)
             dst = os.path.join(out_dir, "%s_s%d.ctx" % (f[:-4], s))
             want.add(os.path.basename(dst))

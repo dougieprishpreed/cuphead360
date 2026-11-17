@@ -1,18 +1,24 @@
-# Levels drawn from smaller copies of their sprite pages (tools/scale_pages.py, console/ch360_imports.c art_scale).
-# "<atlas name> <percent>": 75 or 85 (the copies in the pack), 100 for full size. An artscale.txt next to
-# default.xex overrides these lines one by one. The log's "artscale:" line says what was used.
+# Levels whose sprite pages are drawn smaller, for levels whose art doesn't fit the console's memory at full size.
+# tools/scale_pages.py makes the smaller pages (from this file when run without --atlas); tools/stage_console.py packs
+# them and writes GameData/artscale.txt (console/ch360_imports.c, art_scale, reads it).
 #
-# Glumstone: its first phase draws about 150 MB of sprite pages within any 2 s against ~195 MB of room.
+# "<atlas name> <percent>": shipped smaller. The pack holds that atlas's pages only at that size, under the full
+# pages' names; its full pages aren't staged (the console can't draw them full size without staging again).
+# "try <atlas name> <percents>": copies at those sizes packed beside the full pages, drawn only when an artscale.txt
+# next to default.xex names them ("<atlas name> <percent>", one a line); full size otherwise.
+# The log's "artscale:" lines say what was used.
+#
+# Glumstone: its first phase drew about 150 MB of sprite pages within any 2 s against ~195 MB of room (the
+# forty-third run: 59% of its frames at 60); at 75%, 73-83% (the forty-fourth).
 oldman 75
 #
-# The other phases in Glumstone's range (tools/level_textures.py --phases; median / 90% MB within 2 s), at full
-# size until played. Copies at 75 and 85 are in the pack; to try one, put its line (without the #) in an
-# artscale.txt next to default.xex.
-# platformingharborlevel 85    # Perilous Piers, 20-80 s in: 133-145 / 149-180
-# flyinggenielevel 85          # Djimmi, every phase: 116-139 / 128-156 (its background ~95 MB)
-# rumrunners_phase3 85         # Moonshine Mob's Anteater and Mob Boss: 118-132 / 123-159 (phase 3's art only)
-# snowcult_background 85       # Mortimer Freeze, first two phases: 118-132 / 125-150 (its background ~95 MB)
-# snowcult_phase2 85
-# devillevelp1 85              # The Devil's first phase: 114 / 141
-# bg_devil_smoke 85
-# dragonlevel 85               # Grim Matchstick's first phase: 118 / 124
+# The other phases in Glumstone's range (tools/level_textures.py --phases; median / 90% MB within 2 s), at full size
+# until played. To try one at 85%, put "<atlas name> 85" in an artscale.txt next to default.xex.
+try platformingharborlevel 75,85   # Perilous Piers, 20-80 s in: 133-145 / 149-180
+try flyinggenielevel 75,85         # Djimmi, every phase: 116-139 / 128-156 (its background ~95 MB)
+try rumrunners_phase3 75,85        # Moonshine Mob's Anteater and Mob Boss: 118-132 / 123-159 (phase 3's art only)
+try snowcult_background 75,85      # Mortimer Freeze, first two phases: 118-132 / 125-150 (its background ~95 MB)
+try snowcult_phase2 75,85
+try devillevelp1 75,85             # The Devil's first phase: 114 / 141
+try bg_devil_smoke 75,85
+try dragonlevel 75,85              # Grim Matchstick's first phase: 118 / 124
