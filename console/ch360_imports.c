@@ -1776,11 +1776,20 @@ static void art_scale_apply(void) {
     memset(missing, 0, sizeof(missing));
     for (t = 0; t < rm_target_count; t++) {
         const char* key = rm_strings + rm_names[t];
+        unsigned best = art_scale_n;
+        size_t best_len = 0;
+        /* the longest name the key holds ("oldman_phase1" before "oldman") */
         for (i = 0; i < art_scale_n; i++) {
             char want[96];
-            ch360_pack_entry e;
             snprintf(want, sizeof(want), "atlas_%s_", art_scales[i].name);
-            if (art_scales[i].pct >= 100 || strstr(key, want) == NULL) continue;
+            if (strstr(key, want) != NULL && strlen(want) > best_len) {
+                best = i;
+                best_len = strlen(want);
+            }
+        }
+        for (i = best; i < art_scale_n; i++) {
+            ch360_pack_entry e;
+            if (art_scales[i].pct >= 100) break;
             snprintf(path, sizeof(path), "%s_s%d", key, art_scales[i].pct);
             if (ch360_ctex_pack >= 0 && ch360_pack_find(ch360_ctex_pack, path, strlen(path), &e)) {
                 rm_keys[t] = (char*)malloc(strlen(path) + 1);
@@ -1873,6 +1882,44 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
         }
     }
 #endif
+    {
+        /* env.txt next to the XEX (or in the PC root): NAME=VALUE lines added to the player's environment, for its
+         * trace switches on the console (CH360_TRACE_SPAWN=...); '#' starts a comment. A name the list above has
+         * already is replaced. */
+        static char text[1024];
+        static const char* list[32];
+        char path[512];
+        FILE* f;
+        snprintf(path, sizeof(path), "%s/env.txt", root_dir ? root_dir : ".");
+        if ((f = fopen(path, "rb")) != NULL) {
+            size_t len = fread(text, 1, sizeof(text) - 1, f);
+            int n = 0, added = 0;
+            char* line;
+            fclose(f);
+            text[len] = 0;
+            for (; n < cfg.envc && n < 24; n++) list[n] = cfg.envp[n];
+            for (line = strtok(text, "\r\n"); line != NULL && n < 32; line = strtok(NULL, "\r\n")) {
+                while (*line == ' ' || *line == '\t') line++;
+                if (*line == 0 || *line == '#' || strchr(line, '=') == NULL) continue;
+                {
+                    size_t name = (size_t)(strchr(line, '=') - line) + 1;   /* "NAME=" */
+                    int k;
+                    for (k = 0; k < n; k++)
+                        if (strncmp(list[k], line, name) == 0) break;
+                    list[k] = line;
+                    if (k == n) n++;
+                }
+                added++;
+            }
+            cfg.envc = n;
+            cfg.envp = list;
+            {
+                char msg[160];
+                int m = snprintf(msg, sizeof(msg), "env.txt: %d settings added to the player's environment\n", added);
+                if (m > 0) ch360_plat_log(msg, (unsigned)(m < (int)sizeof(msg) ? m : (int)sizeof(msg) - 1));
+            }
+        }
+    }
     cfg.memory_limit = (srt_u64)memory_mb * 1024 * 1024;
     cfg.stderr_sink = stderr_sink;
     if (srt_init(&cfg) != 0) {

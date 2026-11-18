@@ -480,6 +480,8 @@ namespace Cuphead360.Engine
         /// <summary>Its place in its canvas's last walk (absoluteDepth), -1 before one.</summary>
         public int Depth = -1;
         public Rect? Clip;
+        /// <summary>Its mesh's corners in its own space, set with the mesh (RenderList leaves out a mesh wholly off the view).</summary>
+        public Vector3 MeshMin, MeshMax;
 
         public override void CopyFrom(NComponent src, Dictionary<NObject, NObject> map)
         {
@@ -723,6 +725,13 @@ namespace Cuphead360.Engine
             if (r == null) return;
             var src = MeshData.Of(mesh);
             r.Mesh = src == null ? null : src.CopyInto(r.Mesh);
+            if (r.Mesh != null && r.Mesh.Vertices.Length > 0)
+            {
+                var vs = r.Mesh.Vertices;
+                Vector3 min = vs[0], max = vs[0];
+                for (int i = 1; i < vs.Length; i++) { min = Vector3.Min(min, vs[i]); max = Vector3.Max(max, vs[i]); }
+                r.MeshMin = min; r.MeshMax = max;
+            }
         }
         public static void UnityEngine_CanvasRenderer__Clear(CanvasRenderer self) { var r = CR(self); if (r != null) { r.Mesh = null; r.Materials = new Material[0]; r.Texture = null; } }
         public static bool UnityEngine_CanvasRenderer__get_cull(CanvasRenderer self) => CR(self)?.Cull ?? false;

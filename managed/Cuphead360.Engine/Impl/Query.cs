@@ -88,14 +88,20 @@ namespace Cuphead360.Engine
         {
             var found = componentsFound;
             found.Clear();
+            // Activity is judged from the object searched: under an inactive one (GetComponentsInChildren before a
+            // SetActive(true)) the children switched on themselves are found, as in Unity. The Devil's second phase
+            // gathers its background's sprites that way, all saved at alpha 0, to fade them in: none were found and
+            // the background stayed invisible but for its scrolling copies.
+            bool relative = go != null && !Active(go);
+            bool On(NGameObject g) => relative ? g.ActiveSelf : Active(g);
             void Collect(NGameObject g, bool top)
             {
-                if (top || includeInactive || Active(g))
+                if (top || includeInactive || On(g))
                     foreach (var c in g.Components)
                         if (type == null || type.IsInstanceOfType(c.Managed)) found.Add((Component)c.Managed);
                 if (!recursive) return;
                 foreach (var child in g.Transform.Children)
-                    if (includeInactive || Active(child.GameObject)) Collect(child.GameObject, false);
+                    if (includeInactive || On(child.GameObject)) Collect(child.GameObject, false);
             }
             if (go != null)
             {
@@ -297,6 +303,7 @@ namespace Cuphead360.Engine
                 if (map.TryGetValue(srcLayout[i].t, out var copy) && copy is NRectTransform crt) crt.AnchoredPosition = srcLayout[i].ap;
             }
             rt.Invalidate();
+            if (SpawnTrace.On) SpawnTrace.Made(srcGo, rt.GameObject);
             // Lifecycle of the copy: Awake/OnEnable for active objects, now.
             if (rt.GameObject.ActiveInHierarchy) Lifecycle.ActivateTreeNew(rt);
             if (trace)

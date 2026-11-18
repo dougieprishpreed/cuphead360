@@ -22,6 +22,8 @@ namespace Cuphead360.Engine
         public string Name = "";
         public HideFlags Flags;
         public IntPtr Block;
+        /// <summary>A per-object answer kept by one engine table for its own kind of object (a Sprite's Sprites.Info).</summary>
+        public object Cache;
         public bool Destroyed;
         /// <summary>Object.Destroy was called on it this frame (it goes at the frame's end).</summary>
         public bool PendingDestroy;
@@ -48,6 +50,8 @@ namespace Cuphead360.Engine
         /// <summary>Scene handle; 0 after DontDestroyOnLoad.</summary>
         public int Scene;
         public bool DontDestroy;
+        /// <summary>The spawn this object is part of, when CH360_TRACE_SPAWN names it (SpawnTrace); null otherwise.</summary>
+        public object Spawn;
         /// <summary>Part of a prefab asset: never awake, updated or found as a scene object.</summary>
         public bool IsAsset { get => isAsset; set { if (isAsset != value) { isAsset = value; ActiveVersion++; } } }
         /// <summary>Part of a scene still being built over frames (SceneBuild.Building): inactive until it activates.</summary>

@@ -461,10 +461,14 @@ namespace Cuphead360.Engine
                 destroyQueue.Clear();
                 foreach (var o in batch) Lifecycle.DestroyNow(o);
             }
-            // a sweep of every tracked behaviour each frame, only when something was released since
-            if (Objects.Releases != releasesSeen)
+            // A sweep of every tracked behaviour for the destroyed ones, at most every 30 frames (or after 256
+            // releases): the walks skip destroyed behaviours, so the sweep only keeps the lists short. In a fight
+            // something is released nearly every frame, and the sweep each time was 3.5% of Glumstone's first
+            // phase on host_native.
+            if (Objects.Releases != releasesSeen && (Objects.Releases - releasesSeen >= 256 || ++sweepWait >= 30 || releasesSeen < 0))
             {
                 releasesSeen = Objects.Releases;
+                sweepWait = 0;
                 if (tracked.RemoveAll(b => b.Destroyed) > 0)
                 {
                     trackedSet.RemoveWhere(b => b.Destroyed);
@@ -475,7 +479,7 @@ namespace Cuphead360.Engine
                 }
             }
         }
-        static int releasesSeen = -1;
+        static int releasesSeen = -1, sweepWait;
 
         public static void Untrack(NBehaviour b)
         {

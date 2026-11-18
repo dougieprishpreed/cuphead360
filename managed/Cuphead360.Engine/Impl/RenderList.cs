@@ -835,6 +835,8 @@ namespace Cuphead360.Engine
                     renderers.Add(sr);
                     if (sr.MaskInteraction != SpriteMaskInteraction.None) interacts = true;
                 }
+                else if (SpawnTrace.On && sr.GameObject != null && sr.GameObject.Spawn != null && cams.Count > 0)
+                    SpawnTrace.Sprite(cams[0], sr, null, !sr.Enabled ? "renderer off" : sr.Sprite == null ? "no sprite" : "inactive");
             // Masks matter only when a sprite interacts with them.
             if (interacts)
                 foreach (var m in Typed.SpriteMasks)
@@ -1097,6 +1099,7 @@ namespace Cuphead360.Engine
                 {
                     if ((cam.CullingMask & (1 << sr.GameObject.Layer)) == 0) continue;
                     var it = SpriteItem(cam, xf, sr);
+                    if (SpawnTrace.On && sr.GameObject.Spawn != null) SpawnTrace.Sprite(cam, sr, it, "off the view or clipped");
                     if (it == null) continue;
                     it.Sequence = seq++;
                     v.Add(it);
@@ -1341,6 +1344,10 @@ namespace Cuphead360.Engine
             float d = cam != null ? xf.Viewport(root.GameObject.Transform.Position).z : 0f;
             // A canvas on or behind the camera's near plane (or past the far one) is clipped away.
             if (cam != null && (d < cam.Near || d > cam.Far)) return list;
+            // Off-view meshes are left out under an orthographic camera or the overlay (a perspective
+            // camera's corners behind it would project wrongly).
+            bool cull = (cam == null || xf.Ortho) && !noUiCull;
+            var view = cam != null ? xf.Pixel : new Rect(0f, 0f, Icalls.ScreenWidth, Icalls.ScreenHeight);
             void Walk(NTransform t, float above)
             {
                 var go = t.GameObject;
@@ -1362,6 +1369,9 @@ namespace Cuphead360.Engine
                         if ((alpha == 0f || cr.Color.a == 0f) && !WritesStencil(cr)) continue;
                         var mesh = cr.Mesh;
                         var mtx = t.LocalToWorld;
+                        // Wholly off the view: nothing to draw. The credits scroll 330 lines of text
+                        // (25,600 vertices), a few on screen: 50 ms of the console's list a frame.
+                        if (cull && Off(xf, mtx, cr.MeshMin, cr.MeshMax, view) && !WritesStencil(cr)) continue;
                         // The first item made here owns the arrays; the renderer's other submeshes and pops share them.
                         var owner = NewItem();
                         var screen = owner.ScreenOf(mesh.Vertices.Length);
@@ -1410,6 +1420,26 @@ namespace Cuphead360.Engine
             var rt = root.GameObject.Transform;
             Walk(rt, rt.Parent != null ? NCanvasRenderer.AlphaFrom(rt.Parent) : 1f);
             return list;
+        }
+
+        // CH360_NO_UI_CULL=1: every canvas mesh is listed, on the view or not (a PC check of the cull).
+        static readonly bool noUiCull = Environment.GetEnvironmentVariable("CH360_NO_UI_CULL") == "1";
+
+        /// <summary>The box min-max through mtx lies wholly outside the view (4 px of margin).</summary>
+        static bool Off(in CamXform xf, in Matrix4x4 mtx, Vector3 min, Vector3 max, Rect view)
+        {
+            float x0 = float.MaxValue, y0 = float.MaxValue, x1 = float.MinValue, y1 = float.MinValue;
+            int corners = min.z == max.z ? 4 : 8;
+            for (int c = 0; c < corners; c++)
+            {
+                var p = new Vector3((c & 1) == 0 ? min.x : max.x, (c & 2) == 0 ? min.y : max.y, (c & 4) == 0 ? min.z : max.z);
+                var s = ToScreen(xf, mtx.MultiplyPoint3x4(p));
+                if (float.IsNaN(s.x) || float.IsNaN(s.y)) return false;
+                if (s.x < x0) x0 = s.x; if (s.x > x1) x1 = s.x;
+                if (s.y < y0) y0 = s.y; if (s.y > y1) y1 = s.y;
+            }
+            const float m = 4f;
+            return x1 < view.xMin - m || x0 > view.xMax + m || y1 < view.yMin - m || y0 > view.yMax + m;
         }
 
         /// <summary>A renderer that writes the stencil (a UGUI mask, or its pop): drawn even when transparent.</summary>

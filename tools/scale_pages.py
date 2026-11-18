@@ -82,7 +82,7 @@ def main():
     pages = sorted(f for f in os.listdir(src_dir) if f.endswith(".ctx") and any("atlas_%s_" % n in f for n in names))
     jobs, want = [], set()
     for f in pages:
-        n = next(x for x in names if "atlas_%s_" % x in f)
+        n = max((x for x in names if "atlas_%s_" % x in f), key=len)   # the longest name: an atlas's line over its group's
         for s in want_scales[n]:
             src = os.path.join(src_dir, f)
             dst = os.path.join(out_dir, "%s_s%d.ctx" % (f[:-4], s))

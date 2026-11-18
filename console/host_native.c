@@ -282,7 +282,9 @@ int ch360_plat_file_write(const char* path, const void* data, size_t n) {
 }
 
 int ch360_plat_texture_tight(void) {
-    return getenv("CH360_TEXTURE_TIGHT") != NULL;
+    static int tight = -1;   /* asked every frame: getenv once */
+    if (tight < 0) tight = getenv("CH360_TEXTURE_TIGHT") != NULL;
+    return tight;
 }
 
 void ch360_plat_texture_guess(int id) {

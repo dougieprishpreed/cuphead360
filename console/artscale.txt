@@ -13,8 +13,13 @@
 # levels that play smoothly draw 50-80, the console has ~195 MB of room) for the levels the user found slow on the
 # console (the forty-fourth and forty-fifth runs). Soft layers (smoke, spotlights) at half size: they lose little.
 #
-# Glumstone: its first phase 149 / 182 at full size; at 75%, 73-83% of frames at 60 (the forty-fourth run).
+# Glumstone: its first phase 149 / 182 at full size; at 75%, 73-83% of frames at 60 (the forty-fourth run), but its
+# first phase still 20-41% in the forty-fifth: 90 / 109 at 75%, Glumstone's own art 71 of it, his attacks' pages
+# coming and going (a third to a half of the 2-s sets hold each) and read again, the hold ending with a quarter of the
+# first seconds' pages still out (memory). His first phase's atlas (him, his intro and attacks) at 65%: 53 MB of it.
+# A line for one atlas overrides its group's (the longest name that matches).
 oldman 75
+oldman_phase1 65
 # Djimmi the Great, every phase: 116-139 / 128-156 (its background ~95 MB).
 flyinggenielevel 75
 # Grim Matchstick: 85-118 / 93-124 (background ~55, dragon ~45).

@@ -334,6 +334,21 @@ writes the stack behind the first game log messages holding the text, and
 `CH360_TRACE_VOICES=<n>` lists the clips playing whenever n, 2n, 3n...
 sounds play at once. Like Unity, at most 32 sounds are heard at once; the
 least important past that play silently until they end.
+`CH360_TRACE_SPAWN=<name>,<name>` follows every object made from a prefab
+whose name holds one of the names: `SPAWN` lines for where it was made,
+each of its first 24 frames' sprites (drawn where, at what alpha, or why
+not) and how many frames drew it before it went (`*` lists every spawn's
+name, to find them). The draw lines need a frame list built every frame:
+the PC host, the console, or the .NET player with `CH360_LIST_STATS=1`.
+`CH360_NO_UI_CULL=1` lists every canvas mesh, on the view or not (the
+renderer leaves out UI meshes wholly off the screen: the credits' 330 lines
+of text, a few on screen).
+
+The console takes the same switches from `env.txt` next to `default.xex`:
+`NAME=VALUE` lines (`#` starts a note) added to the player's environment,
+and the log's first lines say how many. For example
+`CH360_TRACE_SPAWN=OldMan_FX_DeathPuff,Oldman_FX_Hat,Oldman_FX_Shoe`
+follows Glumstone's gnomes' death pieces. Delete it for normal play.
 
 The console reads textures ahead by what each level drew before: it keeps,
 per scene, the textures in the order its plays first drew them
@@ -399,7 +414,9 @@ copies beside the full pages to try. `python tools/scale_pages.py --data
 work\GameData` makes the smaller pages it names (in `work\GameData\ctexs`);
 stage_console.py packs them and writes `GameData\artscale.txt`. An
 `artscale.txt` next to `default.xex` chooses copies to try, a line such as
-`flyinggenielevel 85`. The log's `artscale:` lines say what was used. `python tools/level_textures.py --phases` prints, per boss phase (and
+`flyinggenielevel 85`. A line for one atlas overrides the line for a group
+that covers it (the longest name that matches wins: `oldman 75` with
+`oldman_phase1 65`). The log's `artscale:` lines say what was used. `python tools/level_textures.py --phases` prints, per boss phase (and
 per 20 seconds of a run-and-gun level), how many MB of pages it draws within
 2 seconds, and marks the phases in Glumstone's range.
 

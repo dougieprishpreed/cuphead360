@@ -207,11 +207,10 @@ def art_scales(path=None):
 
 
 def atlas_of(key, names):
-    """The name (of names) whose atlas the page key belongs to: "atlas_<name>_" in it."""
-    for n in names:
-        if "atlas_%s_" % n in key:
-            return n
-    return None
+    """The name (of names) whose atlas the page key belongs to: "atlas_<name>_" in it; the longest such name, so a line
+    for one atlas ("oldman_phase1") overrides the line for its group ("oldman")."""
+    found = [n for n in names if "atlas_%s_" % n in key]
+    return max(found, key=len) if found else None
 
 
 def sprite_pages(data, shipped, tried):

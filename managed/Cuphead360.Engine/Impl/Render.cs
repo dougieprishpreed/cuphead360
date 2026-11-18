@@ -271,6 +271,8 @@ namespace Cuphead360.Engine
             internal Vector4 UvMap;
             internal int UvSettings;
             internal float UvW, UvH;
+            // the size came from a texture file (fixed), as of Icalls.RuntimeVersion: kept without asking again
+            internal int UvSizeVersion = -1;
             /// <summary>Triangles as ints for the render list (made once, not per frame).</summary>
             public int[] Triangles32
             {
@@ -409,14 +411,34 @@ namespace Cuphead360.Engine
 
         public static Info Of(Sprite s)
         {
-            if (s == null) return null;
-            if (infos.TryGetValue(s, out var i)) return i;
-            i = FromData((Objects.Of(s) as NAsset)?.Source) ?? new Info();
-            infos.Add(s, i);
+            // The last sprite asked again (SpriteItem, Binding and RenderUvs ask for the same one in turn): its
+            // managed object's own field says it is still alive (Unity's fake null: no native pointer).
+            if (ReferenceEquals(s, lastSprite) && (object)s != null && s.m_CachedPtr != IntPtr.Zero) return lastInfo;
+            // Kept on the sprite's native object after the first ask (Objects.Of: a field and an index; the weak
+            // table's lookup was 6.5% of Glumstone's first phase on host_native, from the animators' writes, the
+            // draw list, Binding and RenderUvs, several a sprite a frame). No native object: Unity's fake null.
+            var n = Objects.Of(s);
+            if (n == null) return null;
+            if (n.Cache is Info hit) { lastSprite = s; lastInfo = hit; return hit; }
+            if (!infos.TryGetValue(s, out var i))
+            {
+                i = FromData((n as NAsset)?.Source) ?? new Info();
+                infos.Add(s, i);
+            }
+            n.Cache = i;
+            lastSprite = s; lastInfo = i;
             return i;
         }
+        static Sprite lastSprite;
+        static Info lastInfo;
 
-        public static void Set(Sprite s, Info i) { infos.Remove(s); infos.Add(s, i); }
+        public static void Set(Sprite s, Info i)
+        {
+            infos.Remove(s); infos.Add(s, i);
+            var n = Objects.Of(s);
+            if (n != null) n.Cache = i;
+            if (ReferenceEquals(s, lastSprite)) lastInfo = i;
+        }
 
         public static string Key(object renderDataKey)
         {
@@ -601,7 +623,11 @@ namespace Cuphead360.Engine
             var i = Of(s);
             if (i == null) return new Vector2[0];
             if (!Binding(s, out var tex, out var tr, out var u, out int settings) || tex == null) return new Vector2[i.Vertices.Length];
-            float w = Icalls.TextureWidth(tex), h = Icalls.TextureHeight(tex);
+            // The size kept with the cache while the texture is the same file texture (two weak-table lookups
+            // each for its width and height, per sprite drawn a frame).
+            float w, h;
+            if (i.UvCache != null && ReferenceEquals(i.UvTex, tex) && i.UvSizeVersion == Icalls.RuntimeVersion) { w = i.UvW; h = i.UvH; }
+            else { w = Icalls.TextureWidth(tex); h = Icalls.TextureHeight(tex); }
             if (w <= 0 || h <= 0) return new Vector2[i.Vertices.Length];
             // Field by field (float.Equals, as Rect's and Vector4's Equals do): their Equals(object)
             // boxed the argument, an allocation per sprite drawn each frame.
@@ -628,6 +654,7 @@ namespace Cuphead360.Engine
             }
             if (rot == 4) AssetDb.Problem("sprite packed with Rotate90 (UV mapping unverified): " + i.Name);
             i.UvCache = uv; i.UvTex = tex; i.UvRect = tr; i.UvMap = u; i.UvSettings = settings; i.UvW = w; i.UvH = h; i.UvVertices = i.Vertices;
+            i.UvSizeVersion = Icalls.FixedSize(tex) ? Icalls.RuntimeVersion : -1;
             return uv;
         }
 
@@ -1333,7 +1360,11 @@ namespace Cuphead360.Engine
             if (runtimeTextures.TryGetValue(t, out var d)) return d[1];
             return FileSize(t)[1];
         }
-        public static void RuntimeTexture(Texture t, int w, int h, int format) { runtimeTextures.Remove(t); runtimeTextures.Add(t, new[] { w, h, format }); }
+        public static void RuntimeTexture(Texture t, int w, int h, int format) { runtimeTextures.Remove(t); runtimeTextures.Add(t, new[] { w, h, format }); RuntimeVersion++; }
+        /// <summary>Changes whenever a texture gets a run-time size (Sprites.RenderUvs keeps a file texture's size until then).</summary>
+        public static int RuntimeVersion;
+        /// <summary>The texture's size is its file's: not a render texture or one sized at run time.</summary>
+        public static bool FixedSize(Texture t) => t != null && !(t is RenderTexture) && !runtimeTextures.TryGetValue(t, out _);
 
         public static int UnityEngine_Texture__Internal_GetWidth(Texture t) => TextureWidth(t);
         public static int UnityEngine_Texture__Internal_GetHeight(Texture t) => TextureHeight(t);

@@ -199,6 +199,7 @@ namespace Cuphead360.Engine
         {
             var go = t.GameObject;
             if (go.Destroyed) return;
+            if (go.Spawn != null) SpawnTrace.Gone(go);
             bool active = go.ActiveInHierarchy;
             foreach (var child in t.Children.ToArray()) DestroyTree(child, false);
             foreach (var c in go.Components.ToArray())
