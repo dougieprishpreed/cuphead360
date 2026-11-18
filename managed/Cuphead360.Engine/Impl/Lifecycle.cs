@@ -40,6 +40,23 @@ namespace Cuphead360.Engine
             return go;
         }
 
+        // A type's [RequireComponent] types (its base classes' too, as Unity reads them), once per type.
+        static readonly Dictionary<Type, Type[]> required = new Dictionary<Type, Type[]>();
+        static Type[] Required(Type type)
+        {
+            if (required.TryGetValue(type, out var r)) return r;
+            var list = new List<Type>();
+            try
+            {
+                foreach (var a in type.GetCustomAttributes(typeof(RequireComponent), true))
+                    if (a is RequireComponent rc)
+                        foreach (var t in new[] { rc.m_Type0, rc.m_Type1, rc.m_Type2 })
+                            if (t != null && t != type && !list.Contains(t)) list.Add(t);
+            }
+            catch (Exception) { }
+            return required[type] = list.ToArray();
+        }
+
         public static NComponent AddComponent(NGameObject go, Type type)
         {
             if (type == null || !typeof(Component).IsAssignableFrom(type) || type.IsAbstract) return null;
@@ -49,6 +66,11 @@ namespace Cuphead360.Engine
                 if (go.Transform is NRectTransform have) return have;
                 return SwapTransform(go, true);
             }
+            // Unity adds the components a type requires first: TextMesh Pro's sub-mesh text objects (a Graphic needs a
+            // CanvasRenderer) were made without one, and the reflecting pool's count of deaths, in a second font, threw
+            // in their OnEnable: the text left its bubble and the dialogue could not go on (the forty-fifth run).
+            foreach (var need in Required(type))
+                if (Find.Component(go, need) == null && !need.IsAbstract) AddComponent(go, need);
             var managed = (Component)NewManaged(type);
             if (managed is MonoBehaviour mb)
             {

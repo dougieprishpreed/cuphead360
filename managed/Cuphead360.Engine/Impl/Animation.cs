@@ -720,6 +720,7 @@ namespace Cuphead360.Engine
             public int State = -1;
             public float Time;          // seconds into the state (speed applied)
             public float Prev;          // last frame's time, for events and exit times
+            public float Start;         // the time it was entered at (a state played backwards counts its progress from there)
             public bool Fresh = true;   // entered this frame: events at its start fire
         }
 
@@ -1130,7 +1131,7 @@ namespace Cuphead360.Engine
 
         void Enter(LayerState l, StatePlay p, int state, float time)
         {
-            p.State = state; p.Time = time; p.Prev = time; p.Fresh = true;
+            p.State = state; p.Time = time; p.Prev = time; p.Start = time; p.Fresh = true;
         }
 
         void UpdateLayer(int li, float dt)
@@ -1154,9 +1155,19 @@ namespace Cuphead360.Engine
                 l.PendingPlay = null;
                 l.Next = null; l.Transition = null;
                 bool same = ps == l.Current.State;
-                if (float.IsNegativeInfinity(pn)) { if (!same) Enter(l, l.Current, ps, 0f); }
-                else Enter(l, l.Current, ps, pn * StateLength(li, ps));
-                return;   // the requested state is evaluated at its start this frame
+                if (float.IsNegativeInfinity(pn))
+                {
+                    // Unity: Play of the state already playing, without a time, leaves it running. Returning here
+                    // held it at its first frame for as long as a script played it each frame: Dr. Kahl's bomb bots,
+                    // replayed by every touch, never got past their blast's first frame, whose collider kept them
+                    // touching (four death sounds a frame, the console's audio 60 ms a frame and its loud distortion).
+                    if (!same) { Enter(l, l.Current, ps, 0f); return; }
+                }
+                else
+                {
+                    Enter(l, l.Current, ps, pn * StateLength(li, ps));
+                    return;   // the requested state is evaluated at its start this frame
+                }
             }
             if (l.PendingCross is (int cs, float cd, float co, bool cf))
             {
@@ -1183,6 +1194,16 @@ namespace Cuphead360.Engine
             var cur = StateAt(li, l.Current.State);
             if (cur == null) return;
             float n0 = l.Current.Prev / StateLength(li, l.Current.State), n1 = Normalized(li, l.Current);
+            if (StateSpeed(li, l.Current.State) < 0f)
+            {
+                // Played backwards (a negative speed): its exit time is how far it has played, from where it began. Grim
+                // Matchstick's tongue folds back in Intro_Reverse (speed -1, entered at 0, exit at 1): its time went
+                // below 0 and never reached the exit, the coroutine that starts his third phase waited on its end, and
+                // the three-headed dragon came only with his knockout (the forty-fifth run).
+                float len = StateLength(li, l.Current.State);
+                n0 = (l.Current.Start - l.Current.Prev) / len;
+                n1 = (l.Current.Start - l.Current.Time) / len;
+            }
             ControllerData.Transition fire = null;
             // One list for every layer of every animator (nothing here calls game code): a new one per layer
             // per update was an allocation for each animator every frame.
@@ -1552,7 +1573,8 @@ namespace Cuphead360.Engine
             if (len > 0f)
             {
                 if (clip.Loop || st.Loop) { t %= len; if (t < 0) t += len; }
-                else t = Math.Max(0f, Math.Min(len, t));
+                else if (t < 0f) t = Math.Max(0f, len + t);   // played backwards from its start: from the clip's end
+                else t = Math.Min(len, t);
             }
             foreach (var b in clip.Bindings)
             {

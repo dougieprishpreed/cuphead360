@@ -328,6 +328,13 @@ the frames through a model of the console's texture memory and loader and
 prints the frames that would wait, for a room you choose (`--decoded`),
 the locked 30 (`--hz 30 --every 2`) and other settings.
 
+Two more PC checks for the player itself (set in `CH360_GUEST_ENV` for the
+PC host, or the environment for the .NET player): `CH360_LOG_STACK=<text>`
+writes the stack behind the first game log messages holding the text, and
+`CH360_TRACE_VOICES=<n>` lists the clips playing whenever n, 2n, 3n...
+sounds play at once. Like Unity, at most 32 sounds are heard at once; the
+least important past that play silently until they end.
+
 The console reads textures ahead by what each level drew before: it keeps,
 per scene, the textures in the order its plays first drew them
 (`learned/<scene>.txt` next to `default.xex`, updated as you play) and asks
@@ -342,7 +349,11 @@ the console's lists into `console/learned` (kept in the repository), and
 the console's where there is one, else the bot's. Delete the `learned` folder
 next to the XEX to start over from the shipped lists. As a scene starts, the
 pages its list says the first two seconds draw are read while the loading
-screen holds (the log's `HOST first seconds' pages` line).
+screen holds (the log's `HOST first seconds' pages` line), along with the
+equipped weapons' shots, EX shots and super (the `LEVEL hold` line's "for
+the player's weapons and super"). The loading screen's frames are kept and
+drawn again whenever the game is held up behind it, with the hourglass or
+behind the plain black screen King Dice's casino and the King's Leap use.
 
 The game's .NET runtime reserves its memory in 16 MB blocks and uses part of
 each. The console gives the unused parts back to the textures and takes them

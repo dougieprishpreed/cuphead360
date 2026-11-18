@@ -3,22 +3,41 @@
 # them and writes GameData/artscale.txt (console/ch360_imports.c, art_scale, reads it).
 #
 # "<atlas name> <percent>": shipped smaller. The pack holds that atlas's pages only at that size, under the full
-# pages' names; its full pages aren't staged (the console can't draw them full size without staging again).
+# pages' names; its full pages aren't staged (the console can't draw them full size without staging again). A name
+# covers every atlas it begins ("dragonlevel": dragonlevel_bg, dragonlevel_nobg, dragonlevel_rain).
 # "try <atlas name> <percents>": copies at those sizes packed beside the full pages, drawn only when an artscale.txt
 # next to default.xex names them ("<atlas name> <percent>", one a line); full size otherwise.
 # The log's "artscale:" lines say what was used.
 #
-# Glumstone: its first phase drew about 150 MB of sprite pages within any 2 s against ~195 MB of room (the
-# forty-third run: 59% of its frames at 60); at 75%, 73-83% (the forty-fourth).
-oldman 75
+# Sizes chosen from the art each phase draws within any 2 s (tools/level_textures.py --phases, median / 90% MB; the
+# levels that play smoothly draw 50-80, the console has ~195 MB of room) for the levels the user found slow on the
+# console (the forty-fourth and forty-fifth runs). Soft layers (smoke, spotlights) at half size: they lose little.
 #
-# The other phases in Glumstone's range (tools/level_textures.py --phases; median / 90% MB within 2 s), at full size
-# until played. To try one at 85%, put "<atlas name> 85" in an artscale.txt next to default.xex.
-try platformingharborlevel 75,85   # Perilous Piers, 20-80 s in: 133-145 / 149-180
-try flyinggenielevel 75,85         # Djimmi, every phase: 116-139 / 128-156 (its background ~95 MB)
-try rumrunners_phase3 75,85        # Moonshine Mob's Anteater and Mob Boss: 118-132 / 123-159 (phase 3's art only)
-try snowcult_background 75,85      # Mortimer Freeze, first two phases: 118-132 / 125-150 (its background ~95 MB)
-try snowcult_phase2 75,85
-try devillevelp1 75,85             # The Devil's first phase: 114 / 141
-try bg_devil_smoke 75,85
-try dragonlevel 75,85              # Grim Matchstick's first phase: 118 / 124
+# Glumstone: its first phase 149 / 182 at full size; at 75%, 73-83% of frames at 60 (the forty-fourth run).
+oldman 75
+# Djimmi the Great, every phase: 116-139 / 128-156 (its background ~95 MB).
+flyinggenielevel 75
+# Grim Matchstick: 85-118 / 93-124 (background ~55, dragon ~45).
+dragonlevel 75
+# The Devil: first phase 114 / 141 (devillevelp1 66, smoke 44), his hands 110 / 130 (devillevelp3 84).
+devillevelp1 75
+devillevelp3 75
+bg_devil_smoke 50
+# Moonshine Mob's anteater and boss (phase 3's art only): 118-132 / 123-159.
+rumrunners_phase3 70
+# Mortimer Freeze, first two phases: 118-132 / 125-150 (its background ~95 MB).
+snowcult_background 75
+snowcult_phase2 75
+# Esther Winchester, first two phases: 91-102 / 121-125 (cowgirl_phase1 covers its cactus too).
+cowgirl_phase1 75
+cowgirl_phase2 75
+# Howling Aces: the terriers 80 / 109, the leader 103 / 115.
+dogfight_phase1 85
+dogfight_phase3 75
+# King Dice's cigar room (and the chips' room, which uses its smoke): 106 / 111, the smoke 67.
+dicecigarlevelsmoke 50
+# The Inkwell Hell map: its sweeping spotlights are 246 MB of frames (the map thrashed: 23-27 ms of loads a frame).
+world_4_spotlightsback 50
+world_4_spotlightsfront 50
+# Perilous Piers, 20-80 s in (the water): 133-145 / 149-180.
+platformingharborlevel 85

@@ -67,10 +67,18 @@ namespace Cuphead360.Engine
         public static bool UnityEngine_Debug__get_developerConsoleVisible() => false;
         public static void UnityEngine_Debug__set_developerConsoleVisible(bool value) { }
         public static int GameLogLines;
+        // CH360_LOG_STACK=<text> (a PC check): the first 8 game log messages holding the text, with the stack that logged them
+        static readonly string logStack = Environment.GetEnvironmentVariable("CH360_LOG_STACK");
+        static int logStacks;
         public static void UnityEngine_DebugLogHandler__Internal_Log(LogType level, string msg, UObject obj)
         {
             GameLogLines++;
             Log.Line("UNITY " + level + ": " + msg);
+            if (logStack != null && logStacks < 8 && msg != null && msg.Contains(logStack))
+            {
+                logStacks++;
+                Log.Line("UNITY STACK: " + Environment.StackTrace.Replace("\n", " | "));
+            }
         }
         public static void UnityEngine_DebugLogHandler__Internal_LogException(Exception exception, UObject obj)
         {

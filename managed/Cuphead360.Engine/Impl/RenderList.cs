@@ -616,6 +616,36 @@ namespace Cuphead360.Engine
         /// <summary>A clip's sprites read ahead (an animator's next states: NAnimator.ReadAheadNext).</summary>
         internal static void AheadClipOf(ClipData clip) { if (ReadAhead != null) AheadClip(clip); }
 
+        /// <summary>
+        /// Every sprite an object's hierarchy shows and every clip of its animators, read ahead: a prefab the game makes
+        /// copies of in play (the equipped weapons' shots and EX, the super: Cuphead360.Player's PlayerKit, at a level's
+        /// hold). The sprites and clips asked for.
+        /// </summary>
+        public static int AheadHierarchy(UnityEngine.Object root)
+        {
+            if (ReadAhead == null || root == null) return 0;
+            var go = root is GameObject g ? Objects.GO(g) : Objects.Comp(root)?.GameObject;
+            if (go?.Transform == null) return 0;
+            int n = 0;
+            void Walk(NTransform t, int depth)
+            {
+                if (t?.GameObject == null || depth > 16) return;
+                foreach (var c in t.GameObject.Components)
+                {
+                    if (c is NSpriteRenderer sr && sr.Sprite != null)
+                    {
+                        if (Sprites.BoundTexture(sr.Sprite) == null) Atlases.Touch(sr.Sprite); else Ahead(sr.Sprite);
+                        n++;
+                    }
+                    else if (c is NAnimator a && a.Controller != null && ControllerData.Of(a.Controller) is ControllerData d)
+                        foreach (var clip in d.Clips) { AheadClip(clip); n++; }
+                }
+                foreach (var ch in t.Children) Walk(ch, depth + 1);
+            }
+            Walk(go.Transform, 0);
+            return n;
+        }
+
         static void AheadClip(ClipData clip)
         {
             if (clip == null || (!sceneAsk && Clock.FrameCount - clip.AheadFrame < ClipAheadFrames)) return;
@@ -937,15 +967,37 @@ namespace Cuphead360.Engine
         static readonly List<NBehaviour> fxChain = new List<NBehaviour>();
 
         static readonly HashSet<string> grabWarned = new HashSet<string>();
+        static readonly HashSet<RenderTexture> grabTaken = new HashSet<RenderTexture>(ReferenceEqualityComparer.Instance as IEqualityComparer<RenderTexture>);
 
         /// <summary>
         /// Unity's GrabPass: before an item whose shader reads what is behind it (Effects.NeedsGrab), the camera's
         /// view stops, a blit copies its target so far into a temporary texture the item samples (consecutive such
         /// items share one), and a resumed view of the same camera goes on in the target with what it held. Only a
         /// target texture can be copied: on the screen itself (no image-effect camera after it) the item stays plain.
+        /// The copy goes into a temporary texture no view of the frame draws into or reads: the image effects have
+        /// handed theirs back by now, and the first grab of Honeybottoms took the camera's own target (a copy of a
+        /// texture into itself: on the console the pass's picture wasn't in it yet, so the honey drew the last
+        /// frame's picture back over this one, its trails building into a bright glow with the sprites under it lost;
+        /// Mortimer Freeze's ice and Sally Stageplay's overlay the same).
         /// </summary>
         static void SplitForGrabs()
         {
+            grabTaken.Clear();
+            bool any = false;
+            for (int vi = 0; vi < views.Count && !any; vi++)
+                if (!views[vi].IsBlit)
+                    foreach (var it in views[vi].Items)
+                        if (it.Tex2 == null && Effects.NeedsGrab(Effects.ModeOf(it))) { any = true; break; }
+            if (!any) return;
+            foreach (var v in views)
+            {
+                if (v.Target != null) grabTaken.Add(v.Target);
+                foreach (var it in v.Items)
+                {
+                    if (it.Texture is RenderTexture a) grabTaken.Add(a);
+                    if (it.Tex2 is RenderTexture b) grabTaken.Add(b);
+                }
+            }
             for (int vi = 0; vi < views.Count; vi++)
             {
                 var v = views[vi];
@@ -960,7 +1012,8 @@ namespace Cuphead360.Engine
                     continue;
                 }
                 int w = Effects.Width(v.Target), h = Effects.Height(v.Target);
-                var grab = Effects.GetTemporary(w, h);
+                var grab = Effects.GetTemporaryExcept(w, h, grabTaken);
+                grabTaken.Add(grab);
                 var copyView = NewView(null, new Rect(0, 0, w, h), grab);
                 copyView.IsBlit = true; copyView.Group = v.Group;
                 var it = NewItem();

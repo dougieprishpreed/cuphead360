@@ -685,9 +685,14 @@ namespace Cuphead360.Player
             if (inst == null) return 0;
             var icon = loaderIcon.GetValue(inst) as UnityEngine.UI.Graphic;
             var fader = loaderFader.GetValue(inst) as UnityEngine.UI.Graphic;
-            if (icon == null || fader == null || !icon.isActiveAndEnabled || icon.color.a < 0.99f || fader.color.a < 0.99f) return 0;
+            // The black fader up, with the hourglass on it or none at all: King Dice's casino and the King's Leap load
+            // their rooms behind a plain black screen, which froze (its film grain and crackle stopped) until the room
+            // came; now its frames are kept and drawn again through the hold-ups as the hourglass's are.
+            if (fader == null || fader.color.a < 0.99f) return 0;
+            bool iconShown = icon != null && icon.isActiveAndEnabled;
+            if (iconShown && icon.color.a < 0.99f) return 0;
             uint state = 0x80000000u;
-            var animator = icon.GetComponent<Animator>();
+            var animator = iconShown ? icon.GetComponent<Animator>() : null;
             if (animator != null && animator.isActiveAndEnabled)
             {
                 var info = animator.GetCurrentAnimatorStateInfo(0);
@@ -801,7 +806,7 @@ namespace Cuphead360.Player
         /// loader's black, not only levels (SceneLoader.Prepared: the slot select's fonts and pages came as it
         /// faded in, a 250 ms frame in every run).
         /// </summary>
-        static int levelLoads = -1, levelFrames, levelSprites, levelUnbound, levelClear, levelPending;
+        static int levelLoads = -1, levelFrames, levelSprites, levelUnbound, levelClear, levelPending, levelKit;
         static long levelFrom, levelProgressAt;
         static bool levelHolding, levelSettled;
         static readonly bool levelHoldOff = Environment.GetEnvironmentVariable("CH360_LEVEL_HOLD") == "0";
@@ -822,7 +827,7 @@ namespace Cuphead360.Player
                 levelHolding = true;
                 levelFrom = levelProgressAt = now;
                 levelPending = int.MaxValue;
-                levelFrames = levelSprites = levelClear = 0;
+                levelFrames = levelSprites = levelClear = levelKit = 0;
                 levelUnbound = -1;
                 levelSettled = false;
             }
@@ -835,6 +840,8 @@ namespace Cuphead360.Player
                 bool menu = !name.StartsWith("scene_level_") && !name.StartsWith("scene_map_") && !name.StartsWith("scene_cutscene_");
                 int read = menu ? RenderList.ReadAheadScene(out int unbound, languageFonts: true) : RenderList.ReadAheadFirst(out unbound);
                 levelSprites = Math.Max(levelSprites, read);
+                // the equipped weapons' shots, EX and super, once the player is there (PlayerKit)
+                if (!menu && levelKit == 0 && name.StartsWith("scene_level_")) levelKit = PlayerKit.Ahead();
                 levelSettled = unbound == 0 || unbound == levelUnbound;
                 levelUnbound = unbound;
             }
@@ -847,7 +854,7 @@ namespace Cuphead360.Player
             if (done || now - levelFrom > 3 * hz)
             {
                 levelHolding = false;
-                Console.WriteLine($"LEVEL hold {name}: {levelFrames} frames, {(now - levelFrom) * 1000 / hz} ms; {levelSprites} sprites read ahead, "
+                Console.WriteLine($"LEVEL hold {name}: {levelFrames} frames, {(now - levelFrom) * 1000 / hz} ms; {levelSprites} sprites read ahead, {levelKit} for the player's weapons and super, "
                     + $"{levelUnbound} with no atlas; the last frame waited for {waited} textures, {TexturesPending()} still coming, {atlases} atlases asked for{(done ? "" : " (gave up)")}");
                 return false;
             }

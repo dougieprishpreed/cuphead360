@@ -528,9 +528,19 @@ namespace Cuphead360.Engine
         public static long YieldSeqNow => yieldSeq;
 
         /// <summary>Runs the routine to its next yield and records what it waits for.</summary>
+        // Coroutines of a destroyed behaviour found still running, logged the first times (none should be: Unity's die
+        // with their MonoBehaviour).
+        static int deadOwners;
+
         public static void Step(CoroutineState c)
         {
             if (c.Done) return;
+            if (c.Owner != null && c.Owner.Destroyed)
+            {
+                if (++deadOwners <= 8) Log.Line("COROUTINE " + c.Routine.GetType().Name + " of the destroyed " + c.Owner.Name + " stopped");
+                Stop(c);
+                return;
+            }
             bool more;
             long t0 = PlayerLoop.CountAllocs ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             long a0 = t0 != 0 ? GC.GetAllocatedBytesForCurrentThread() : 0;

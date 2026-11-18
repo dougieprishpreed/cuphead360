@@ -175,6 +175,12 @@ namespace Cuphead360.Engine
         {
             var b = Objects.Comp(self) as NBehaviour;
             if (b == null) return null;
+            if (b.Destroyed)
+            {
+                // Unity starts nothing on a destroyed behaviour; one started here ran on with nothing to stop it
+                Log.Line("Coroutine couldn't be started because the behaviour '" + b.Name + "' is destroyed");
+                return null;
+            }
             if (!b.GameObject.ActiveInHierarchy)
             {
                 Log.Line("Coroutine couldn't be started because the game object '" + b.Name + "' is inactive!");

@@ -16,6 +16,7 @@ namespace Cuphead360.Engine
         public bool Loop, Mute, PlayOnAwake = true, IgnoreListenerPause, IgnoreListenerVolume;
         // 3D: AudioRolloffMode (0 logarithmic, 1 linear, 2 custom), distances in world units, spread in degrees.
         public int Rolloff;
+        public int Priority = 128;   // Unity's: 0 the most important, 256 the least (which voices stay real past 32)
         public float MinDistance = 1f, MaxDistance = 500f, Spread;
         /// <summary>The custom curves over distance / MaxDistance, as serialized (null: none; a single key is a constant).</summary>
         public List<Keyframe> RolloffCurve, BlendCurve, SpreadCurve;
@@ -36,6 +37,7 @@ namespace Cuphead360.Engine
             Mute = Tree.Bool(t, "Mute");
             Pan = Tree.Float(t, "Pan2D");
             Rolloff = (int)Tree.Int(t, "rolloffMode");
+            Priority = (int)Tree.Int(t, "Priority", 128);
             MinDistance = Tree.Float(t, "MinDistance", 1f);
             MaxDistance = Tree.Float(t, "MaxDistance", 500f);
             RolloffCurve = Keys(t, "rolloffCustomCurve");
@@ -59,7 +61,7 @@ namespace Cuphead360.Engine
             var s = (NAudioSource)src;
             Clip = s.Clip; Group = s.Group; Volume = s.Volume; Pitch = s.Pitch; Pan = s.Pan; SpatialBlend = s.SpatialBlend;
             Loop = s.Loop; Mute = s.Mute; PlayOnAwake = s.PlayOnAwake; IgnoreListenerPause = s.IgnoreListenerPause; IgnoreListenerVolume = s.IgnoreListenerVolume;
-            Rolloff = s.Rolloff; MinDistance = s.MinDistance; MaxDistance = s.MaxDistance; Spread = s.Spread;
+            Rolloff = s.Rolloff; MinDistance = s.MinDistance; MaxDistance = s.MaxDistance; Spread = s.Spread; Priority = s.Priority;
             RolloffCurve = s.RolloffCurve; BlendCurve = s.BlendCurve; SpreadCurve = s.SpreadCurve;
         }
 
@@ -456,6 +458,27 @@ namespace Cuphead360.Engine
             var c = ClipOf(clip);
             if (s == null || c == null) return;
             voices.Add(new Voice { Src = s, Clip = c, OneShot = true, VolumeScale = volumeScale });
+            if (traceVoices > 0 && voices.Count >= traceVoicesNext) VoiceCensus();
+        }
+
+        // CH360_TRACE_VOICES=n (a PC check): when n, 2n, 3n... voices play at once, the clips they play, by count
+        static readonly int traceVoices = int.TryParse(Environment.GetEnvironmentVariable("CH360_TRACE_VOICES"), out int tv) ? tv : 0;
+        static int traceVoicesNext = traceVoices;
+        static void VoiceCensus()
+        {
+            traceVoicesNext += traceVoices;
+            var n = new Dictionary<string, int>();
+            foreach (var v in voices)
+            {
+                string k = (v.Clip?.Name ?? "?") + (v.OneShot ? " (one-shot" : " (main") + " on " + (v.Src?.GameObject?.Name ?? "?") + ")";
+                n.TryGetValue(k, out int x); n[k] = x + 1;
+            }
+            var top = new List<KeyValuePair<string, int>>(n);
+            top.Sort((a, b) => b.Value.CompareTo(a.Value));
+            var sb = new System.Text.StringBuilder("AUDIO voices " + voices.Count + " at frame " + Clock.FrameCount + ":");
+            for (int i = 0; i < top.Count && i < 6; i++) sb.Append(" ").Append(top[i].Key).Append(" x").Append(top[i].Value).Append(";");
+            Log.Line(sb.ToString());
+            if (traceVoicesNext <= traceVoices * 3) Log.Line("AUDIO voices stack: " + Environment.StackTrace.Replace("\n", " | "));
         }
 
         public static void Stop(NAudioSource s)
@@ -562,6 +585,7 @@ namespace Cuphead360.Engine
             var listener = NAudioListener.Active;
             Vector3 hearAt = default, right = Vector3.right;
             if (listener != null) { var lt = listener.GameObject.Transform; hearAt = lt.Position; right = lt.Rotation * Vector3.right; }
+            var silent = VirtualVoices();
             for (int vi = voices.Count - 1; vi >= 0; vi--)
             {
                 var v = voices[vi];
@@ -577,6 +601,7 @@ namespace Cuphead360.Engine
                 }
                 GroupGain(s.Group, out float gain, out float gpitch);
                 gain *= s.Mute ? 0f : s.Volume * v.VolumeScale * (s.IgnoreListenerVolume ? 1f : ListenerVolume);
+                if (silent != null && silent.Contains(v)) gain = 0f;
                 float pan = s.Pan;
                 if (listener != null && s.GameObject != null && (s.SpatialBlend > 0f || s.BlendCurve?.Count > 1)) Spatial(s, hearAt, right, ref gain, ref pan);
                 double step = v.Clip.Frequency / (double)Rate * Math.Max(0f, s.Pitch) * gpitch;
@@ -597,6 +622,32 @@ namespace Cuphead360.Engine
                 for (int i = 0; i < frames * 2; i++) capture.Write((short)Math.Round(Math.Clamp(mix[i], -1f, 1f) * 32767f));
                 capturedFrames += frames;
             }
+        }
+
+        /// <summary>
+        /// Unity's real voices (AudioSettings' 32): past that many, the least important (by the source's priority, then the
+        /// newest first) play silent, their time going on, as Unity makes them virtual. Dr. Kahl's bomb bots, two touching as
+        /// they blow up, each die every frame of the blast as the game's own code has them: 140 copies of their sound at
+        /// once here, summed into a loud distortion, which Unity's limit holds to 32. Null when every voice is real.
+        /// </summary>
+        public const int RealVoices = 32;
+        static readonly HashSet<Voice> virtualVoices = new HashSet<Voice>();
+        static readonly List<Voice> byImportance = new List<Voice>();
+        static readonly Comparison<Voice> moreImportant = (a, b) =>
+        {
+            int pa = a.Src?.Priority ?? 128, pb = b.Src?.Priority ?? 128;
+            return pa != pb ? pa.CompareTo(pb) : b.Key.CompareTo(a.Key);
+        };
+        static HashSet<Voice> VirtualVoices()
+        {
+            if (voices.Count <= RealVoices) return null;
+            byImportance.Clear();
+            byImportance.AddRange(voices);
+            byImportance.Sort(moreImportant);
+            virtualVoices.Clear();
+            for (int i = RealVoices; i < byImportance.Count; i++) virtualVoices.Add(byImportance[i]);
+            byImportance.Clear();
+            return virtualVoices;
         }
 
         // A voice's mix in the host (StepHost's plan).
@@ -625,6 +676,7 @@ namespace Cuphead360.Engine
             Vector3 hearAt = default, right = Vector3.right;
             if (listener != null) { var lt = listener.GameObject.Transform; hearAt = lt.Position; right = lt.Rotation * Vector3.right; }
             int planned = 0;
+            var silent = VirtualVoices();
             for (int vi = voices.Count - 1; vi >= 0; vi--)
             {
                 var v = voices[vi];
@@ -642,6 +694,7 @@ namespace Cuphead360.Engine
                 gain *= s.Mute ? 0f : s.Volume * v.VolumeScale * (s.IgnoreListenerVolume ? 1f : ListenerVolume);
                 float pan = s.Pan;
                 if (listener != null && s.GameObject != null && (s.SpatialBlend > 0f || s.BlendCurve?.Count > 1)) Spatial(s, hearAt, right, ref gain, ref pan);
+                if (silent != null && silent.Contains(v)) gain = 0f;
                 var c = v.Clip;
                 double step = c.Frequency / (double)Rate * Math.Max(0f, s.Pitch) * gpitch;
                 bool loop = !v.OneShot && s.Loop;

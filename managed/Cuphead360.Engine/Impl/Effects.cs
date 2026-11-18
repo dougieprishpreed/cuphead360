@@ -260,6 +260,20 @@ namespace Cuphead360.Engine
             return rt;
         }
 
+        /// <summary>A free temporary of that size that none of <paramref name="taken"/> is (a grab's copy: RenderList.SplitForGrabs).</summary>
+        public static RenderTexture GetTemporaryExcept(int w, int h, HashSet<RenderTexture> taken)
+        {
+            w = Math.Max(1, w); h = Math.Max(1, h);
+            foreach (var t in temps)
+                if (!t.InUse && t.W == w && t.H == h && !taken.Contains(t.Rt)) { t.InUse = true; t.LastFrame = Clock.FrameCount; return t.Rt; }
+            var rt = Lifecycle.NewManaged<RenderTexture>();
+            Objects.Register(rt, new NAsset(), "TempBuffer " + (temps.Count + 1) + " " + w + "x" + h, persistent: true);
+            Icalls.UnityEngine_RenderTexture__Internal_SetWidth(rt, w);
+            Icalls.UnityEngine_RenderTexture__Internal_SetHeight(rt, h);
+            temps.Add(new Temp { Rt = rt, W = w, H = h, InUse = true, LastFrame = Clock.FrameCount });
+            return rt;
+        }
+
         public static bool IsTemporary(RenderTexture rt)
         {
             foreach (var t in temps) if (ReferenceEquals(t.Rt, rt)) return true;
