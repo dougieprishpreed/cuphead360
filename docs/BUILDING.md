@@ -6,6 +6,12 @@ files; nothing of the game is downloaded or shared. Follow the steps in
 order. Each one ends with a check, so you (or an agent working through this
 for you) know it worked before going on.
 
+The folder holds two things: `default.xex`, the console program you build
+here (steps 1 to 4, 6 and 7), and the game's data converted for the
+console. **360convert.exe** makes the data for you (step 5): run it, pick
+your `Cuphead.exe`, and it fills a `cuphead360` folder. Step 8 adds your
+build to that folder.
+
 The first build takes about three to four hours, most of it waiting:
 building the Xbox 360 compiler once (about an hour) and converting the
 textures (about an hour and a half). Later builds take minutes.
@@ -30,7 +36,7 @@ they run in WSL.
 2. **Python 3.11 or newer** (3.13 is what it was tested with):
    `winget install Python.Python.3.13`, then
    ```
-   python -m pip install UnityPy==1.25.4 numpy Pillow texture2ddecoder lz4
+   python -m pip install UnityPy==1.25.4 numpy Pillow texture2ddecoder lz4 soundfile
    ```
 3. **The .NET 10 SDK**: `winget install Microsoft.DotNet.SDK.10`
 4. **wasi-sdk 29**: download `wasi-sdk-29.0-x86_64-windows.tar.gz` from
@@ -128,8 +134,31 @@ that log with the same build's run on the PC.
 
 ## 5. Convert the game's data
 
-These read `game\` and write `work\GameData`. Run them one at a time, in
-this order:
+**With 360convert.exe** (the easy way): put `360convert.exe` in the folder
+where you want the `cuphead360` folder (not inside the game's folder) and
+start it. It uses the `cuphead360` folder there, or makes it, asks for your
+`Cuphead.exe` in a file dialog, and converts and stages the game's data in
+`cuphead360\GameData`: the texture and sound packs, the converted objects,
+the read-ahead lists and the fonts. It needs about 36 GB free for its
+working files (`cuphead360_work` beside `cuphead360`, or the fixed drive
+with the most room; deleted at the end) and about 5 GB for the folder, and
+takes an hour or two. If it stops, start it again in the same folder: it
+goes on from the last step it finished. Its window says what it is doing,
+and `cuphead360_convert.log` beside the folder keeps it all.
+`360convert.exe --game "C:\GOG Games\Cuphead"` skips the dialog,
+`--workers N` sets how many texture processes run, `--work <folder>` puts
+the working files elsewhere, `--selftest` checks its libraries load and
+`--licenses` prints the licenses of what is inside it.
+
+360convert.exe is these tools in one program, built with
+`python tools\build_convert360.py` (PyInstaller: `python -m pip install
+pyinstaller`; it writes `dist\360convert.exe` and runs its `--selftest`).
+From source it is `python tools\convert360.py`, with the packages from
+step 1.
+
+**With the tools, one by one** (the way to convert again after changing
+them): these read `game\` and write `work\GameData`. Run them one at a
+time, in this order:
 
 ```
 python -I tools\convert_objects.py --game game --out work\GameData
@@ -152,7 +181,7 @@ python -I tools\convert_audio.py --game game --out work\GameData --bundles
 | `cluster_console` | `ctexc\`, sprite pages (4 MB at most) and `ctexmap.bin`, 13 GB | 5 min | `cluster_console: ... sprite pages` |
 | `scale_pages` | `ctexs\`, smaller pages of the atlases `console\artscale.txt` names | 4 min | `scale_pages: ... 0 errors` |
 | `simplify_meshes` | `objects\meshes.bin`: lighter meshes for the sprites with the most triangles (skies, cloud banks), drawing the same pixels | 15 min | `wrote ...meshes.bin` |
-| `convert_audio` | `audio\*.ogg`, about 4,000 clips, 390 MB | 10 min | `0 errors` |
+| `convert_audio` | `audio\*.ogg`, about 4,000 clips, 390 MB (Ogg Vorbis, libvorbis through the `soundfile` package) | 10 min | `0 errors` |
 
 The texture steps run their workers at below-normal priority, so the PC
 stays usable. When they are done you can delete `work\GameData\textures`
@@ -230,8 +259,15 @@ ls /opt/ctr360-xsdk/toolchain/bin/powerpc-xsdk-elf-gcc /opt/ctr360-xsdk/glslang/
 Back in the Windows Command Prompt, in `cuphead360`:
 
 ```
-python tools\build_console.py --stage xsdk --distro Debian
+python tools\build_console.py --stage xsdk --release --distro Debian
 ```
+
+`--release` makes the release build: the default log and nothing else. The
+development switches described under "Play" (`invincible.txt`, `env.txt`,
+`profile.txt`, `full60.txt`, `nofold.txt`, `nodecommit.txt`) and the CPU
+probes at start are left out of it; its log's first line ends with
+"release build". Without `--release` you get the development build, with
+all of them. Switching between the two compiles only two files again.
 
 It runs `console/xsdk/build.sh` in the distro, which compiles the shaders,
 the player's C and the host program, two files at a time (GCC takes over a
@@ -245,6 +281,19 @@ exist.
 
 ## 8. Put it on the USB drive
 
+**If 360convert.exe made the data**, add your build to its folder (here
+`D:\cuphead360`):
+
+```
+python tools\stage_console.py --to D:\cuphead360 --build-only
+```
+
+It copies `default.xex`, `GameData\PLAYER.DAT` and `licenses\` there and
+makes `save\`. Then copy the whole `cuphead360` folder to the USB drive's
+`Apps` folder (`E:\Apps\cuphead360`). After a later build, run the same
+command and copy `default.xex` and `GameData\PLAYER.DAT` again.
+
+**If you converted the data with the tools**, stage everything at once.
 With the USB drive as `E:`:
 
 ```
@@ -301,9 +350,9 @@ levels. The estimate is calibrated from a console run's log
 By default the game times its own phases and logs each scene's frame times,
 hitches and texture counts. Two empty files next to `default.xex` change
 that: `quiet.txt` turns the phase timing off too (only frame times and
-hitch counts stay), and `profile.txt` turns on everything (each script's
-time, a line per texture loaded and per slow frame), which costs some
-smoothness. `nolog.txt` writes nothing after the log's first line, to judge
+hitch counts stay), and `profile.txt` (a development build only) turns on
+everything (each script's time, a line per texture loaded and per slow
+frame), which costs some smoothness. `nolog.txt` writes nothing after the log's first line, to judge
 by feel what logging costs. Delete the file to go back. The log is written
 to the drive only while a loading screen is up, when the game stops for a
 moment, and when you quit, so play never waits behind it.
@@ -311,12 +360,13 @@ moment, and when you quit, so play never waits behind it.
 The run-and-gun levels run at a locked 30 frames a second, drawn at 60 (the
 console draws a frame in between, each sprite moved on by half its last
 step); the boss fights run at a real 60. `full60.txt` next to `default.xex`
-turns the locked 30 off everywhere. `locked30.txt` names more levels to run
+(a development build only) turns the locked 30 off everywhere. `locked30.txt` names more levels to run
 that way, one a line, by their scene name with or without `scene_level_`
 (for example `flying_blimp` for Hilda Berg); `#` starts a note.
 
 For playing every level through as a test, `invincible.txt` next to
-`default.xex` keeps the game's own debug invincibility on: hits and pits
+`default.xex` (a development build only) keeps the game's own debug
+invincibility on: hits and pits
 take no hearts. The log's first lines say so. Delete it for normal play.
 On the PC the same switch is the player's `--invincible 1` argument.
 
@@ -344,7 +394,7 @@ the PC host, the console, or the .NET player with `CH360_LIST_STATS=1`.
 renderer leaves out UI meshes wholly off the screen: the credits' 330 lines
 of text, a few on screen).
 
-The console takes the same switches from `env.txt` next to `default.xex`:
+A development build takes the same switches from `env.txt` next to `default.xex`:
 `NAME=VALUE` lines (`#` starts a note) added to the player's environment,
 and the log's first lines say how many. For example
 `CH360_TRACE_SPAWN=OldMan_FX_DeathPuff,Oldman_FX_Hat,Oldman_FX_Shoe`

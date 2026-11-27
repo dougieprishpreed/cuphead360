@@ -2,7 +2,10 @@
 """Stage the console build: the XEX and the converted data in one folder.
 
     stage_console.py --to <folder> [--data work/GameData] [--xex work/console/xsdk/default.xex] [--dry-run]
-                     [--workers 2]
+                     [--workers 2] [--packs <folder>] [--no-xex | --build-only]
+
+--build-only copies only your build into <folder>: default.xex, GameData/PLAYER.DAT and licenses/ (and makes save/),
+for a folder whose game data 360convert.exe (tools/convert360.py) made. --no-xex stages the data without them.
 
 Writes <folder>/default.xex, <folder>/GameData/PLAYER.DAT (the module's data
 segments, read at start: from the same build as the XEX), <folder>/GameData/{objects,fonts}, the packs
@@ -37,8 +40,9 @@ import shutil
 import struct
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PACKS = os.path.join(ROOT, "work", "console", "packs")
+# CUPHEAD360_ROOT: where console/artscale.txt and console/learned are (360convert.exe sets it to its own files).
+ROOT = os.environ.get("CUPHEAD360_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PACKS = os.path.join(ROOT, "work", "console", "packs")   # --packs sets another
 PACK_CHUNK = 256 * 1024     # console/ch360_pack.c, PACK_CHUNK
 # Bytes a pack file holds at most. xsdk's lseek takes a 32-bit off_t, so a
 # console read past 2 GB fails (the eleventh run: every texture past it drew
@@ -281,15 +285,44 @@ def copy_tree(files, dst, dry, stats):
             shutil.copy2(s, d)
 
 
-def main():
+def copy_build(xex, to):
+    """default.xex, the module's data segments (GameData/PLAYER.DAT, the XEX's own build's: build.sh copies them
+    beside it), the licenses and the save folder."""
+    pd = os.path.join(os.path.dirname(xex), "PLAYER.DAT")
+    if not os.path.exists(pd):
+        sys.exit("no PLAYER.DAT beside %s (console/xsdk/build.sh copies it from the C stage)" % xex)
+    gd = os.path.join(to, "GameData")
+    os.makedirs(gd, exist_ok=True)
+    shutil.copy2(xex, os.path.join(to, "default.xex"))
+    shutil.copy2(pd, os.path.join(gd, "PLAYER.DAT"))
+    lic = os.path.join(os.path.dirname(xex), "licenses")
+    if os.path.isdir(lic):
+        shutil.copytree(lic, os.path.join(to, "licenses"), dirs_exist_ok=True)
+    os.makedirs(os.path.join(to, "save"), exist_ok=True)
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--to", required=True)
     ap.add_argument("--data", default=os.path.join(ROOT, "work", "GameData"))
     ap.add_argument("--xex", default=os.path.join(ROOT, "work", "console", "xsdk", "default.xex"))
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--workers", type=int, default=2, help="processes compressing textures (below-normal priority)")
-    ap.add_argument("--no-xex", action="store_true", help="the data only (a PC check of the packs)")
-    a = ap.parse_args()
+    ap.add_argument("--no-xex", action="store_true", help="the data only (a PC check of the packs; 360convert.exe)")
+    ap.add_argument("--build-only", action="store_true",
+                    help="only the build: default.xex, GameData/PLAYER.DAT and licenses/ (the data is 360convert.exe's)")
+    ap.add_argument("--packs", help="where the packs are built (default work/console/packs)")
+    a = ap.parse_args(argv)
+    global PACKS
+    if a.packs:
+        PACKS = os.path.abspath(a.packs)
+    if a.build_only:
+        if not os.path.exists(a.xex):
+            sys.exit("no XEX at %s (tools/build_console.py --stage xsdk)" % a.xex)
+        if not a.dry_run:
+            copy_build(a.xex, a.to)
+        print("stage_console: the build (default.xex, GameData/PLAYER.DAT, licenses) -> %s" % a.to)
+        return 0
     for need in ("objects", "ctex", "audio"):
         if not os.path.isdir(os.path.join(a.data, need)):
             sys.exit("no %s in %s (convert_objects.py, convert_console.py, convert_audio.py)" % (need, a.data))
@@ -366,16 +399,8 @@ def main():
         os.makedirs(os.path.join(gd, "fonts"), exist_ok=True)
         shutil.copy2(arial, os.path.join(gd, "fonts", "arial.ttf"))
     if not a.dry_run and not a.no_xex:
-        shutil.copy2(a.xex, os.path.join(a.to, "default.xex"))
-        # the module's data segments, read at start: the XEX's own build's (build.sh copies them beside it)
-        pd = os.path.join(os.path.dirname(a.xex), "PLAYER.DAT")
-        if not os.path.exists(pd):
-            sys.exit("no PLAYER.DAT beside %s (console/xsdk/build.sh copies it from the C stage)" % a.xex)
-        os.makedirs(gd, exist_ok=True)
-        shutil.copy2(pd, os.path.join(gd, "PLAYER.DAT"))
-        lic = os.path.join(os.path.dirname(a.xex), "licenses")
-        if os.path.isdir(lic):
-            shutil.copytree(lic, os.path.join(a.to, "licenses"), dirs_exist_ok=True)
+        copy_build(a.xex, a.to)
+    elif not a.dry_run:
         os.makedirs(os.path.join(a.to, "save"), exist_ok=True)
     print("stage_console: %d files, %.2f GB; %d copied, %d old files removed%s -> %s" % (
         stats["files"], stats["bytes"] / 2**30, stats["copied"], removed, " (dry run)" if a.dry_run else "", a.to))

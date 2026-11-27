@@ -28,6 +28,8 @@ OUT="${CH360_XSDK_BUILD:-/opt/cuphead360-xsdk/output}"
 PLAYER="${CH360_PLAYER_C:-$ROOT/work/managed/c}"
 JOBS="${JOBS:-2}"
 TEST_NAME="${CH360_TEST_NAME:-cuphead360_test}"
+# CH360_RELEASE=1: the release build (no test switches or diagnostics past the default log; main.cpp).
+if [ "${CH360_RELEASE:-0}" = 1 ]; then RELEASE=ON; else RELEASE=OFF; fi
 if [ "${CH360_TEST64:-0}" = 1 ]; then TEST64=ON; NAME="$TEST_NAME.xex"; DAT=PLAYER_TEST.DAT; else TEST64=OFF; NAME=default.xex; DAT=PLAYER.DAT; fi
 mkdir -p "$OUT"
 for f in "$XSDK/build/libxsdk.a" "$XSDK/build/host/libxsc.so" "$VULKAN4XENON/build/libvulkan4xenon.a" "$GLSLANG" \
@@ -61,7 +63,8 @@ fi
 cmake -S "$ROOT/console/xsdk" -B "$OUT/cmake" -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE="$XSDK/cmake/xsdk.cmake" -DXSDK_TOOLCHAIN="$XSDK_TOOLCHAIN" -DCMAKE_BUILD_TYPE=Release \
   -DVULKAN4XENON="$VULKAN4XENON" -DCH360_SHADERS="$SH" -DCH360_PLAYER_C="$PLAYER" -DCH360_RUNTIME="$CH360_RUNTIME" \
-  -DCH360_GIT_COMMIT="$COMMIT" -DCH360_TEST64="$TEST64" -DCH360_TEST_NAME="$TEST_NAME" \n  -DCH360_COLD_OPTIONS="${CH360_COLD_OPTIONS:--Os}"
+  -DCH360_GIT_COMMIT="$COMMIT" -DCH360_TEST64="$TEST64" -DCH360_TEST_NAME="$TEST_NAME" -DCH360_RELEASE="$RELEASE" \
+  -DCH360_COLD_OPTIONS="${CH360_COLD_OPTIONS:--Os}"
 cmake --build "$OUT/cmake" -j"$JOBS"
 
 cp "$OUT/cmake/cuphead360.xex" "$OUT/$NAME"

@@ -1882,6 +1882,7 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
         }
     }
 #endif
+#ifndef CH360_RELEASE
     {
         /* env.txt next to the XEX (or in the PC root): NAME=VALUE lines added to the player's environment, for its
          * trace switches on the console (CH360_TRACE_SPAWN=...); '#' starts a comment. A name the list above has
@@ -1920,6 +1921,7 @@ int ch360_prepare(const char* root_dir, int argc, const char* const* argv, unsig
             }
         }
     }
+#endif
     cfg.memory_limit = (srt_u64)memory_mb * 1024 * 1024;
     cfg.stderr_sink = stderr_sink;
     if (srt_init(&cfg) != 0) {

@@ -35,14 +35,18 @@ a WSL (Linux) setup with the xSDK toolchain and vulkan4xenon. Every step,
 from installing the tools to putting the build on a USB drive, is in
 [docs/BUILDING.md](docs/BUILDING.md). In outline:
 
-1. Convert your game's files (objects, textures, sounds) with the tools in
-   `tools/`.
-2. Build the player and the console program.
-3. Stage it to your USB drive with `tools/stage_console.py`.
-4. On the console, start `default.xex` from the folder it made.
+1. Build the console program, `default.xex`, following the guide.
+2. Run **360convert.exe**: it makes a `cuphead360` folder where you run it,
+   asks for your `Cuphead.exe`, and converts the game's objects, textures and
+   sounds into that folder. It needs about 40 GB free while it works and
+   takes an hour or two.
+3. Add your build to that folder: `python tools\stage_console.py --to
+   <your cuphead360 folder> --build-only`.
+4. Copy the `cuphead360` folder to your USB drive's `Apps` folder, and on
+   the console start `default.xex` from it.
 
-The first build takes three to four hours, mostly converting the textures and
-building the Xbox 360 compiler; later builds take minutes.
+The first build takes a few hours, mostly building the Xbox 360 compiler;
+later builds take minutes.
 
 ## Controls
 

@@ -78,6 +78,13 @@ set(CH360_TEST_NAME "cuphead360_test" CACHE STRING "the test build's name: its .
 if(CH360_TEST64)
     target_compile_definitions(cuphead360 PRIVATE CH360_TEST64 CH360_TEST_NAME="${CH360_TEST_NAME}")
 endif()
+# The release build (build.sh with CH360_RELEASE=1, build_console.py --release): the default log only; the test
+# switches beside the XEX (invincible.txt, env.txt, profile.txt, nofold.txt, nodecommit.txt, full60.txt) and the CPU
+# probes are left out. Set on main.cpp and ch360_imports.c alone, so switching doesn't compile the player again.
+option(CH360_RELEASE "the release build" OFF)
+if(CH360_RELEASE)
+    set_property(SOURCE "${CONSOLE}/xsdk/main.cpp" "${CONSOLE}/ch360_imports.c" APPEND PROPERTY COMPILE_DEFINITIONS CH360_RELEASE)
+endif()
 
 target_link_libraries(cuphead360 PRIVATE ch360_player "${VULKAN4XENON}/build/libvulkan4xenon.a")
 set_property(TARGET cuphead360 APPEND PROPERTY LINK_DEPENDS "${VULKAN4XENON}/build/libvulkan4xenon.a")

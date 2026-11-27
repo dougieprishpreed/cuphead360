@@ -7,16 +7,32 @@ Writes <out>/audio/<key>.ogg for every AudioClip, where <key> is the
 converted object file's path below objects/ (slashes as "_", without
 ".chob") plus "_" and the path id: the same identity the textures use.
 UnityPy decodes each clip (FSB5 Vorbis/PCM, through its bundled FMOD) to
-WAV, and ffmpeg (on PATH) re-encodes it to Ogg Vorbis at the clip's own
-sample rate and channel count. Reads the game folder only.
+WAV, and libvorbis (through the soundfile package's libsndfile) encodes it
+to Ogg Vorbis at the clip's own sample rate and channel count: --quality 5,
+the same as ffmpeg's -q:a 5 that made the files before (sample counts the
+same, sizes within 1%). Reads the game folder only.
 """
 import argparse
+import io
 import os
-import subprocess
 import sys
 import time
 
+import soundfile
 import UnityPy
+
+# libsndfile 1.2's Vorbis encoder brings the process down when a long clip (22 s, 989,362 frames) is written in one
+# call; written in blocks it encodes the whole clip.
+BLOCK = 8192
+
+
+def encode(wav, path, quality):
+    """WAV bytes to an Ogg Vorbis file; quality as ffmpeg's -q:a (0-10): libsndfile's Vorbis quality is 1 - level."""
+    data, rate = soundfile.read(io.BytesIO(wav), dtype="float32", always_2d=True)
+    level = min(1.0, max(0.0, 1.0 - quality / 10.0))
+    with soundfile.SoundFile(path, "w", rate, data.shape[1], format="OGG", subtype="VORBIS", compression_level=level) as f:
+        for i in range(0, len(data), BLOCK):
+            f.write(data[i:i + BLOCK])
 
 
 def key_for(objects_rel, path_id):
@@ -41,11 +57,7 @@ def export(sf, rel, outdir, stats, only_missing, quality):
                 continue
             wav = next(iter(samples.values()))   # one subsound per clip in this game
             tmp = fn + ".tmp"
-            p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "wav", "-i", "pipe:0",
-                                "-c:a", "libvorbis", "-q:a", str(quality), "-f", "ogg", tmp],
-                               input=wav, capture_output=True)
-            if p.returncode != 0:
-                raise RuntimeError(p.stderr.decode(errors="replace").strip()[:200])
+            encode(wav, tmp, quality)
             os.replace(tmp, fn)
             stats["clips"] += 1
             stats["bytes"] += os.path.getsize(fn)

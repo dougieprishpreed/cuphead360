@@ -3282,6 +3282,9 @@ bool g_back_was = false;
 // ------------------------------------------------------------ the platform layer
 
 extern "C" int ch360_probe64(void (*log)(const char* line), void (*sync)(void), const char* where, int detail);
+// The CPU probes (the 64-bit high-word hazard of the early runs, settled by record_forms.py): in the development and
+// test builds, not in a release build (CH360_RELEASE).
+#ifndef CH360_RELEASE
 static void probe_line(const char* line) { logf("%s", line); }
 static void probe_sync() { flush_log(true); }
 
@@ -3305,6 +3308,7 @@ static void probe_on_thread(int hw, size_t stack, const char* where) {
     if (pthread_create(&th, &attr, probe_thread, &arg) == 0) pthread_join(th, NULL);
     pthread_attr_destroy(&attr);
 }
+#endif
 
 // The host's tallies since the last call, for the player's per-scene summaries (u32s: counts, ms x 100, fill x 100).
 extern "C" void ch360_plat_host_stats(unsigned* out, int n) {
@@ -3393,8 +3397,10 @@ extern "C" int ch360_plat_frame_begin(void) {
     ++g_frames;
     g_frames_seen = g_frames;
     if (g_frames <= 3 || g_frames == 10 || g_frames == 60 || g_frames == 300) logf("frame %u", g_frames);
+#ifndef CH360_RELEASE
     if (g_frames == 1) ch360_probe64(probe_line, probe_sync, "game thread, frame 1", 0);
     if (g_frames == 600) ch360_probe64(probe_line, probe_sync, "game thread, frame 600", 0);
+#endif
     // Back + Start held for a second quits; Back alone writes the log now.
     unsigned held = 0;
     for (uint32_t user = 0; user < 4; ++user) {
@@ -3867,7 +3873,11 @@ extern "C" int ch360_plat_memory_commit(void* p, size_t n) {
 int main() {
     FILE* fresh = fopen(CH360_LOG_PATH, "wb");
     if (fresh) fclose(fresh);
+#ifdef CH360_RELEASE
+    logf("Cuphead360 (xSDK) %s, release build", CH360_GIT_COMMIT);
+#else
     logf("Cuphead360 (xSDK) %s", CH360_GIT_COMMIT);
+#endif
     {
 #ifdef CH360_TEST64
         FILE* q = NULL;   // the test build logs whatever nolog.txt says
@@ -3884,7 +3894,10 @@ int main() {
             fclose(q);
             ch360_quiet = 1;
             logf("quiet run (quiet.txt): no timing of phases or scripts, no texture or slow-part lines");
-        } else if ((q = fopen("game:/profile.txt", "rb")) != NULL) {
+        }
+#ifndef CH360_RELEASE
+        // The development switches (a release build has none of them: the default log and the shipped behaviour).
+        else if ((q = fopen("game:/profile.txt", "rb")) != NULL) {
             fclose(q);
             ch360_verbose = 1;
             logf("profile run (profile.txt): scripts timed, texture and slow-part lines");
@@ -3909,14 +3922,17 @@ int main() {
             g_invincible = true;
             logf("invincible.txt: the player takes no damage (for playing every level through as a test)");
         }
+#endif
     }
     unsigned f, t;
     memory_mb(&f, &t);
     logf("memory at start: %u MB free of %u MB", f, t);
+#ifndef CH360_RELEASE
     // The second to fourth runs: compares right here, wrong in the game (VERIFICATION rounds 9-10).
     ch360_probe64(probe_line, probe_sync, "main thread", 1);
     probe_on_thread(0, 16u << 20, "new thread like the game's (hw 0, 16 MB stack)");
     probe_on_thread(2, 0, "new thread on hw 2");
+#endif
     flush_log(true);
     // The player's linear memory is reserved first (committed as it grows):
     // xsdk's heap takes the free address space at its first growth.
