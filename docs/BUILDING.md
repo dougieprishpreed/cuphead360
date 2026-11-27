@@ -147,7 +147,8 @@ goes on from the last step it finished. Its window says what it is doing,
 and `cuphead360_convert.log` beside the folder keeps it all.
 `360convert.exe --game "C:\GOG Games\Cuphead"` skips the dialog,
 `--workers N` sets how many texture processes run, `--work <folder>` puts
-the working files elsewhere, `--selftest` checks its libraries load and
+the working files elsewhere, `--selftest` checks its libraries load (with
+`--game`, by converting one of the game's sounds too) and
 `--licenses` prints the licenses of what is inside it.
 
 360convert.exe is these tools in one program, built with

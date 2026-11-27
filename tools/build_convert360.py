@@ -96,6 +96,9 @@ def main():
            "--paths", os.path.join(ROOT, "tools"),
            "--collect-all", "UnityPy", "--collect-all", "fmod_toolkit", "--collect-all", "pyfmodex", "--collect-all", "texture2ddecoder",
            "--collect-all", "soundfile", "--collect-all", "etcpak", "--collect-all", "tpk_ar",
+           # etcpak and astc_encoder ask archspec for the CPU as UnityPy imports them (first in the sound step):
+           # archspec reads its json/cpu files then
+           "--collect-all", "astc_encoder", "--collect-all", "archspec",
            "--add-data", os.path.join(ROOT, "console", "artscale.txt") + sep + "console",
            "--add-data", learned + sep + os.path.join("console", "learned"),
            "--add-data", note + sep + "."]

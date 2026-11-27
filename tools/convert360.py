@@ -183,10 +183,14 @@ def steps(game, work, out, workers):
     ]
 
 
-def selftest():
-    """Loads what the conversion uses, without the game: the tools, UnityPy and its FMOD, the texture decoder, numpy,
-    Pillow, LZ4, libsndfile's Vorbis encoder (a short tone to a temporary file) and the file dialog's tkinter."""
+def selftest(game=None):
+    """Loads what the conversion uses, without the game: the tools, every UnityPy module (some import texture codecs
+    that read data files as they load: etcpak and astc_encoder ask archspec about the CPU), UnityPy's FMOD, the texture
+    decoder, numpy, Pillow, LZ4, libsndfile's Vorbis encoder (a short tone to a temporary file) and the file dialog's
+    tkinter. With --game, also one of the game's sounds through the sound step's own path (UnityPy and FMOD to WAV,
+    then Ogg Vorbis to a temporary file)."""
     import importlib
+    import pkgutil
     import tempfile
     ok = True
 
@@ -230,8 +234,38 @@ def selftest():
         import lz4.block
         return "%d bytes -> %d" % (65536, len(lz4.block.compress(bytes(65536), mode="high_compression", compression=9)))
 
-    check("UnityPy", lambda: "UnityPy " + importlib.import_module("UnityPy").__version__)
+    def unitypy_modules():
+        import UnityPy
+        n = 0
+        for m in pkgutil.walk_packages(UnityPy.__path__, "UnityPy."):
+            importlib.import_module(m.name)
+            n += 1
+        return "UnityPy %s: %d modules imported" % (UnityPy.__version__, n)
+
+    def codecs():
+        import archspec.cpu
+        importlib.import_module("etcpak")
+        importlib.import_module("astc_encoder")
+        return "etcpak, astc_encoder (CPU: %s)" % archspec.cpu.host().name
+
+    def game_sound():
+        import UnityPy
+        import convert_audio
+        import soundfile
+        env = UnityPy.load(os.path.join(game, "Cuphead_Data", "resources.assets"))
+        clip = next(o for o in env.objects if o.type.name == "AudioClip").read()
+        wav = next(iter(clip.samples.values()))
+        path = os.path.join(tempfile.gettempdir(), "360convert_selftest_game.ogg")
+        convert_audio.encode(wav, path, 5)
+        frames = soundfile.info(path).frames
+        os.remove(path)
+        return "%s: %d frames decoded and encoded" % (clip.m_Name, frames)
+
+    check("UnityPy", unitypy_modules)
+    check("texture codecs", codecs)
     check("FMOD", fmod)
+    if game:
+        check("a game sound", game_sound)
     check("texture2ddecoder", dxt)
     check("numpy / Pillow", lambda: "numpy %s, Pillow %s" % (importlib.import_module("numpy").__version__,
                                                             importlib.import_module("PIL").__version__))
@@ -259,7 +293,8 @@ def main():
     ap.add_argument("--keep-work", action="store_true", help="keep the working files at the end")
     ap.add_argument("--no-pause", action="store_true", help="don't wait for Enter at the end")
     ap.add_argument("--licenses", action="store_true", help="print the licenses of the libraries inside 360convert.exe")
-    ap.add_argument("--selftest", action="store_true", help="check the libraries inside 360convert.exe load (no game needed)")
+    ap.add_argument("--selftest", action="store_true",
+                    help="check the libraries inside 360convert.exe load (no game needed; with --game, one of its sounds too)")
     a = ap.parse_args()
     pause = getattr(sys, "frozen", False) and not a.no_pause
     root = here()
@@ -271,7 +306,7 @@ def main():
     os.environ["CUPHEAD360_ROOT"] = root
     sys.path.insert(0, os.path.join(root, "tools"))
     if a.selftest:
-        return selftest()
+        return selftest(a.game)
 
     out = os.path.abspath("cuphead360")
     print("360convert: Cuphead360's game data, from your own copy of Cuphead (tested with %s)." % TESTED)
