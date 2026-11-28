@@ -12,14 +12,12 @@ installed copy.
 
 - An Xbox 360 that runs homebrew (such as with ABadAvatar).
 - Your own copy of Cuphead on Steam (version 1.3.4).
-- A USB drive formatted FAT32 with about 6 GB free, or as much room on the
-  console's hard drive.
+- About 4.5 GB free on your Xbox 360
 - A Windows PC to build it on (see below).
 
 There's no ready-made download. The console build contains the game's own
 code compiled for the Xbox 360, so you have to make it yourself from your
-own copy. A longer-term goal is a build with no game code in it, which could
-then be shared.
+own copy.
 
 ## Building and installing
 
@@ -51,18 +49,9 @@ Start** to quit to the dashboard.
 The game writes a log, `cuphead360.txt`, next to `default.xex`. Please include it, and say what you were doing, when you report a
 problem.
 
-## Acknowledgements
-
-- Studio MDHR, for Cuphead.
-- The authors of xSDK and vulkan4xenon, which make modern homebrew on the
-  Xbox 360 possible.
-- The .NET team, for NativeAOT and its LLVM and WebAssembly work.
-- The authors of w2c2, stb_vorbis, LZ4, UnityPy and texture2ddecoder.
-
 ## Keep your build to yourself
 
 Everything this project makes comes from your own copy of the game: keep it
 on your own PC and console, and don't share it. This repository holds only
 the tools, the engine and the documentation, with none of the game's code,
-art or sound. Cuphead360 is a fan project and is not affiliated with or
-endorsed by Studio MDHR.
+art or sound.
