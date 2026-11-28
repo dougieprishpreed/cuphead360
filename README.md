@@ -8,19 +8,12 @@ whole game is compiled ahead of time into native code for the Xbox 360. The
 game's textures, sounds and scenes are converted for the console from your
 installed copy.
 
-## Status
-
-**Early alpha, not ready for release.**
-
-Wait a couple of days.
-
-Tested with the Steam version of Cuphead 1.3.4 (build 9318602), with The Delicious Last Course.
-
 ## What you need
 
 - An Xbox 360 that runs homebrew (such as with ABadAvatar).
 - Your own copy of Cuphead on Steam (version 1.3.4).
-- A USB drive formatted FAT32, with about 6 GB free.
+- A USB drive formatted FAT32 with about 6 GB free, or as much room on the
+  console's hard drive.
 - A Windows PC to build it on (see below).
 
 There's no ready-made download. The console build contains the game's own
@@ -42,8 +35,8 @@ from installing the tools to putting the build on a USB drive, is in
    takes an hour or two.
 3. Add your build to that folder: `python tools\stage_console.py --to
    <your cuphead360 folder> --build-only`.
-4. Copy the `cuphead360` folder to your USB drive's `Apps` folder, and on
-   the console start `default.xex` from it.
+4. Copy the `cuphead360` folder to your USB drive's `Apps` folder (or to the
+   console's hard drive), and on the console start `default.xex` from it.
 
 The first build takes a few hours, mostly building the Xbox 360 compiler;
 later builds take minutes.
@@ -55,8 +48,7 @@ Start** to quit to the dashboard.
 
 ## Reporting problems
 
-The game writes a log, `cuphead360.txt`, next to `default.xex` on the USB
-drive. Please include it, and say what you were doing, when you report a
+The game writes a log, `cuphead360.txt`, next to `default.xex`. Please include it, and say what you were doing, when you report a
 problem.
 
 ## Acknowledgements

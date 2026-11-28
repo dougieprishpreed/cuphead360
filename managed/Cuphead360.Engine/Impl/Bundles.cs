@@ -8,12 +8,25 @@ using UObject = UnityEngine.Object;
 namespace Cuphead360.Engine
 {
     /// <summary>
-    /// Asset bundles from GameData/objects/bundles/&lt;bundle&gt;/*.chob. The
+    /// Asset bundles from GameData/objects/bundles/&lt;folder&gt;/*.chob. The
     /// game asks for StreamingAssets/AssetBundles/&lt;name&gt;; the bundle's
     /// AssetBundle object lists its assets (m_Container) as in Unity.
     /// </summary>
     public static class Bundles
     {
+        /// <summary>FATX (the console's internal drive) holds names of at most 42 characters.</summary>
+        const int MaxName = 42;
+
+        /// <summary>The converted bundle's folder: its name, or for a name over 42 characters its first 33, "_" and
+        /// the FNV-1a 32 hash of the whole name in 8 hex digits (tools/bundle_names.py, the converters' rule).</summary>
+        public static string Folder(string name)
+        {
+            if (name.Length <= MaxName) return name;
+            uint h = 0x811C9DC5u;
+            foreach (byte b in System.Text.Encoding.UTF8.GetBytes(name)) { h ^= b; h *= 0x01000193u; }
+            return name.Substring(0, MaxName - 9) + "_" + h.ToString("x8");
+        }
+
         public sealed class NBundle : NObject
         {
             public string BundleName;
@@ -36,7 +49,7 @@ namespace Cuphead360.Engine
                 Log.Line("The AssetBundle '" + name + "' can't be loaded because another AssetBundle with the same files is already loaded.");
                 return null;
             }
-            string dir = Path.Combine(AssetDb.Root, "objects", "bundles", name);
+            string dir = Path.Combine(AssetDb.Root, "objects", "bundles", Folder(name));
             if (!Directory.Exists(dir)) { AssetDb.Problem("bundle not converted: " + name); return null; }
             ChobFile main = null; ChobObject manifest = null;
             foreach (var f in Directory.GetFiles(dir, "*.chob"))
@@ -124,7 +137,7 @@ namespace Cuphead360.Engine
             loaded.Remove(b.BundleName);
             // Loaded assets stay alive unless all = true (then they are destroyed);
             // either way the next load of this bundle makes new objects.
-            string dir = Path.Combine(AssetDb.Root, "objects", "bundles", b.BundleName);
+            string dir = Path.Combine(AssetDb.Root, "objects", "bundles", Folder(b.BundleName));
             if (Directory.Exists(dir))
                 foreach (var fpath in Directory.GetFiles(dir, "*.chob"))
                 {

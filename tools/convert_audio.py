@@ -21,6 +21,8 @@ import time
 import soundfile
 import UnityPy
 
+import bundle_names
+
 # libsndfile 1.2's Vorbis encoder brings the process down when a long clip (22 s, 989,362 frames) is written in one
 # call; written in blocks it encodes the whole clip.
 BLOCK = 8192
@@ -99,7 +101,7 @@ def main():
             def walk(files):
                 for fname, sf in list(files.items()):
                     if hasattr(sf, "objects"):
-                        export(sf, "bundles/%s/%s.chob" % (bname, os.path.basename(fname)), outdir, stats, a.only_missing, a.quality)
+                        export(sf, "bundles/%s/%s.chob" % (bundle_names.folder(bname), os.path.basename(fname)), outdir, stats, a.only_missing, a.quality)
                     elif hasattr(sf, "files"):
                         walk(sf.files)
             walk(env.files)

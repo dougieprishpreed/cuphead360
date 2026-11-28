@@ -23,7 +23,12 @@ oldman_phase1 65
 # Djimmi the Great, every phase: 116-139 / 128-156 (its background ~95 MB).
 flyinggenielevel 75
 # Grim Matchstick: 85-118 / 93-124 (background ~55, dragon ~45).
+# His third phase (the three heads: reached since 220d26b; the forty-sixth run 66-90% of frames at 60 there, 89-99%
+# before) draws 125 / 135 even at 75%: the background 56 (the spire's 360 frames, dark at night, and the sky), the
+# player 26, the rain 25, the dragon 25. The background at 60% and the rain at 50% (a soft layer): about 101 at 90%.
 dragonlevel 75
+dragonlevel_bg 60
+dragonlevel_rain 50
 # The Devil: first phase 114 / 141 (devillevelp1 66, smoke 44), his hands 110 / 130 (devillevelp3 84).
 devillevelp1 75
 devillevelp3 75
@@ -46,3 +51,13 @@ world_4_spotlightsback 50
 world_4_spotlightsfront 50
 # Perilous Piers, 20-80 s in (the water): 133-145 / 149-180.
 platformingharborlevel 85
+# Chef Saltbaker (the forty-sixth run: slow throughout, 42 fps, 527 MB of pages read in one fight): first phase 93 / 105
+# (an ingredient's attack atlas ~56-83 of it), second 98 / 129 (the first phase's end 58, him 51), the move into the
+# third 38 / 131 (phase2_death alone 114), fourth 82 / 94. At 75%, and his second phase and that move at 70%: about
+# 61, 66, 69 and 56 at 90%.
+saltbaker 75
+saltbaker_phase1_end 70
+saltbaker_phase2 70
+# Rumor Honeybottoms, first phase (the forty-sixth run: 81-91% of frames at 60 there, 94-99% after, at full size; its
+# first phase read pages 4 ms a frame): 86 / 93, the level's atlas 73 of it.
+beelevel 85

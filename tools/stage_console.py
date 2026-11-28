@@ -40,6 +40,8 @@ import shutil
 import struct
 import sys
 
+import bundle_names
+
 # CUPHEAD360_ROOT: where console/artscale.txt and console/learned are (360convert.exe sets it to its own files).
 ROOT = os.environ.get("CUPHEAD360_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACKS = os.path.join(ROOT, "work", "console", "packs")   # --packs sets another
@@ -326,6 +328,12 @@ def main(argv=None):
     for need in ("objects", "ctex", "audio"):
         if not os.path.isdir(os.path.join(a.data, need)):
             sys.exit("no %s in %s (convert_objects.py, convert_console.py, convert_audio.py)" % (need, a.data))
+    # Data converted before bundle folders were kept to 42 characters (the console's hard drive): renamed in place,
+    # with the keys made from those names (packed again below) and the read-ahead lists that name them.
+    moved = bundle_names.migrate(a.data, (os.path.join(ROOT, "work", "console", "learned"),
+                                          os.path.join(ROOT, "console", "learned"), os.path.join(a.to, "learned")), a.dry_run)
+    if moved:
+        print("long bundle names shortened: %d folders, files and lists" % moved, flush=True)
     if not a.no_xex and not os.path.exists(a.xex):
         sys.exit("no XEX at %s (tools/build_console.py --stage xsdk)" % a.xex)
     stats = {"files": 0, "bytes": 0, "copied": 0}
@@ -378,6 +386,22 @@ def main(argv=None):
                 removed += 1
                 if not a.dry_run:
                     os.remove(os.path.join(gd, f))
+    # Converted objects the data no longer has (a bundle's old folder name: bundle_names.py), and their folders.
+    keep = set(os.path.normcase(rel) for _, rel in plans["objects"])
+    sobj = os.path.join(gd, "objects")
+    for dirpath, _, files in os.walk(sobj, topdown=False):
+        for f in files:
+            if os.path.normcase(os.path.relpath(os.path.join(dirpath, f), sobj)) not in keep:
+                removed += 1
+                if not a.dry_run:
+                    os.remove(os.path.join(dirpath, f))
+        if dirpath != sobj and not a.dry_run and not os.listdir(dirpath):
+            os.rmdir(dirpath)
+    # The console's internal drive (FATX) takes names of at most 42 characters: a longer one can't be copied there.
+    long_names = sorted(set(part for sub, files in plans.items() for _, rel in files
+                            for part in os.path.join(sub, rel).split(os.sep) if len(part) > 42))
+    if long_names:
+        sys.exit("names over 42 characters (the console's drive can't hold them): " + ", ".join(long_names))
     # Room for what isn't there yet (a file replaced frees its old copy's space).
     need = 0
     if not a.no_xex:

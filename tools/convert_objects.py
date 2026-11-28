@@ -48,6 +48,8 @@ import time
 
 import UnityPy
 
+import bundle_names
+
 OMIT_KEYS = {"image data", "m_StreamData", "m_AudioData", "m_Resource", "m_PlatformBlob"}
 OMIT_CLASSES = {"CGProgram"}             # replaced by the port's own shaders
 NAME_ONLY_CLASSES = {"Shader"}           # kept as {"m_Name"} so references resolve
@@ -255,7 +257,7 @@ def main():
             def walk(files):
                 for fname, sf in files.items():
                     if hasattr(sf, "objects"):
-                        convert_file(sf, os.path.join(a.out, "objects", "bundles", bname, os.path.basename(fname) + ".chob"), stats)
+                        convert_file(sf, os.path.join(a.out, "objects", "bundles", bundle_names.folder(bname), os.path.basename(fname) + ".chob"), stats)
                         stats["files"] += 1
                     elif hasattr(sf, "files"):   # a bundle: its serialized files are inside
                         walk(sf.files)

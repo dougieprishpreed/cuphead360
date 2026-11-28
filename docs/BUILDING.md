@@ -1,7 +1,7 @@
 # Building Cuphead360
 
 This guide takes you from your own copy of Cuphead to a folder on a USB drive
-that an Xbox 360 can run. Everything is built on your PC from your game's
+(or the console's hard drive) that an Xbox 360 can run. Everything is built on your PC from your game's
 files; nothing of the game is downloaded or shared. Follow the steps in
 order. Each one ends with a check, so you (or an agent working through this
 for you) know it worked before going on.
@@ -23,7 +23,8 @@ textures (about an hour and a half). Later builds take minutes.
   drive Windows keeps WSL on.
 - **Cuphead on Steam**, version 1.3.4 (build 9318602), with or without The Delicious Last
   Course, installed.
-- A USB drive formatted FAT32 with about 6 GB free.
+- A USB drive formatted FAT32 with about 6 GB free, or as much room on the
+  console's hard drive.
 - An Xbox 360 that runs homebrew (such as with ABadAvatar).
 
 Keep the folders below on a local drive, in paths without spaces (for example
@@ -308,6 +309,14 @@ changed. It also writes `AUDIOINFO.BIN` there, each sound's length read
 from its file, so the console can start long sounds without waiting for
 them to load. Then it copies what is new or changed to the drive. Saves already
 on the drive are kept.
+
+**To play from the console's hard drive**, copy the same `cuphead360` folder
+there instead (for example to `Hdd1:\Apps\cuphead360` over FTP) and start
+`default.xex` from it; the saves go in its `save\` folder. Every name in the
+folder is at most 42 characters, the longest the hard drive takes (staging
+stops if one isn't). Data converted before 2026-11-28 had eight longer folder
+names: staging renames them, and what is keyed by them, in place and packs the
+changed files again, so run the staging command once more before copying.
 
 **Check:** `E:\Apps\cuphead360` holds `default.xex`, `GameData\` (with
 `objects`, `fonts`, the `.PAK` files, `AUDIOINFO.BIN` and `PLAYER.DAT`),

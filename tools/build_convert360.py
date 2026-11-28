@@ -19,7 +19,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS = ("convert_objects", "convert_textures", "convert_console", "cluster_console", "simplify_meshes", "scale_pages",
-         "convert_audio", "stage_console", "chob")
+         "convert_audio", "stage_console", "chob", "bundle_names")
 TOP = ("UnityPy", "numpy", "Pillow", "texture2ddecoder", "lz4", "soundfile")
 
 NOTES = """360convert.exe holds Cuphead360's conversion tools (https://github.com/dougieprishpreed/cuphead360),

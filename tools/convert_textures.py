@@ -24,6 +24,8 @@ import time
 import UnityPy
 import texture2ddecoder
 
+import bundle_names
+
 
 def key_for(objects_rel, path_id):
     rel = objects_rel.replace("\\", "/")
@@ -100,7 +102,7 @@ def main():
             def walk(files):
                 for fname, sf in list(files.items()):
                     if hasattr(sf, "objects"):
-                        export(sf, "bundles/%s/%s.chob" % (bname, os.path.basename(fname)), outdir, stats, a.only_missing)
+                        export(sf, "bundles/%s/%s.chob" % (bundle_names.folder(bname), os.path.basename(fname)), outdir, stats, a.only_missing)
                     elif hasattr(sf, "files"):
                         walk(sf.files)
             walk(env.files)

@@ -722,6 +722,9 @@ namespace Cuphead360.Engine
             public float Prev;          // last frame's time, for events and exit times
             public float Start;         // the time it was entered at (a state played backwards counts its progress from there)
             public bool Fresh = true;   // entered this frame: events at its start fire
+            /// <summary>The time (clip seconds) whose events an update with no time passing fired (a state entered at
+            /// the end of an update); the next update fires those events only once time moves past it.</summary>
+            public float EdgeFired = float.NaN;
         }
 
         public sealed class LayerState
@@ -1131,7 +1134,7 @@ namespace Cuphead360.Engine
 
         void Enter(LayerState l, StatePlay p, int state, float time)
         {
-            p.State = state; p.Time = time; p.Prev = time; p.Start = time; p.Fresh = true;
+            p.State = state; p.Time = time; p.Prev = time; p.Start = time; p.Fresh = true; p.EdgeFired = float.NaN;
         }
 
         void UpdateLayer(int li, float dt)
@@ -1764,11 +1767,17 @@ namespace Cuphead360.Engine
             float scale = ClipScale(li, p.State, clip);
             float a = p.Prev * scale, b = p.Time * scale;
             if (b < a || (b == a && !p.Fresh)) return;
+            // Events exactly at a fire once: a state entered at the end of an update (a trigger's transition) fires its
+            // start's events with no time passed (b == a), and the next update starts from that same time. Fired twice,
+            // every event at a clip's start ran twice: the DLC cutscenes' ShowText showed two lines at once, then ran
+            // past the last one (IndexOutOfRange, the text left on screen), and the start's sounds played twice.
+            bool atA = !(p.EdgeFired == a);
+            p.EdgeFired = b == a ? a : float.NaN;
             bool loop = clip.Loop || st.Loop;
             if (!loop || len <= 0f)
             {
                 foreach (var e in clip.Events)
-                    if ((e.Time >= a && e.Time < b) || (p.Fresh && e.Time == a) || (!loop && b >= len && e.Time >= len && a < len)) Dispatch(e, li, p, clip, weight);
+                    if ((e.Time > a && e.Time < b) || (atA && e.Time == a && (b > a || p.Fresh)) || (!loop && b >= len && e.Time >= len && a < len)) Dispatch(e, li, p, clip, weight);
                 return;
             }
             // Looping: walk the cycles covered by [a, b).
@@ -1779,7 +1788,7 @@ namespace Cuphead360.Engine
                 float cs = (float)(cycle * len);
                 float lo = start - cs, hi = Math.Min(b - cs, len);
                 foreach (var e in clip.Events)
-                    if ((e.Time >= lo && e.Time < hi) || (p.Fresh && guard == 0 && e.Time == lo) || (hi >= len && e.Time >= len && lo < len)) Dispatch(e, li, p, clip, weight);
+                    if ((e.Time > lo && e.Time < hi) || (e.Time == lo && (hi > lo ? guard > 0 || atA : guard == 0 && atA && p.Fresh)) || (hi >= len && e.Time >= len && lo < len)) Dispatch(e, li, p, clip, weight);
                 if (b - cs <= len) break;
                 cycle++;
                 start = (float)(cycle * len);
@@ -1790,6 +1799,8 @@ namespace Cuphead360.Engine
         {
             var go = GameObject;
             if (go == null || Destroyed || !Enabled || !go.ActiveInHierarchy) return;
+            if (TraceName != null && go.Name.Contains(TraceName))
+                Log.Line($"TRACE animator {go.Name} event {e.Function} at {e.Time:0.###} of {clip.Name} (layer {li} state {p.State}, {p.Prev:0.###} -> {p.Time:0.###}{(p.Fresh ? ", entered" : "")}, weight {weight:0.##}) frame {Clock.FrameCount}");
             var ev = new AnimationEvent();
             ev.m_Time = e.Time; ev.m_FunctionName = e.Function; ev.m_StringParameter = e.Str; ev.m_FloatParameter = e.Float;
             ev.m_IntParameter = e.Int; ev.m_ObjectReferenceParameter = e.Obj; ev.m_MessageOptions = e.Options;

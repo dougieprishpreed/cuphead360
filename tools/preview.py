@@ -39,6 +39,8 @@ from PIL import Image, ImageDraw
 
 import UnityPy
 
+import bundle_names
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 capture_path = ""
 
@@ -55,8 +57,11 @@ class Textures:
         """Converted file path -> (game file to load, serialized file name inside)."""
         parts = chob_path.replace("\\", "/").split("/")
         name = parts[-1][:-5] if parts[-1].endswith(".chob") else parts[-1]
-        if parts[0] == "bundles" and len(parts) == 3:
-            return os.path.join(self.data, "StreamingAssets", "AssetBundles", parts[1]), name
+        if parts[0] == "bundles" and len(parts) == 3:   # the folder is bundle_names.folder(the bundle's name)
+            bdir = os.path.join(self.data, "StreamingAssets", "AssetBundles")
+            if not hasattr(self, "bundle_of"):
+                self.bundle_of = {bundle_names.folder(b): b for b in os.listdir(bdir)}
+            return os.path.join(bdir, self.bundle_of.get(parts[1], parts[1])), name
         for cand in (os.path.join(self.data, name), os.path.join(self.data, "Resources", name)):
             if os.path.exists(cand):
                 return cand, name
