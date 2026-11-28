@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export the game's Texture2D data as the GPU uses it (no recompression).
 
-    convert_textures.py --game <GOG Cuphead folder> --out <GameData dir> [--files a,b] [--bundles [a,b]] [--only-missing]
+    convert_textures.py --game <Cuphead folder> --out <GameData dir> [--files a,b] [--bundles [a,b]] [--only-missing]
 
 Writes <out>/textures/<key>.tex for every Texture2D, where <key> is the
 converted object file's path below objects/ (slashes as "_", without

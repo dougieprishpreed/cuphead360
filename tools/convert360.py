@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""360convert: turns your own GOG copy of Cuphead into the game data Cuphead360's Xbox 360 build reads.
+"""360convert: turns your own copy of Cuphead (Steam) into the game data Cuphead360's Xbox 360 build reads.
 
     360convert.exe                      (or: python tools/convert360.py)
-    360convert.exe --game "C:\\GOG Games\\Cuphead" [--workers N] [--work <folder>] [--keep-work]
+    360convert.exe --game "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Cuphead" [--workers N] [--work <folder>] [--keep-work]
 
 It uses (or makes) the folder "cuphead360" in the current folder, asks for your Cuphead.exe in a file dialog (or takes
 --game), converts the game's objects, textures and sounds and stages them in cuphead360\\GameData: the texture and
@@ -29,7 +29,7 @@ import time
 
 WORK_GB = 36        # the working files at their largest: decoded textures 14, halved pages 4, full-size pages 13
 OUT_GB = 5          # the staged data (the packs 3.4, objects 0.8, sounds' info, lists, fonts)
-TESTED = "Cuphead 1.3.2 from GOG, with or without The Delicious Last Course"
+TESTED = "Cuphead 1.3.4 (build 9318602) on Steam, with or without The Delicious Last Course"
 
 
 def here():
@@ -112,14 +112,14 @@ def choose_work(out_dir, wanted):
 
 
 def ask_game():
-    """The GOG Cuphead.exe, chosen in a file dialog; its folder."""
+    """Cuphead.exe, chosen in a file dialog; its folder."""
     import tkinter
     from tkinter import filedialog
     root = tkinter.Tk()
     root.withdraw()
     root.attributes("-topmost", True)
     path = filedialog.askopenfilename(
-        title="Choose Cuphead.exe in your GOG Cuphead folder",
+        title="Choose Cuphead.exe in your Cuphead folder (Steam: steamapps\\common\\Cuphead)",
         filetypes=[("Cuphead", "Cuphead.exe"), ("Programs", "*.exe"), ("All files", "*.*")])
     root.destroy()
     if not path:
@@ -287,7 +287,7 @@ def finish(code, pause):
 
 def main():
     ap = argparse.ArgumentParser(prog="360convert", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--game", help="your GOG Cuphead folder (the one holding Cuphead.exe); without it a dialog asks")
+    ap.add_argument("--game", help="your Cuphead folder (the one holding Cuphead.exe); without it a dialog asks")
     ap.add_argument("--workers", type=int, default=0, help="texture worker processes (default: from the PC's cores and memory)")
     ap.add_argument("--work", help="the folder for the working files (default: cuphead360_work beside cuphead360)")
     ap.add_argument("--keep-work", action="store_true", help="keep the working files at the end")
@@ -322,7 +322,8 @@ def main():
 
     game = a.game
     if not game:
-        print("Choose Cuphead.exe in your GOG Cuphead folder (the dialog may be behind this window)...")
+        print("Choose Cuphead.exe in your Cuphead folder (Steam: steamapps\\common\\Cuphead; the dialog may be behind this "
+              "window)...")
         game = ask_game()
         if not game:
             print("No game folder chosen; nothing was converted.")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export the game's AudioClips as Ogg Vorbis files the engine decodes.
 
-    convert_audio.py --game <GOG Cuphead folder> --out <GameData dir> [--files a,b] [--bundles] [--only-missing] [--quality Q]
+    convert_audio.py --game <Cuphead folder> --out <GameData dir> [--files a,b] [--bundles] [--only-missing] [--quality Q]
 
 Writes <out>/audio/<key>.ogg for every AudioClip, where <key> is the
 converted object file's path below objects/ (slashes as "_", without

@@ -9,7 +9,7 @@ using UObject = UnityEngine.Object;
 namespace Cuphead360.Engine
 {
     // Application, Debug logging, PlayerPrefs (port-local file, never the PC
-    // registry), Screen and SystemInfo. The port presents itself as the GOG
+    // registry), Screen and SystemInfo. The port presents itself as the
     // Windows player, so the game takes its Windows paths.
     public static partial class Icalls
     {

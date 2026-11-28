@@ -37,7 +37,6 @@
     <TrimmerRootAssembly Include="Rewired_Windows_Lib" />
     <TrimmerRootAssembly Include="Rewired_Config_Manager" />
     <TrimmerRootAssembly Include="Rewired_Config_ManagerA" />
-    <TrimmerRootAssembly Include="GalaxyCSharp" />
     <TrimmerRootAssembly Include="UnityEngine.UI" />
     <TrimmerRootAssembly Include="UnityEngine.UIModule" />
     <TrimmerRootAssembly Include="UnityEngine.Physics2DModule" />

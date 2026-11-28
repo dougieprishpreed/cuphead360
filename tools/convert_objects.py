@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Convert Cuphead's Unity serialized files into CHOB object files.
 
-    convert_objects.py --game <GOG Cuphead folder> --out <GameData dir> [--files a,b,...] [--bundles]
+    convert_objects.py --game <Cuphead folder> --out <GameData dir> [--files a,b,...] [--bundles]
 
 Each serialized file (globalgamemanagers, levelN, *.assets, and the files
 inside the StreamingAssets asset bundles with --bundles) becomes
 <out>/objects/<name>.chob holding every object as a tagged value tree:
 
   built-in classes   the fields UnityPy reads with its Unity 2017.4 class
-                     database (the GOG build has no type trees)
+                     database (the game's files have no type trees)
   MonoBehaviour      m_GameObject, m_Enabled, m_Script, m_Name, plus "_raw":
                      the script's serialized field bytes, which the engine
                      decodes against the real managed type (Unity's rules)

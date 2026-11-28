@@ -14,12 +14,12 @@ installed copy.
 
 Wait a couple of days.
 
-Tested with the GOG version of Cuphead 1.3.2, with The Delicious Last Course.
+Tested with the Steam version of Cuphead 1.3.4 (build 9318602), with The Delicious Last Course.
 
 ## What you need
 
 - An Xbox 360 that runs homebrew (such as with ABadAvatar).
-- Your own copy of Cuphead (GOG version).
+- Your own copy of Cuphead on Steam (version 1.3.4).
 - A USB drive formatted FAT32, with about 6 GB free.
 - A Windows PC to build it on (see below).
 

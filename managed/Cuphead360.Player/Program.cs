@@ -74,7 +74,7 @@ namespace Cuphead360.Player
                                 "UnityEngine.Physics2DModule", "UnityEngine.AnimationModule", "UnityEngine.AudioModule",
                                 "UnityEngine.TextRenderingModule", "UnityEngine.IMGUIModule", "UnityEngine.UIModule",
                                 "UnityEngine.JSONSerializeModule", "UnityEngine.SpriteMaskModule", "UnityEngine.PhysicsModule",
-                                "Rewired_Core", "GalaxyCSharp" };
+                                "Rewired_Core" };
             int typeFail = 0, methodFail = 0, methods = 0, types = 0;
             var reasons = new Dictionary<string, int>();
             foreach (var n in names)

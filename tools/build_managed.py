@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Build the Cuphead360 managed player from the player's own GOG Cuphead files.
+"""Build the Cuphead360 managed player from the player's own Cuphead files (Steam 1.3.4).
 
-The game's C# (Assembly-CSharp and the Unity, Rewired and Galaxy assemblies it
+The game's C# (Assembly-CSharp, its firstpass with Steamworks.NET, and the Unity and Rewired assemblies it
 uses) runs as its original IL on .NET. Unity's engine boundary - every method
 whose body lives in the native Unity player or a native library - is
 redirected into Cuphead360.Engine (managed/Cuphead360.Engine/Impl).
@@ -21,7 +21,7 @@ Stages (each can be run alone with --stage a,b,...):
   c         w2c2 -> work/managed/c/*.c (+ import audit)
 
 Usage:
-  build_managed.py [--game "<GOG Cuphead folder>"] [--stage all|...] [--jobs N]
+  build_managed.py [--game "<Cuphead folder>"] [--stage all|...] [--jobs N]
 
 Requirements: .NET 10 SDK; for wasm the wasi-sdk 29 (WASI_SDK_PATH, or
 C:\\wasi-sdk-29.0-x86_64-windows) and the dotnet-experimental NuGet feed; for c
@@ -62,7 +62,7 @@ def patcher(*args):
 def managed_dir(game):
     d = os.path.join(game, "Cuphead_Data", "Managed")
     if not os.path.exists(os.path.join(d, "Assembly-CSharp.dll")):
-        sys.exit(f"Assembly-CSharp.dll not found under {d}: pass --game <GOG Cuphead folder>")
+        sys.exit(f"Assembly-CSharp.dll not found under {d}: pass --game <Cuphead folder>")
     return d
 
 

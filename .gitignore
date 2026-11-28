@@ -1,5 +1,7 @@
 # The user's original game installation. Never commit or upload it.
 /game/
+/game_gog/
+/game2/
 
 # Local reverse-engineering output (decompiled sources, analysis dumps).
 /work/

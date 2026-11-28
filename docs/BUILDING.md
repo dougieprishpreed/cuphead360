@@ -21,7 +21,7 @@ textures (about an hour and a half). Later builds take minutes.
 - A Windows 10 or 11 PC (64-bit) with 16 GB of memory.
 - About 60 GB free on an NTFS drive for the build, and about 10 GB on the
   drive Windows keeps WSL on.
-- **Cuphead from GOG**, version 1.3.2, with or without The Delicious Last
+- **Cuphead on Steam**, version 1.3.4 (build 9318602), with or without The Delicious Last
   Course, installed.
 - A USB drive formatted FAT32 with about 6 GB free.
 - An Xbox 360 that runs homebrew (such as with ABadAvatar).
@@ -79,12 +79,12 @@ cmake --build spire360\out\logic\w2c2-build --config Release --target w2c2
 
 ## 3. Point it at your game
 
-The tools read the game from `cuphead360\game`. Link your GOG installation
+The tools read the game from `cuphead360\game`. Link your Steam installation
 there (nothing is copied, and the tools never write to it):
 
 ```
 cd /d D:\dev\cuphead360
-mklink /J game "C:\GOG Games\Cuphead"
+mklink /J game "C:\Program Files (x86)\Steam\steamapps\common\Cuphead"
 ```
 
 Use your own install folder: the one holding `Cuphead.exe` and
@@ -145,7 +145,7 @@ with the most room; deleted at the end) and about 5 GB for the folder, and
 takes an hour or two. If it stops, start it again in the same folder: it
 goes on from the last step it finished. Its window says what it is doing,
 and `cuphead360_convert.log` beside the folder keeps it all.
-`360convert.exe --game "C:\GOG Games\Cuphead"` skips the dialog,
+`360convert.exe --game "C:\Program Files (x86)\Steam\steamapps\common\Cuphead"` skips the dialog,
 `--workers N` sets how many texture processes run, `--work <folder>` puts
 the working files elsewhere, `--selftest` checks its libraries load (with
 `--game`, by converting one of the game's sounds too) and

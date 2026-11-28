@@ -71,11 +71,11 @@ namespace Cuphead360.Engine
             string[] dlls;
             try { dlls = Directory.GetFiles(AppContext.BaseDirectory, "*.dll"); } catch (Exception) { dlls = new string[0]; }
             if (!Array.Exists(dlls, d => Path.GetFileName(d).StartsWith("Rewired_Core")))
-                dlls = new[] { "Rewired_Core", "Rewired_Windows", "Rewired_Windows_Lib", "Rewired_Config_Manager", "Rewired_Config_ManagerA", "GalaxyCSharp", "Assembly-CSharp-firstpass" };
+                dlls = new[] { "Rewired_Core", "Rewired_Windows", "Rewired_Windows_Lib", "Rewired_Config_Manager", "Rewired_Config_ManagerA", "Assembly-CSharp-firstpass" };
             foreach (var dll in dlls)
             {
                 string an = Path.GetFileNameWithoutExtension(dll);
-                if (!(an.StartsWith("Rewired") || an.StartsWith("UnityEngine") || an.StartsWith("Assembly-CSharp") || an.StartsWith("Galaxy"))) continue;
+                if (!(an.StartsWith("Rewired") || an.StartsWith("UnityEngine") || an.StartsWith("Assembly-CSharp"))) continue;
                 if (seen.Add(an)) try { Walk(Assembly.Load(an)); } catch (Exception) { }
             }
             string objects = Path.Combine(gameData, "objects");
